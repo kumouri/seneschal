@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  python:
+    name: Python syntax, tests & guards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Byte-compile every tracked Python file
+        run: git ls-files '*.py' -z | xargs -0 --no-run-if-empty python -m py_compile
+
+      - name: Run unit tests
+        run: python -m unittest discover -s seneschal/scripts -p "test_*.py"
+
+      - name: UUID placeholder guard
+        run: python seneschal/scripts/check_placeholders.py
