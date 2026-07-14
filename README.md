@@ -46,3 +46,4 @@ short-lived `feature/*`, `release/*`, `hotfix/*` branches. Release tags are pref
 ---
 
 <sub>Built with care by **Ceryce** ([@kumouri](https://github.com/kumouri)) · brand purple `#8e00ff`</sub>
+
