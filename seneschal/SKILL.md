@@ -447,8 +447,9 @@ On a Dream run:
       `references/proposed-learnings.md`), stage **only** that file (never `git add -A`), and commit —
       Conventional-commit message (scope `feat(learnings):` / `chore(...)`) ending with the
       `Co-Authored-By: Claude <noreply@anthropic.com>` trailer.
-   3. `git push -u origin seneschal/dream-<date>`, then ensure a PR against `develop`:
-      `gh pr list --head seneschal/dream-<date> --state open` → if none, `gh pr create --base develop`
+   3. `git push -u origin seneschal/dream-<date>`, then ensure a PR against the **deployment branch**
+      (the branch the daemon runs from — `main` by default; `seneschald-update` pulls it after merge):
+      `gh pr list --head seneschal/dream-<date> --state open` → if none, `gh pr create --base main`
       (body ends with the `🤖 Generated with [Claude Code]` line); if one exists, the push updated it —
       reuse it.
    4. **Merge on green.** Watch CI on the PR's head commit (`gh pr checks <n> --watch`, or poll
