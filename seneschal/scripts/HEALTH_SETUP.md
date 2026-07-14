@@ -94,8 +94,9 @@ What the **CSV** zip doesn't contain — but the **JSON** zip does:
   hours of likely sleep Samsung logged as nothing.
 * **The JSON has no offset column.** Its timestamps are absolute UTC epoch-ms, correct and unambiguous, but
   to place them on the local actigram the importer joins each binning file to its CSV parent's recorded
-  `time_offset` (so travel days stay right), falling back to a self-contained US-Central DST rule
-  (`central_offset`) when a file has no CSV parent.
+  `time_offset` (so travel days stay right), falling back to the owner's timezone at that instant
+  (`tz_common.offset_minutes` — the configured `persona/identity.json` zone, else machine-local) when a
+  file has no CSV parent.
 * **Fine-grained pedometer data reaches back ~30 days.** Older days survive only as daily totals.
 * Samsung's own `bedtime_detection_delay` / `wakeup_time_detection_delay` columns are imported — Samsung's
   own account of how late it notices sleep onset/wake (median in the reference data: 16 and 22 minutes),

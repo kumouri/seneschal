@@ -73,7 +73,10 @@ graceful restart). Runtime state lives in gitignored `seneschal/state/`.
   CI enforces that any UUID in the tree is a `00000000-…` placeholder
   (`seneschal/scripts/check_placeholders.py`).
 - **Stdlib-first Python.** Sanctioned third-party deps live in `pyproject.toml` and require
-  a documented reason; everything must degrade gracefully without the venv.
+  a documented reason — today exactly two: `websockets` (Discord gateway push) and `tzdata`
+  (the pure-data IANA timezone database `zoneinfo` needs on Windows, so the owner's configured
+  timezone resolves in `tz_common`); everything must degrade gracefully without the venv
+  (gateway → REST polling; tz math → the machine-local clock).
 - **Docs stay in sync with code** — when code changes, correct the docs that describe it in
   the same change.
 

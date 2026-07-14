@@ -11,8 +11,9 @@ Telegram inbound is owned by `presence.py` (it consumes + commits the offset). T
 touch Telegram, to avoid contending with the daemon over the update offset.
 
 Times are compared as UTC instants; the brain writes reminder `due_at` as UTC ISO (e.g.
-"2026-06-29T20:00:00Z") when it interprets "remind me at 3pm" in America/Chicago. This stays
-timezone-dumb on purpose.
+"2026-06-29T20:00:00Z") when it interprets "remind me at 3pm" in the owner's timezone. This stays
+timezone-dumb on purpose (only the fire-time ack date consults the owner zone, via
+reminders_acks.local_today → tz_common).
 
 USAGE:
   python sentinel.py                                   # fire due reminders + report
@@ -320,7 +321,7 @@ def _check_reminders_locked(state_dir: str, now: datetime, fire: bool, telegram_
         return [{"kind": "reminders_error", "detail": "reminders.json is not a list"}]
 
     quiet = is_quiet(state_dir, now)
-    # Fire-time ack gate: load the durable ack ledger once and compute today's LOCAL (Chicago) date.
+    # Fire-time ack gate: load the durable ack ledger once and compute today's LOCAL (owner-tz) date.
     # An entry whose ⏰ row (or every member of a digest) was acked today is consumed here instead of
     # delivered — so a nudge staggered before the ack (or baked into a soft-digest the per-id dequeue
     # can't reach) never buzzes for something already done. Fail-open: a missing/broken ledger reads

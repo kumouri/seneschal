@@ -65,7 +65,10 @@ class TestTimezoneContract(unittest.TestCase):
 
 
 class TestCentralOffset(unittest.TestCase):
-    """The JSON per-minute export has no offset column; central_offset() supplies America/Chicago."""
+    """central_offset() is a deprecated shim over tz_common.us_central_offset_minutes now (the
+    importer's no-offset fallback is tz_common.offset_minutes, the owner's zone). These pins keep
+    the shim honest at both DST transitions — the IANA path (tzdata present) and the retained
+    hand-rolled rule (bare interpreter) must both produce them."""
 
     def test_winter_is_cst(self):
         self.assertEqual(hc.central_offset(datetime(2025, 1, 24, 12)), -360)
@@ -79,9 +82,11 @@ class TestCentralOffset(unittest.TestCase):
         self.assertEqual(hc.central_offset(datetime(2026, 3, 8, 8, 0)), -300)
 
     def test_fall_back_boundary(self):
-        # DST ends 02:00 local on the 1st Sunday of November 2025 = Nov 2 = 08:00 UTC.
-        self.assertEqual(hc.central_offset(datetime(2025, 11, 2, 7, 59)), -300)
-        self.assertEqual(hc.central_offset(datetime(2025, 11, 2, 8, 0)), -360)
+        # DST ends 02:00 local on the 1st Sunday of November 2025 = Nov 2. 02:00 there is CDT
+        # (UTC−5) → the instant is 07:00 UTC. The old per-script formula said 08:00 — one hour
+        # wrong on every fall-back day; the tz_common consolidation fixed it to match IANA.
+        self.assertEqual(hc.central_offset(datetime(2025, 11, 2, 6, 59)), -300)
+        self.assertEqual(hc.central_offset(datetime(2025, 11, 2, 7, 0)), -360)
 
     def test_epoch_ms_round_trips(self):
         self.assertEqual(hc.epoch_ms_to_utc(1747209540000), datetime(2025, 5, 14, 7, 59))

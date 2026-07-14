@@ -1,14 +1,18 @@
 # Seneschal daemon runtime environment — managed by uv (uv.lock is the source of truth).
 #
 # This repo is a Markdown skill suite; the Python here is stdlib-FIRST, not stdlib-only anymore.
-# Exactly one runtime dependency is allowed in by design: `websockets`, for the Discord gateway
-# (a persistent push connection stdlib genuinely can't do). Everything else stays stdlib — see
-# seneschal/docs/asyncio-daemon-design.md before adding anything to [project.dependencies].
+# Exactly two runtime dependencies are allowed in by design: `websockets`, for the Discord gateway
+# (a persistent push connection stdlib genuinely can't do), and `tzdata`, the pure-data IANA
+# timezone database that stdlib `zoneinfo` needs on Windows (which ships no system copy) so the
+# owner's configured timezone (persona/identity.json → tz_common) resolves. Everything else stays
+# stdlib — see seneschal/docs/asyncio-daemon-design.md before adding anything to
+# [project.dependencies].
 #
 # The venv is wired into the live daemon by seneschald-control.ps1 -Action Update (`uv sync --frozen`
 # after each ff-pull, BEFORE the graceful reload) and by run-presence.cmd (prefers
 # .venv\Scripts\python.exe when present). The daemon must keep WORKING without the venv — code that
-# imports a dependency has to degrade gracefully (e.g. the gateway falls back to REST polling).
+# imports a dependency has to degrade gracefully (the gateway falls back to REST polling; tz math
+# falls back to the machine-local clock).
 [project]
 name = "seneschal-daemon"
 version = "0.1.0"
@@ -16,6 +20,7 @@ description = "Runtime env for the seneschal presence daemon (seneschal/scripts/
 requires-python = ">=3.11"
 dependencies = [
     "websockets>=15,<17",
+    "tzdata>=2024.1",
 ]
 
 [tool.uv]

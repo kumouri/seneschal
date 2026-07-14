@@ -14,6 +14,7 @@ import os
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 
@@ -25,7 +26,7 @@ import reminders_dequeue as dq  # noqa: E402
 import sentinel as sn  # noqa: E402
 
 NOW = datetime(2026, 7, 10, 15, 0, 0, tzinfo=timezone.utc)  # a Friday mid-morning CT
-TODAY = ra.local_today(NOW)          # host-consistent "today" (CI runs UTC; the owner's host runs Chicago)
+TODAY = ra.local_today(NOW)          # host-consistent "today" (via tz_common: configured owner zone, else machine-local)
 YESTERDAY = ra.local_today(NOW - timedelta(days=1))
 RID = "00000000-0000-0000-0000-000000000002"  # a ⏰ page-id placeholder (morning walk), with dashes
 
@@ -88,6 +89,29 @@ class EntryAckedPredicate(unittest.TestCase):
         self.assertFalse(ra.entry_acked(entry, partial, TODAY))  # shoulders still open → still fires
         full = {**partial, ra.norm_key("shoulders"): TODAY}
         self.assertTrue(ra.entry_acked(entry, full, TODAY))
+
+
+class LocalTodayOwnerTz(unittest.TestCase):
+    """local_today delegates to tz_common: the configured owner zone decides the date, not the
+    machine clock — the fix for a daemon hosted outside the owner's timezone."""
+
+    def test_configured_zone_shifts_the_date(self):
+        import tz_common
+        tz_common._reset()
+        self.addCleanup(tz_common._reset)
+        # NOW = 2026-07-10T15:00Z. In a +14:00 zone the owner's calendar already reads 07-11.
+        plus14 = timezone(timedelta(hours=14))
+        with unittest.mock.patch.object(tz_common, "load_identity",
+                                        return_value={"owner": {"timezone": "Etc/GMT-14"}}), \
+                unittest.mock.patch("zoneinfo.ZoneInfo", lambda key: plus14):
+            self.assertEqual(ra.local_today(NOW), "2026-07-11")
+
+    def test_unconfigured_matches_machine_local(self):
+        import tz_common
+        tz_common._reset()
+        self.addCleanup(tz_common._reset)
+        with unittest.mock.patch.object(tz_common, "load_identity", return_value={}):
+            self.assertEqual(ra.local_today(NOW), NOW.astimezone().strftime("%Y-%m-%d"))
 
 
 class CheckRemindersAckGate(unittest.TestCase):

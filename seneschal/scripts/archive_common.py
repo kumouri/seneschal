@@ -8,9 +8,10 @@ normalized record** so the aggregator is service-agnostic — it merges records 
   * the normalized-record builder + light validation (``make_record`` / ``REQUIRED_FIELDS``),
   * the **person registry** loader (``load_people`` and its lookups) — maps a person key to per-service
     identities plus the owner's own ids, which is what makes message ``direction`` computable,
-  * timezone helpers for display (``local_dt`` / ``hhmm`` / ``local_date``) — America/Chicago via a
-    hand-rolled DST rule, because this stack runs on a tzdata-less Windows Python where
-    ``zoneinfo.ZoneInfo("America/Chicago")`` raises (same reason as ``health_common.central_offset``),
+  * timezone helpers for display (``local_dt`` / ``hhmm`` / ``local_date``) — the owner's timezone
+    via ``tz_common`` (configured ``persona/identity.json`` zone, else machine-local), plus the
+    deterministic ``UTC``/``±NNN`` test specs; the old hand-rolled Central helpers remain as
+    deprecated shims,
   * media helpers (classify / stable-name / sha1 / copy-dedup),
   * text helpers (service-message HTML → plaintext),
   * an atomic ``write_json`` (mkstemp + os.replace, mirroring ``presence_common``).
@@ -28,6 +29,8 @@ import re
 import shutil
 import tempfile
 from datetime import date, datetime, timedelta, timezone
+
+import tz_common
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATE_DIR = os.path.normpath(os.path.join(HERE, "..", "state"))
@@ -82,42 +85,30 @@ def write_json(path: str, obj) -> None:
             os.remove(tmp)
 
 
-# --------------------------------------------------------------------- timezone (America/Chicago)
+# --------------------------------------------------------------------- timezone (owner-local display)
+#
+# The timezone logic lives in tz_common now: ``auto`` follows the owner's configured IANA zone
+# (persona/identity.json → owner.timezone) and falls back to the machine-local clock, instead of
+# a hardcoded US-Central rule. The three names below are kept as thin deprecated shims because
+# tests and existing callers import them from here.
 
 def _nth_weekday(year: int, month: int, weekday: int, n: int) -> date:
-    """The ``n``-th ``weekday`` (Mon=0) of ``year``-``month`` (e.g. 2nd Sunday of March)."""
-    first = date(year, month, 1)
-    offset = (weekday - first.weekday()) % 7
-    return first + timedelta(days=offset + 7 * (n - 1))
+    """Deprecated shim — use ``tz_common._nth_weekday``. Kept for import compatibility."""
+    return tz_common._nth_weekday(year, month, weekday, n)
 
 
 def central_offset_minutes(dt_utc: datetime) -> int:
-    """US Central offset in minutes for a naive-UTC instant: −300 (CDT) or −360 (CST).
-
-    Computed from the current US rule (DST 08:00 UTC 2nd-Sun-Mar → 08:00 UTC 1st-Sun-Nov), because
-    ``zoneinfo`` is unavailable on the stock Windows Python here. Same rule as
-    ``health_common.central_offset`` — kept local so this module has no cross-script import.
-    """
-    year = dt_utc.year
-    dst_start = datetime.combine(_nth_weekday(year, 3, 6, 2), datetime.min.time()) + timedelta(hours=8)
-    dst_end = datetime.combine(_nth_weekday(year, 11, 6, 1), datetime.min.time()) + timedelta(hours=8)
-    return -300 if dst_start <= dt_utc < dst_end else -360
+    """Deprecated shim — use ``tz_common.us_central_offset_minutes`` (or, for the owner's zone
+    rather than hardcoded US-Central, ``tz_common.offset_minutes``). Behavior is unchanged:
+    −300 (CDT) or −360 (CST) for a naive-UTC instant."""
+    return tz_common.us_central_offset_minutes(dt_utc)
 
 
 def resolve_offset(ts_utc: int, tz: str = "auto") -> int:
-    """Offset in minutes to apply for display. ``auto`` = America/Chicago; ``UTC`` = 0; ``±NNN`` = fixed.
-
-    The ``UTC``/fixed forms make renderer tests deterministic regardless of host tz.
-    """
-    if tz in (None, "", "auto", "chicago", "America/Chicago"):
-        dt_utc = datetime.fromtimestamp(int(ts_utc), tz=timezone.utc).replace(tzinfo=None)
-        return central_offset_minutes(dt_utc)
-    if tz.upper() == "UTC":
-        return 0
-    try:
-        return int(tz)
-    except (TypeError, ValueError):
-        return 0
+    """Deprecated shim — use ``tz_common.resolve_offset``. Same accepted specs: ``auto`` (the
+    owner's configured timezone, else machine-local — formerly hardcoded US-Central), ``UTC`` = 0,
+    ``±NNN`` = fixed minutes; the ``UTC``/fixed forms keep renderer tests deterministic."""
+    return tz_common.resolve_offset(ts_utc, tz)
 
 
 def local_dt(ts_utc: int, tz: str = "auto") -> datetime:

@@ -15,8 +15,8 @@ key + the local date it landed, and ``check_reminders`` consults it at **fire ti
 independent, and **fail-open**: any read error means *fire the nudge* (a redundant buzz beats a missed
 Critical one). This is the "gate delivery on durable state, not session memory" fix.
 
-``acks.json`` maps ``{ "<normalized reminder_id>": "YYYY-MM-DD" }`` — the **local** (host-timezone) date
-of the most recent ack for that ⏰ row. Only *today's* acks gate; yesterday's don't (so tomorrow's re-fire
+``acks.json`` maps ``{ "<normalized reminder_id>": "YYYY-MM-DD" }`` — the **local** (owner-timezone,
+via ``tz_common``) date of the most recent ack for that ⏰ row. Only *today's* acks gate; yesterday's don't (so tomorrow's re-fire
 is unaffected), which mirrors the daily reset. Matching is dash-insensitive so a Notion page id matches
 with or without dashes, exactly like ``reminders_dequeue``.
 
@@ -31,7 +31,9 @@ import contextlib
 import json
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime
+
+import tz_common
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_STATE_DIR = os.path.normpath(os.path.join(SCRIPT_DIR, "..", "state"))
@@ -97,16 +99,15 @@ def norm_key(key) -> str:
 
 
 def local_today(now: datetime | None = None) -> str:
-    """The current **local** (the owner's host timezone) date as ``YYYY-MM-DD``.
+    """The current **owner-local** date as ``YYYY-MM-DD``, via ``tz_common``.
 
-    Accepts an aware UTC instant (as ``check_reminders`` holds) and converts to machine-local — the host
-    is set to the owner's timezone, so this is their wall-clock date. With no argument, reads the clock now.
-    Gating on the *local* date (not UTC) matches the daily reset and rule 5 (date logic on local time)."""
+    Accepts an aware UTC instant (as ``check_reminders`` holds) — naive is taken as UTC — and converts
+    to the owner's timezone (the configured identity zone when resolvable, else machine-local, which is
+    exactly the old behavior). With no argument, reads the clock now. Gating on the *local* date (not
+    UTC) matches the daily reset and rule 5 (date logic on local time)."""
     if now is None:
-        return datetime.now().astimezone().strftime("%Y-%m-%d")
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=timezone.utc)
-    return now.astimezone().strftime("%Y-%m-%d")
+        return tz_common.local_today()
+    return tz_common.to_local(now).strftime("%Y-%m-%d")
 
 
 def acks_path(state_dir: str) -> str:

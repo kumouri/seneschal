@@ -6,8 +6,9 @@ The ``/setup-persona`` wizard and the store onboarding WRITE that file; this mod
 code READS it. Consumers today:
   * ``presence.py`` — renders the warm session's grounding prompt and the scheduled SLOTS
     prompts from the assistant/owner names + the owner's timezone label at daemon startup.
-  * a future ``tz_common`` — ``owner.timezone`` (an IANA string) is the eventual source of
-    truth for date math; today all slot times stay machine-local wall clock.
+  * ``tz_common`` — ``owner.timezone`` (an IANA string) is the source of truth for date/label
+    math (local_now/local_today/offset_minutes, machine-local fallback); slot fire-times stay
+    machine-local wall clock.
 Skills read ``persona/persona.md`` instead (the wizard generates both from one interview so
 they never disagree — see ``persona/README.md``).
 

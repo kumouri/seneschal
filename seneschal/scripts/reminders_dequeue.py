@@ -93,7 +93,7 @@ def main() -> int:
                    help="exact queue-entry id to cancel (repeatable).")
     p.add_argument("--state-dir", default=DEFAULT_STATE_DIR, help="dir holding reminders.json")
     p.add_argument("--ack-date", default=None, metavar="YYYY-MM-DD",
-                   help="local ack date to record (default: today, America/Chicago). Backfill only.")
+                   help="local ack date to record (default: today in the owner's timezone). Backfill only.")
     p.add_argument("--no-ack-record", action="store_true",
                    help="cancel the nudge(s) WITHOUT recording an ack in acks.json (a rare non-ack cancel)")
     p.add_argument("--dry-run", action="store_true", help="report what would be removed; write nothing")

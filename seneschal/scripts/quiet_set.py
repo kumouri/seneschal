@@ -11,7 +11,8 @@ still comes through: **Call Me** (a phone ring) and **Critical-and-above** items
 
 Setting a quiet window is **act-low** — the assistant suppressing its own pushes, reversible, bounded.
 
-Stdlib only. Times stored as UTC ISO-8601 ``Z``. "Local" means the daemon's wall clock (America/Chicago).
+Stdlib only. Times stored as UTC ISO-8601 ``Z``. "Local" means the owner's timezone via ``tz_common``
+(the configured identity zone when resolvable, else the daemon machine's wall clock).
 
 Usage:
   python quiet_set.py --until-morning                 # hush until the next 08:00 local (Morning slot)
@@ -28,6 +29,7 @@ import json
 import sys
 from datetime import datetime, timedelta, timezone
 
+import tz_common
 from sentinel import DEFAULT_STATE_DIR, clear_quiet, load_quiet, parse_iso, set_quiet
 
 
@@ -74,8 +76,10 @@ def main() -> int:
         print(json.dumps({"ok": True, "cleared": removed}))
         return 0
 
-    # Resolve the target instant from whichever --when option was given.
-    now_local = datetime.now().astimezone()
+    # Resolve the target instant from whichever --when option was given. "Local" for the
+    # --until-local/--until-morning math is the OWNER's clock (tz_common): "hush until 08:00"
+    # means the owner's 08:00, machine-local only as the unconfigured fallback.
+    now_local = tz_common.local_now()
     if args.until:
         try:
             until = parse_iso(args.until)

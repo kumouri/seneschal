@@ -33,6 +33,7 @@ from datetime import date, datetime, timedelta
 
 from health_common import (
     CUT_HOUR, DEFAULT_DB, DEFAULT_STATE_DIR, EPISODE_GAP_MIN, connect, night_start, sleep_day)
+from identity_common import load_identity, owner_tz_label
 
 DEFAULT_OUT = os.path.join(DEFAULT_STATE_DIR, "health-dashboard.html")
 
@@ -457,7 +458,7 @@ def build(data) -> str:
 
 <h1>Sleep &amp; health</h1>
 <p class="sub">Samsung Health export <code>{_esc(export["export_id"]) if export else "—"}</code> ·
-built {datetime.now().strftime("%Y-%m-%d %H:%M")} · all times America/Chicago ·
+built {datetime.now().strftime("%Y-%m-%d %H:%M")} · all times local ({_esc(owner_tz_label(load_identity()))}) ·
 {_esc(data["start"])} → {_esc(data["end"])}</p>
 
 <div class="ctl" id="ctl">
@@ -492,9 +493,10 @@ built {datetime.now().strftime("%Y-%m-%d %H:%M")} · all times America/Chicago �
 
 <footer>
 <b>Reading the timestamps.</b> Samsung stores <code>start_time</code>/<code>end_time</code> in <b>UTC</b>
-and records the local offset separately in <code>time_offset</code>. Everything here is America/Chicago.
-Read as wall clock instead, every event would land 5–6 hours late — the size of Chicago's offset. Verified
-against the DST transitions in the data.<br>
+and records the local offset separately in <code>time_offset</code>. Everything here is local time — each
+row's recorded offset, falling back to the owner's configured timezone. Read as wall clock instead, every
+event would land hours late — the size of the local UTC offset. Verified against the DST transitions in
+the data.<br>
 <b>The green "missed" layer</b> comes from the per-minute JSON export (movement + heart rate the CSV omits):
 a stretch is flagged when activity stays below {STILL_MAX} <i>and</i> heart rate below {HR_SLEEP_MAX:.0f} bpm
 for {MISSED_MIN_RUN}+ minutes with no Samsung session — still, at sleeping heart rate, unlogged. It's a
