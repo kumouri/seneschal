@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Seneschal Call Shield manifest. The application package/namespace is set in
+  app/build.gradle.kts (namespace = "com.kumouri.seneschal"), not here.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Sync the blocklist + POST the health feed. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- Health Connect read permissions for the health feed (HealthSyncWorker).
+         READ_HEALTH_DATA_IN_BACKGROUND lets the periodic sync run without the app open;
+         without it the sync only runs while the app is foregrounded / on-demand. -->
+    <uses-permission android:name="android.permission.health.READ_SLEEP" />
+    <uses-permission android:name="android.permission.health.READ_HEART_RATE" />
+    <uses-permission android:name="android.permission.health.READ_OXYGEN_SATURATION" />
+    <uses-permission android:name="android.permission.health.READ_STEPS" />
+    <uses-permission android:name="android.permission.health.READ_HEALTH_DATA_IN_BACKGROUND" />
+
+    <!-- Presence feed (Phase 1): geofence-based location. FINE is requested in-app; BACKGROUND
+         ("all the time") is granted in Settings so geofences fire while the app is closed. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+    <!-- Activity Recognition (Phase 2): still / walking / driving, for the "don't nudge while driving" gate. -->
+    <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <!-- Discover + deep-link to the Health Connect app. -->
+    <queries>
+        <package android:name="com.google.android.apps.healthdata" />
+    </queries>
+
+    <!-- usesCleartextTraffic: the health + presence feeds POST over plain HTTP to the owner's own
+         desktop listener on the LAN/tailnet (a private IP). Without this, targetSdk 36 blocks the
+         request and the events silently buffer. The blocklist sync is HTTPS and unaffected. -->
+    <application
+        android:allowBackup="true"
+        android:usesCleartextTraffic="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.AppCompat.DayNight.NoActionBar">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- The call-screening service. MUST require BIND_SCREENING_SERVICE and declare the
+             CallScreeningService intent filter, or Android won't offer the role. -->
+        <service
+            android:name=".CallScreeningServiceImpl"
+            android:permission="android.permission.BIND_SCREENING_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.telecom.CallScreeningService" />
+            </intent-filter>
+        </service>
+
+        <!-- Health Connect opens this "why do you need my data" rationale from its permission
+             dialog. Both the pre-14 and the Android-14+ intents route to MainActivity. -->
+        <activity-alias
+            android:name=".HealthPermissionsRationale"
+            android:exported="true"
+            android:targetActivity=".MainActivity">
+            <intent-filter>
+                <action android:name="androidx.health.ACTION_SHOW_PERMISSIONS_RATIONALE" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW_PERMISSION_USAGE" />
+                <category android:name="android.intent.category.HEALTH_PERMISSIONS" />
+            </intent-filter>
+        </activity-alias>
+
+        <!-- Presence: geofence enter/exit callbacks, and re-register geofences after a reboot. -->
+        <receiver
+            android:name=".GeofenceBroadcastReceiver"
+            android:exported="false" />
+        <!-- Presence: activity-transition callbacks (still/walking/driving). -->
+        <receiver
+            android:name=".ActivityTransitionReceiver"
+            android:exported="false" />
+        <!-- Presence: Sleep API callbacks (sleep/wake). -->
+        <receiver
+            android:name=".SleepReceiver"
+            android:exported="false" />
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

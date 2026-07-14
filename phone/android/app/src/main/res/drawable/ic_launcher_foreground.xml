@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A shield (the "Call Shield") in Toxic Green (#00ff0f), within the adaptive-icon safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#00FF0F"
+        android:pathData="M54,30 L76,39 L76,58 C76,71 66,80 54,84 C42,80 32,71 32,58 L32,39 Z" />
+</vector>

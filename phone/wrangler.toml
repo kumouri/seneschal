@@ -1,0 +1,46 @@
+# Cloudflare Workers config for the AI call screener.
+# Secrets (ANTHROPIC_API_KEY, TWILIO_*, USER_CELL_E164, PUBLIC_BASE_URL) are NOT
+# here — set them in .dev.vars (local) or `wrangler secret put NAME` (deployed).
+
+name = "seneschal-screener"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Durable Object: holds one ConversationRelay WebSocket + conversation state per call.
+[[durable_objects.bindings]]
+name = "RELAY_SESSION"
+class_name = "RelaySession"
+
+# Durable Object: escalating "call me until I answer" reminder loop (storage alarm).
+[[durable_objects.bindings]]
+name = "CALL_ESCALATION"
+class_name = "CallEscalation"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RelaySession"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["CallEscalation"]
+
+# D1 (SQLite): allowlist / blocklist / call log.
+# database_id is filled in during provisioning: `wrangler d1 create call_screener`.
+[[d1_databases]]
+binding = "DB"
+database_name = "call_screener"
+database_id = ""  # filled by `wrangler d1 create call_screener` during provisioning
+
+[vars]
+GATE_PROMPT = "Thanks for calling. To cut down on spam, please press 1 to be connected."
+POST_GATE_ACTION = "converse"          # "converse" (Claude screens) | "ring_through" (gate only)
+REPUTATION_LOOKUP_ENABLED = "false"    # paid Twilio Lookup — off by default
+DAILY_BUDGET_USD = "2.00"              # 0 disables the daily budget guard
+OWNER_NAME = ""                      # e.g. "Alex"
+OWNER_NAME_SPOKEN = ""               # phonetic spelling for TTS, if the name is commonly mispronounced
+# The assistant is nameless by default ("Hi, this is Alex's assistant…") and speaks in the
+# platform's default voice. Uncomment to name it / pick a ConversationRelay voice:
+# ASSISTANT_NAME = ""                # e.g. "Robin"
+# ASSISTANT_TTS_PROVIDER = ""        # e.g. "ElevenLabs" or "Amazon"
+# ASSISTANT_VOICE_ID = ""            # a voice id valid for that provider

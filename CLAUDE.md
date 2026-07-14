@@ -34,9 +34,15 @@ seneschal/
   state/           local-first runtime cache — gitignored except README + *.example.*
 ```
 
-Still to land: `subagents/` (the delegated skills), `persona/` (default persona + wizard),
-`seneschal/store/` (pluggable backends), `phone/` (call-screener + Android app), `archons/`
-(Forge worked example).
+subagents/         morning-briefing, eod-wrap, email-triage, slack-triage, calendar-steward,
+                   notion-qa, reminders, message-archivist, journal-steward (generic core),
+                   archon-forge — the delegated skills the orchestrator dispatches to
+phone/             the voice call-screener (Cloudflare Workers + Twilio; deploys as
+                   `seneschal-screener`) + the Seneschal Call Shield Android companion app
+                   (com.kumouri.seneschal, committed Gradle project) feeding presence/health
+
+Still to land: `persona/` (default persona + wizard), `seneschal/store/` (pluggable backends),
+`archons/` (Forge worked example), Discord/SMS archive collectors.
 
 ## The daemon, briefly
 
@@ -65,8 +71,10 @@ graceful restart). Runtime state lives in gitignored `seneschal/state/`.
 ## CI
 
 `.github/workflows/ci.yml` runs on push/PR to `main` and `develop`: byte-compiles every
-tracked `.py`, runs the unittest suite under `seneschal/scripts/`, and runs the UUID
-placeholder guard. Reproduce locally:
+tracked `.py`, runs the unittest suite under `seneschal/scripts/`, checks uv.lock consistency,
+validates autonomy-config.json, and runs the UUID placeholder guard. `android.yml` builds the
+Call Shield app on `phone/android/**` changes. The phone Worker has its own npm gates
+(`cd phone && npm run typecheck && npm test`). Reproduce the Python checks locally:
 
 ```
 git ls-files '*.py' | xargs python -m py_compile
