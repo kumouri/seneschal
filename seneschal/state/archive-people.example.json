@@ -1,0 +1,17 @@
+{
+ "schema": "seneschal.archive.people/1",
+ "_comment": "Copy to archive-people.json (gitignored) and fill in real ids. `owner` is you (one entry, shared across everyone) and lets the archiver tell your messages from theirs. Each person maps a registry key -> per-service identity. Telegram: user_id + the ChatExport_* dir you exported from Telegram Desktop.",
+ "owner": {
+  "display_name": "Owner",
+  "telegram": { "user_id": "0000000000" }
+ },
+ "people": {
+  "example-person": {
+   "display_name": "Example Person",
+   "aliases": ["their_handle"],
+   "services": {
+    "telegram": { "user_id": "1234567890", "export_dir": "C:/path/to/Telegram Desktop/ChatExport_YYYY-MM-DD" }
+   }
+  }
+ }
+}

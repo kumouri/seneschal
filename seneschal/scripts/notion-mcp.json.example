@@ -1,0 +1,20 @@
+{
+  "//": "Copy to notion-mcp.json (git-ignored) and point the daemon at it with --notion-mcp (see NOTION_MCP_SETUP.md). This gives the HEADLESS presence daemon a Notion MCP with the SAME tool names the assistant's skills use (notion-fetch, notion-query-data-sources, notion-update-page, …). Prefer the user-scope `claude mcp add` path in the setup doc if you can — then you don't need this file at all.",
+
+  "//primary": "Hosted Notion MCP (same tools as the interactive connector). Requires a one-time interactive OAuth: run `claude` once in this repo with this config and complete /mcp auth; the token is cached and reused by headless daemon spawns.",
+  "mcpServers": {
+    "notion": {
+      "type": "http",
+      "url": "https://mcp.notion.com/mcp"
+    }
+  }
+
+  , "//alternative-stdio": "If you prefer a non-interactive internal-integration token instead of OAuth, replace the block above with the stdio server below and set NOTION_TOKEN in the daemon env. NOTE: this server exposes the official Notion API tool names (API-*), which differ from the assistant's skills — the hosted server above is the better match.",
+  "//mcpServersStdioExample": {
+    "notion": {
+      "command": "cmd",
+      "args": ["/c", "npx", "-y", "@notionhq/notion-mcp-server"],
+      "env": { "NOTION_TOKEN": "${NOTION_TOKEN}" }
+    }
+  }
+}
