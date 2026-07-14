@@ -1,0 +1,15 @@
+# Normalize to LF in the repo and in working trees (scripts, gradlew, and the
+# daemon all tolerate LF on Windows; CRLF working copies break gradlew on CI).
+* text=auto eol=lf
+
+# Windows-native script types genuinely need CRLF
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.vbs text eol=crlf
+
+# Binaries
+*.jar binary
+*.png binary
+*.jpg binary
+*.webp binary
+*.zip binary
