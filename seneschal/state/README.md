@@ -44,7 +44,7 @@ carry-over); this directory is the cheap local cache the no-LLM sentinel and the
 | `presence-automations.json` | hand-edited (seed `presence-automations.example.json`) | **Phase 5** config — the owner's context-edge → Home Assistant automations for `scripts/presence_actions.py`. Each has an `on` trigger + a `call`; `approved:true` fires act-low, else draft-and-hold; `failsafe:true` stays ask-high always. **Inert until HA is stood up** (`ha.env`) and the daemon hook is enabled — see `../scripts/HA_SETUP.md`. |
 | `telegram-inbox.json` | — | **Legacy/unused.** Old sentinel inbox-stash; the presence daemon consumes Telegram directly now. |
 | `archive-people.json` | hand-edited (seed `archive-people.example.json`) | **Person registry** for the message archiver: person key → per-service identity (e.g. Telegram `user_id` + `export_dir`) + the owner's own ids (used to compute message direction). Read by `archive_common.load_people`. Schema below. |
-| `archives/<person>/` | `telegram_ingest.py` / `archive_aggregate.py` | **Per-person cross-service conversation archive** — `raw/` (per-service source stores/pointers), `normalized/<service>.json`, a unified `media/`, and the rendered `conversation.{json,md,html}`. Private conversation content + bulk media; **no seed**. Layout below. Overridable via `ARCHIVE_OUT_DIR`. |
+| `archives/<person>/` | `telegram_ingest.py` / `discord_export_ingest.py` / `sms_ingest.py` / `archive_aggregate.py` | **Per-person cross-service conversation archive** — `raw/` (per-service source stores/pointers), `normalized/<service>.json`, a unified `media/`, and the rendered `conversation.{json,md,html}`. Private conversation content + bulk media; **no seed**. Layout below. Overridable via `ARCHIVE_OUT_DIR`. |
 
 ## `reminders.json` schema
 
@@ -310,19 +310,28 @@ entry, shared across everyone — it's what lets the archiver compute message `d
   "schema": "seneschal.archive.people/1",
   "owner": {
     "display_name": "Owner",
-    "telegram": { "user_id": "1000000001" }
+    "telegram": { "user_id": "1000000001" },
+    "discord": { "user_id": "999888777666555444" }
   },
   "people": {
     "alex": {
       "display_name": "Alex",
       "aliases": ["their_handle", "ALEX"],
       "services": {
-        "telegram": { "user_id": "2000000002", "export_dir": "C:/…/ChatExport_YYYY-MM-DD" }
+        "telegram": { "user_id": "2000000002", "export_dir": "C:/…/ChatExport_YYYY-MM-DD" },
+        "discord": { "user_id": "333444555666777888", "channel_ids": ["111222333444555666"],
+                     "package_dir": "C:/…/discord-package" },
+        "sms": { "numbers": ["+15550000001"], "xml_file": "C:/…/sms-YYYYMMDDHHMMSS.xml" }
       }
     }
   }
 }
 ```
+
+Per-service identity fields: **telegram** `user_id` + `export_dir`; **discord** `user_id` (matched
+against DM `recipients`) and/or explicit `channel_ids`, optional `package_dir` (the extracted data
+package); **sms** `numbers` (matched by last-10-digits), optional `xml_file` (the SMS Backup &
+Restore export).
 
 Each archived person's output tree (all gitignored; `ARCHIVE_OUT_DIR` overrides the root):
 
