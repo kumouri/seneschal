@@ -40,9 +40,12 @@ subagents/         morning-briefing, eod-wrap, email-triage, slack-triage, calen
 phone/             the voice call-screener (Cloudflare Workers + Twilio; deploys as
                    `seneschal-screener`) + the Seneschal Call Shield Android companion app
                    (com.kumouri.seneschal, committed Gradle project) feeding presence/health
+archons/           Archon staff data (Forge mode) — the shipped `proteus/` job-application
+                   example (profile.example.json + stdlib tools); real needs/stables/profiles
+                   are gitignored on installs
 
 Still to land: `persona/` (default persona + wizard), `seneschal/store/` (pluggable backends),
-`archons/` (Forge worked example), Discord/SMS archive collectors.
+Discord/SMS archive collectors.
 
 ## The daemon, briefly
 
