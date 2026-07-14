@@ -1,0 +1,24 @@
+{
+  "_doc": [
+    "Copy to seneschal/store/config.json (gitignored) — or let /setup-store write it.",
+    "active: which backend the assistant uses. backends: per-backend connection details.",
+    "domains: RESERVED for future per-domain federation (leave empty).",
+    "Paths forward-slash; ~ is expanded by readers."
+  ],
+  "version": 1,
+  "active": "markdown",
+  "backends": {
+    "notion": {
+      "mcp_config": "seneschal/store/notion/mcp.json"
+    },
+    "obsidian": {
+      "vault_path": "C:/Users/you/Documents/Vault",
+      "subfolder": "Seneschal",
+      "search_whole_vault": false
+    },
+    "markdown": {
+      "root_path": "~/seneschal-data"
+    }
+  },
+  "domains": {}
+}
