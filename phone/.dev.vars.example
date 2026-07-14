@@ -1,0 +1,21 @@
+# Copy to `.dev.vars` (gitignored) and fill in real values for `wrangler dev`.
+# In production these are SECRETS — set each with `wrangler secret put NAME`.
+
+ANTHROPIC_API_KEY=sk-ant-xxxxxxxx
+TWILIO_ACCOUNT_SID=ACxxxxxxxx
+TWILIO_AUTH_TOKEN=xxxxxxxx
+
+# The Twilio voice number callers reach (the screening front door), E.164.
+TWILIO_NUMBER_E164=+15555550123
+
+# Where legitimate, screened calls get bridged — your real cell, E.164.
+USER_CELL_E164=+15555550100
+
+# Public https base URL of this Worker / dev tunnel (no trailing slash).
+PUBLIC_BASE_URL=https://your-tunnel.example.com
+
+# Optional persona overrides (see src/persona.ts). Nameless + platform default
+# voice when unset; the setup wizard fills these from your persona.
+#ASSISTANT_NAME=Robin
+#ASSISTANT_TTS_PROVIDER=ElevenLabs
+#ASSISTANT_VOICE_ID=your-voice-id

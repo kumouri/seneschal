@@ -1,0 +1,28 @@
+# dependencies
+node_modules/
+
+# local secrets — NEVER commit
+.dev.vars
+
+# wrangler / build artifacts
+.wrangler/
+dist/
+coverage/
+
+# android build artifacts (the app source lives in android/; build output does not)
+android/**/build/
+android/**/.gradle/
+android/**/.idea/
+android/**/local.properties
+android/**/*.apk
+android/**/*.keystore
+android/**/*.jks
+
+# os / editor
+.DS_Store
+Thumbs.db
+*.log
+
+# NOTE: package-lock.json IS committed (CI uses `npm ci`). If a local
+# `npm install` injects a spurious "most-capable-agent" file: dependency,
+# scrub it before committing — see docs/runbook.md.

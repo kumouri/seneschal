@@ -7,7 +7,7 @@ not here; this script only needs the Worker's public URL and the bearer secret. 
 (urllib). Sibling of push_sms.py.
 
 CREDENTIALS — never hard-coded. Provide via environment or an --env-file (KEY=VALUE lines):
-  PUSH_CALL_URL      full endpoint URL, e.g. https://ai-call-screener.<subdomain>.workers.dev/push-call
+  PUSH_CALL_URL      full endpoint URL, e.g. https://seneschal-screener.<subdomain>.workers.dev/push-call
   PUSH_CALL_SECRET   the bearer secret (matches `wrangler secret put PUSH_CALL_SECRET` on the Worker)
   PUSH_CALL_TO       optional recipient E.164; omit to let the Worker default to USER_CELL_E164
 
