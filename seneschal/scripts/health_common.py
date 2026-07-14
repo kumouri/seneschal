@@ -39,6 +39,8 @@ import sqlite3
 import zipfile
 from datetime import date, datetime, timedelta
 
+import tz_common
+
 DEFAULT_STATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "state")
 DEFAULT_DB = os.path.join(DEFAULT_STATE_DIR, "health.db")
 
@@ -90,26 +92,17 @@ def parse_offset(value: str) -> int:
 
 
 def _nth_weekday(year: int, month: int, weekday: int, n: int) -> date:
-    """The ``n``-th ``weekday`` (Mon=0) of ``year``-``month`` — e.g. 2nd Sunday of March."""
-    first = date(year, month, 1)
-    offset = (weekday - first.weekday()) % 7
-    return first + timedelta(days=offset + 7 * (n - 1))
+    """Deprecated shim — use ``tz_common._nth_weekday``. Kept for import compatibility."""
+    return tz_common._nth_weekday(year, month, weekday, n)
 
 
 def central_offset(utc: datetime) -> int:
-    """US Central offset in minutes for a naive-**UTC** instant: −300 (CDT) or −360 (CST).
-
-    The per-minute JSON export ships absolute epoch-ms (UTC) with **no** ``time_offset`` column, and this
-    machine has no system tz database (``zoneinfo`` is unavailable on the stock Windows Python here). So we
-    compute America/Chicago's offset directly from the current US rule: DST runs 08:00 UTC on the 2nd
-    Sunday of March through 08:00 UTC on the 1st Sunday of November (the transitions happen at 02:00 *local*,
-    which is 08:00 UTC on the day before/of). Verified against every distinct offset in the CSV export,
-    which *does* carry ``time_offset``. Fine for 2007-onward; predates none of the data seen so far.
-    """
-    year = utc.year
-    dst_start = datetime.combine(_nth_weekday(year, 3, 6, 2), datetime.min.time()) + timedelta(hours=8)
-    dst_end = datetime.combine(_nth_weekday(year, 11, 6, 1), datetime.min.time()) + timedelta(hours=8)
-    return -300 if dst_start <= utc < dst_end else -360
+    """Deprecated shim — use ``tz_common``: ``offset_minutes`` for the owner's configured zone
+    (what the importer's no-offset fallback uses now) or ``us_central_offset_minutes`` for
+    explicit US-Central. Behavior is unchanged: −300 (CDT) or −360 (CST) for a naive-**UTC**
+    instant, from real IANA data when tzdata is present, else the retained hand-rolled current-US
+    rule (verified against every distinct ``time_offset`` in the reference CSV export)."""
+    return tz_common.us_central_offset_minutes(utc)
 
 
 def epoch_ms_to_utc(ms: int) -> datetime:

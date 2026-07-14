@@ -30,8 +30,10 @@ migration cost twice.
 
 ## Non-goals
 
-- **No framework adoption** (no `discord.py`, no `aiohttp`). One small dependency — `websockets` — for
-  the one thing stdlib truly can't do. Everything else stays stdlib.
+- **No framework adoption** (no `discord.py`, no `aiohttp`). Two small dependencies — `websockets`, for
+  the one thing stdlib truly can't do, and `tzdata` (added later, pure IANA timezone *data* with no code:
+  Windows ships none and `zoneinfo` needs it so `tz_common` can resolve the owner's configured timezone).
+  Everything else stays stdlib.
 - **No rewrite of the channel helper library.** `sentinel.py`'s helpers (`send_telegram`, `poll_telegram`,
   `send_discord`, `send_call`, `check_reminders`, …) are subprocess-based, battle-tested, and stay
   byte-identical. The async core calls them via `asyncio.to_thread`.
@@ -119,8 +121,8 @@ pipe quirks.
 
 ## Dependencies without breaking Path A
 
-The repo gains `pyproject.toml` + `uv.lock` (uv on the host) with exactly one runtime dependency:
-`websockets`. `.venv/` is gitignored.
+The repo gains `pyproject.toml` + `uv.lock` (uv on the host) with the sanctioned runtime dependencies —
+`websockets` at this design's writing, joined later by `tzdata` (see Non-goals). `.venv/` is gitignored.
 
 - **`seneschald-control.ps1 -Action Update`** (the 10-min merge detector) gains one step: after a
   successful `git pull --ff-only`, run `uv sync --frozen`; request the graceful restart **only if the

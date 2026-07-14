@@ -213,7 +213,8 @@ def main() -> int:
     p.add_argument("--out-dir", help="default <ARCHIVE_OUT_DIR>/<person>/")
     p.add_argument("--formats", default="json,md,html")
     p.add_argument("--no-copy-media", action="store_true")
-    p.add_argument("--tz", default="auto", help="auto (Chicago) | UTC | ±minutes")
+    p.add_argument("--tz", default="auto",
+                   help="auto (the owner's configured timezone, else machine-local) | UTC | ±minutes")
     p.add_argument("--env-file")
     args = p.parse_args()
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for archive_common: schema, registry, timezone (Central DST), media, text. Stdlib only."""
+"""Unit tests for archive_common: schema, registry, timezone (tz_common shims), media, text. Stdlib only."""
 from __future__ import annotations
 
 import os
@@ -59,13 +59,29 @@ class TestRegistry(unittest.TestCase):
 
 
 class TestTimezone(unittest.TestCase):
-    def test_central_dst_rule(self):
-        # epoch 1770159199 = 2026-02-03T22:53:19Z (winter) → Chicago CST (−6) → 16:53
-        self.assertEqual(ac.hhmm(1770159199, "auto"), "16:53")
-        self.assertEqual(ac.resolve_offset(1770159199, "auto"), -360)
+    def test_central_dst_rule_explicit_spec(self):
+        # epoch 1770159199 = 2026-02-03T22:53:19Z (winter) → Chicago CST (−6) → 16:53.
+        # Spec'd EXPLICITLY (not "auto") so the pin is host-independent: "auto" now follows the
+        # owner's configured timezone (else machine-local) via tz_common instead of hardcoded
+        # US-Central; the explicit Chicago spec stays deterministic with or without tzdata.
+        self.assertEqual(ac.hhmm(1770159199, "America/Chicago"), "16:53")
+        self.assertEqual(ac.resolve_offset(1770159199, "chicago"), -360)
         # a July instant is CDT (−5)
         july = 1783000000  # 2026-07-01ish
-        self.assertEqual(ac.resolve_offset(july, "auto"), -300)
+        self.assertEqual(ac.resolve_offset(july, "America/Chicago"), -300)
+
+    def test_auto_follows_owner_tz(self):
+        # The deprecated shim and tz_common must agree on "auto" — whatever this host's
+        # configuration is (configured identity zone, else machine-local).
+        import tz_common
+        self.assertEqual(ac.resolve_offset(1770159199, "auto"), tz_common.offset_minutes(1770159199))
+        self.assertEqual(ac.resolve_offset(1770159199, None), ac.resolve_offset(1770159199, ""))
+
+    def test_central_shim_still_answers(self):
+        # central_offset_minutes stays import-compatible and pins the same DST rule as before.
+        from datetime import datetime
+        self.assertEqual(ac.central_offset_minutes(datetime(2026, 2, 3, 22, 53, 19)), -360)
+        self.assertEqual(ac.central_offset_minutes(datetime(2026, 7, 1, 12, 0)), -300)
 
     def test_utc_and_fixed(self):
         self.assertEqual(ac.hhmm(1770159199, "UTC"), "22:53")

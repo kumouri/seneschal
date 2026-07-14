@@ -240,13 +240,12 @@ def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def chicago_tz():
-    """America/Chicago if the IANA db is available (may be absent on bare Windows), else None."""
-    try:
-        from zoneinfo import ZoneInfo  # noqa: PLC0415
-        return ZoneInfo("America/Chicago")
-    except Exception:  # noqa: BLE001
-        return None
+def owner_zone():
+    """The owner's timezone for date/label math, via ``tz_common``: the configured identity zone
+    when resolvable (tzdata rides the uv venv), else the machine-local tzinfo. Replaces the old
+    hardcoded ``chicago_tz()`` helper — always returns a usable tzinfo, never None."""
+    import tz_common  # noqa: PLC0415 — lazy, mirroring the old helper's lazy zoneinfo import
+    return tz_common.owner_tz()
 
 
 def rfc3339(dt: datetime) -> str:

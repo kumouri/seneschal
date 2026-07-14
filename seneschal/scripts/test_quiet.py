@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 
+import quiet_set as qs  # noqa: E402
 import sentinel as sn  # noqa: E402
 
 NOW = datetime(2026, 7, 8, 4, 0, 0, tzinfo=timezone.utc)  # 23:00 CT — the old late-night-buzz hour
@@ -62,6 +63,29 @@ class PierceRuleUnit(unittest.TestCase):
         self.assertTrue(sn.entry_pierces_quiet({"channel": "call"}))
         self.assertTrue(sn.entry_pierces_quiet({"channel": "telegram", "escalate": True}))
         self.assertTrue(sn.entry_pierces_quiet({"channel": "telegram", "pierce_quiet": True}))
+
+
+class NextLocalMath(unittest.TestCase):
+    """quiet_set's until-morning target math. Pure over whatever aware 'now' it's handed — since
+    the tz migration that now is tz_common.local_now() (the OWNER's clock, machine-local only as
+    the unconfigured fallback), so 'hush until 08:00' means the owner's 08:00."""
+
+    OWNER_TZ = timezone(timedelta(hours=-5))  # a CDT-like owner clock, fixed for determinism
+
+    def test_future_time_lands_today(self):
+        now = datetime(2026, 7, 8, 6, 0, tzinfo=self.OWNER_TZ)
+        target = qs._next_local(8, 0, now)
+        self.assertEqual((target.year, target.month, target.day, target.hour, target.minute),
+                         (2026, 7, 8, 8, 0))
+        self.assertIs(target.tzinfo, now.tzinfo)  # stays on the owner's clock
+
+    def test_past_time_rolls_to_tomorrow(self):
+        now = datetime(2026, 7, 8, 9, 0, tzinfo=self.OWNER_TZ)
+        self.assertEqual(qs._next_local(8, 0, now).day, 9)
+
+    def test_exactly_now_rolls_to_tomorrow(self):
+        now = datetime(2026, 7, 8, 8, 0, tzinfo=self.OWNER_TZ)
+        self.assertEqual(qs._next_local(8, 0, now).day, 9)  # <= now → never a zero-length window
 
 
 class CheckRemindersGate(unittest.TestCase):

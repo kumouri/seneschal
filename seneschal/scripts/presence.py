@@ -71,6 +71,14 @@ except ImportError:  # pragma: no cover — behave exactly like an unconfigured 
     def _identity_get(identity, section, key):  # type: ignore[misc]
         return None
 
+# Owner-timezone plumbing (tz_common: configured identity zone → machine-local fallback).
+# Guarded like identity_common above: without it, local_now/local_stamp keep their original
+# pure machine-local behavior, and the daemon still boots.
+try:
+    import tz_common as _tz_common
+except ImportError:  # pragma: no cover — behave exactly like the pre-tz_common daemon
+    _tz_common = None
+
 from sentinel import (  # shared helpers — sentinel is now a helper library
     DEFAULT_STATE_DIR,
     DEFAULT_TELEGRAM_ENV,
@@ -166,11 +174,14 @@ def child_env() -> dict:
 
 
 def local_now() -> datetime:
-    """Machine-local wall clock as an aware datetime. The machine is assumed to be set to the
-    owner's timezone, so this IS the owner's local time (startup logs a warning via
-    warn_tz_mismatch when identity.owner.timezone disagrees). Windows ships no zoneinfo db, so we
-    lean on the OS local tz via astimezone() rather than ZoneInfo (which would need the tzdata
-    package)."""
+    """The owner's current local time as an aware datetime, via tz_common: the configured
+    identity.owner.timezone when it resolves (tzdata ships in the uv venv now), else the
+    machine-local wall clock — the same fallback contract this function has always had (an
+    unconfigured or venv-less install behaves identically to before; startup logs a warning via
+    warn_tz_mismatch when the configured zone and the machine clock disagree). Date/label logic
+    only: slot fire-times stay machine-local (see SLOTS_TEMPLATE / maybe_run_slots)."""
+    if _tz_common is not None:
+        return _tz_common.local_now()
     return datetime.now().astimezone()
 
 
@@ -178,7 +189,8 @@ def local_stamp() -> str:
     """Authoritative local-time stamp for prompts, e.g. 'Friday 2026-07-03 12:30 Central Daylight Time'.
     Every spawned claude MUST base 'today'/'yesterday' on this instead of inferring the date — that
     inference drifts a day forward off a UTC clock (rule 5), the classic off-by-one 'yesterday'
-    bug. Handed in explicitly so no run ever has to guess what 'now' is."""
+    bug. Handed in explicitly so no run ever has to guess what 'now' is. Rendered in the owner's
+    timezone via local_now() (machine-local when unconfigured/unresolvable)."""
     return local_now().strftime("%A %Y-%m-%d %H:%M %Z")
 
 # The warm session's first-turn grounding. Two token vocabularies live here:
@@ -276,8 +288,9 @@ def warn_tz_mismatch(identity, log) -> None:
     """Best-effort startup check: if identity.owner.timezone is set AND resolvable on this
     machine, compare its current UTC offset to the machine-local one and log ONE warning when
     they differ — slot times and reminder math run machine-local, so a mismatch means nudges
-    land on the machine's clock, not the owner's. Windows ships no tz database (the tzdata
-    package is a later phase), so an unresolvable zone skips silently. Never raises."""
+    land on the machine's clock, not the owner's (date/label math DOES follow the owner zone,
+    via tz_common). The tzdata package rides the uv venv; on a bare interpreter an unresolvable
+    zone skips silently. Never raises."""
     tz_name = _identity_get(identity, "owner", "timezone")
     if not tz_name:
         return
@@ -1421,8 +1434,9 @@ def main() -> int:
         log(f"Discord wired (gateway push, REST fallback): {args.discord_env}")
 
     # One-line heads-up when the configured owner timezone and the machine clock disagree
-    # (slot times + reminder math fire machine-local). Best-effort: skips silently when
-    # zoneinfo can't resolve (no tzdata on Windows yet — a later phase adds it).
+    # (slot times + reminder math fire machine-local; date/label math follows the owner zone
+    # via tz_common). Best-effort: skips silently when zoneinfo can't resolve (tzdata ships in
+    # the uv venv; a bare interpreter without it just skips).
     warn_tz_mismatch(IDENTITY, log)
 
     stale_sec = max(args.poll_timeout * 3, 90)

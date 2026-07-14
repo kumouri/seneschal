@@ -31,14 +31,12 @@ import sys
 import zipfile
 from datetime import datetime, timezone
 
-import json
-
+import tz_common
 from health_common import (
     DEFAULT_DB,
     MIN_SESSION_MIN,
     SLEEP_STAGES,
     SamsungExportError,
-    central_offset,
     col,
     connect,
     day_time_to_date,
@@ -240,7 +238,7 @@ def _uuid_of(json_name: str) -> str:
 
 def _offset_map(csv_zf, table_key: str, prefix: str) -> dict[str, int]:
     """uuid → recorded ``time_offset`` (minutes) from a CSV table, so per-minute rows get the *true*
-    offset (incl. travel days), not just the Central-time approximation."""
+    offset (incl. travel days), not just the owner-timezone approximation."""
     out: dict[str, int] = {}
     try:
         for r in open_table(csv_zf, table_key):
@@ -276,7 +274,7 @@ def _import_movement(conn, json_zf, offsets) -> int:
             utc = epoch_ms_to_utc(start)
             off = offsets.get(uu)
             if off is None:
-                off = central_offset(utc)
+                off = tz_common.offset_minutes(utc)
             local = to_local(utc, off)
             batch.append((uu, _iso(utc), off, sleep_day(local).isoformat(), num(b.get("activity_level"))))
         total += 1
@@ -304,7 +302,7 @@ def _import_hr_minute(conn, json_zf, offsets) -> int:
             utc = epoch_ms_to_utc(start)
             off = offsets.get(uu)
             if off is None:
-                off = central_offset(utc)
+                off = tz_common.offset_minutes(utc)
             local = to_local(utc, off)
             batch.append((uu, _iso(utc), off, sleep_day(local).isoformat(), local.date().isoformat(),
                           num(b.get("heart_rate")), num(b.get("heart_rate_min")), num(b.get("heart_rate_max"))))
@@ -317,8 +315,8 @@ def _import_hr_minute(conn, json_zf, offsets) -> int:
 
 def import_jsons(conn, json_path: str, csv_path: str | None = None, verbose: bool = True) -> dict:
     """Import the per-minute JSON export. ``csv_path`` (the paired samsunghealth_*.zip) supplies the true
-    per-session offsets; without it we fall back to the Central-time rule (fine unless the owner was travelling).
-    Returns row counts per table."""
+    per-session offsets; without it we fall back to the owner's timezone at that instant
+    (``tz_common.offset_minutes`` — fine unless the owner was travelling). Returns row counts per table."""
     offsets: dict[str, int] = {}
     if csv_path:
         with zipfile.ZipFile(csv_path) as czf:
