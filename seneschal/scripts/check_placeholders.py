@@ -24,6 +24,9 @@ ALLOWLIST: set[str] = set()
 # Binary or generated files that legitimately contain arbitrary hex runs.
 SKIP_SUFFIXES = {".jar", ".png", ".jpg", ".jpeg", ".gif", ".ico", ".zip", ".webp"}
 
+# Files whose UUID-shaped strings are deliberately synthetic (this guard's own tests).
+SKIP_PATHS = {"seneschal/scripts/test_check_placeholders.py"}
+
 HYPHENATED = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
@@ -45,7 +48,7 @@ def main() -> int:
     )
     bad = []
     for rel in out.stdout.decode("utf-8", "replace").split("\0"):
-        if not rel or Path(rel).suffix.lower() in SKIP_SUFFIXES:
+        if not rel or rel in SKIP_PATHS or Path(rel).suffix.lower() in SKIP_SUFFIXES:
             continue
         try:
             text = (root / rel).read_text(encoding="utf-8")
