@@ -2,15 +2,17 @@
 name: message-archivist
 description: >-
   The assistant's Archivist. Builds a durable, readable archive of the owner's full conversation with
-  one person across every service — a Telegram Desktop export today, Discord and SMS collectors landing
-  next — merged onto one timestamp-ordered timeline with all media pulled local. Emits a readable
-  transcript (conversation.md / .html) + machine-readable conversation.json per person. Use for "archive
+  one person across every service — a Telegram Desktop export, the official Discord data package (the
+  owner's own half only), and an SMS Backup & Restore XML export today — merged onto one
+  timestamp-ordered timeline with all media pulled local. Emits a readable transcript
+  (conversation.md / .html) + machine-readable conversation.json per person. Use for "archive
   my chat with X", "save my conversation with X", "build a transcript with Alex", "merge my message
   history with X", or "re-run the archive". Delegated to by the seneschal orchestrator (Archive mode).
 compatibility: >-
   Requires the archiver scripts under ../../seneschal/scripts (archive_common.py, telegram_ingest.py,
-  archive_aggregate.py). Telegram needs a manual Telegram Desktop JSON export. Reads the person registry
-  (seneschal/state/archive-people.json). Stdlib only.
+  discord_export_ingest.py, sms_ingest.py, archive_aggregate.py). Every collector reads a manual
+  offline export (Telegram Desktop JSON export; Discord data package; SMS Backup & Restore XML).
+  Reads the person registry (seneschal/state/archive-people.json). Stdlib only.
 ---
 
 # Message Archivist (Seneschal · Archive mode)
@@ -32,11 +34,27 @@ normalized files by timestamp into a single cross-service timeline and renders i
 | Service | Collector | Status |
 |---------|-----------|--------|
 | Telegram | `telegram_ingest.py` (Telegram Desktop JSON export) | ✅ shipped |
-| Discord | `discord_export_ingest.py` (Discord data export) | 🔜 landing next |
-| SMS | `sms_ingest.py` (phone SMS/MMS export) | 🔜 landing next |
+| Discord | `discord_export_ingest.py` (official Discord data package — **owner's own messages only**) | ✅ shipped |
+| SMS/MMS | `sms_ingest.py` (SMS Backup & Restore XML export) | ✅ shipped |
 | Email | — | future |
 
 A one-service archive is still valuable — collect whatever services have data and aggregate.
+
+### Service caveats (tell the owner up front)
+
+- **Discord shows the owner's half only.** Discord's data package contains just the requesting
+  account's own messages — nobody else's — so every Discord record is the owner's side of the
+  conversation. Where the bot is present in a channel, the live REST collector
+  (`../../seneschal/scripts/discord_poll.py`) remains the supplementary source for both sides.
+- **Discord attachments are expired links.** The package carries CDN URLs, not files; the signed
+  links are usually dead on arrival, so attachments are recorded (`remote_url`, flagged missing)
+  but never downloaded.
+- **Old CSV-vintage Discord packages are unsupported.** If a channel folder has `messages.csv`
+  instead of `messages.json`, request a fresh package — current ones export JSON.
+- **Discord timestamps are naive** (zone undocumented, varies by package vintage) and are treated
+  as UTC — expect skew up to a few hours on older packages.
+- **SMS matching is last-10-digits.** `+1 (555) 123-4567` and `555-123-4567` match; international
+  numbers sharing a 10-digit suffix would collide, and short codes must match exactly.
 
 ## Read first (once)
 
@@ -49,13 +67,27 @@ A one-service archive is still valuable — collect whatever services have data 
 ## Steps
 
 **1 — Orient (act-low).** Resolve the person key from what the owner said. Read the registry; confirm
-the service entries exist for them (e.g. the Telegram `user_id` + `export_dir`). If the Telegram export
-is missing, tell the owner how to produce it (Telegram Desktop → Export chat history → JSON + media) and
-proceed with whatever services *are* available.
+the service entries exist for them (Telegram `user_id` + `export_dir`; Discord `user_id` and/or
+`channel_ids`; SMS `numbers`). If a source export is missing, tell the owner how to produce it and
+proceed with whatever services *are* available:
 
-**2 — Collect (act-low).** Run each available collector — today that's
-`python ../../seneschal/scripts/telegram_ingest.py --person <key>` against the export dir. (The Discord
-and SMS collectors slot in here as they land — same `--person <key>` shape, same normalized output.)
+- **Telegram:** Telegram Desktop → the chat → Export chat history → format **JSON**, include media.
+- **Discord:** Settings → Privacy & Safety → **Request all of my data** (include Messages). The
+  package arrives by email (can take days–weeks); extract the zip somewhere local.
+- **SMS/MMS:** install **SMS Backup & Restore** on the phone → Back up → Messages (XML, include MMS
+  media) → copy the `sms-YYYYMMDDHHMMSS.xml` to this machine.
+
+**2 — Collect (act-low).** Run each available collector — same `--person <key>` shape, same
+normalized output:
+
+```
+python ../../seneschal/scripts/telegram_ingest.py       --person <key>
+python ../../seneschal/scripts/discord_export_ingest.py --person <key> --package <extracted-package-dir>
+python ../../seneschal/scripts/sms_ingest.py            --person <key> --xml <sms-YYYYMMDDHHMMSS.xml>
+```
+
+(`--package` / `--xml` can be omitted when the registry entry carries `package_dir` / `xml_file`;
+`--channel-id <id>` pins the Discord ingest to specific channels instead of registry auto-select.)
 
 **3 — Aggregate + render (act-low).**
 `python ../../seneschal/scripts/archive_aggregate.py --person <key>` →

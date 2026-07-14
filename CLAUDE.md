@@ -28,8 +28,9 @@ seneschal/
   scripts/         presence.py (resident asyncio daemon), sentinel.py (helper/one-shot),
                    telegram/discord/proton/google comms bridges, reminders_* queue+ack ledger,
                    rag_* (local semantic index), router.py, salience tooling, health/presence
-                   pipelines, archive_common.py + telegram_ingest.py + archive_aggregate.py
-                   (message archiver), check_placeholders.py (CI guard), *_SETUP.md guides,
+                   pipelines, archive_common.py + telegram_ingest.py + discord_export_ingest.py
+                   + sms_ingest.py + archive_aggregate.py (message archiver),
+                   check_placeholders.py (CI guard), *_SETUP.md guides,
                    seneschald-control.ps1 + run-*.cmd (Windows scheduled-task wrappers)
   state/           local-first runtime cache — gitignored except README + *.example.*
 ```
@@ -44,8 +45,7 @@ archons/           Archon staff data (Forge mode) — the shipped `proteus/` job
                    example (profile.example.json + stdlib tools); real needs/stables/profiles
                    are gitignored on installs
 
-Still to land: `persona/` (default persona + wizard), `seneschal/store/` (pluggable backends),
-Discord/SMS archive collectors.
+Still to land: `persona/` (default persona + wizard), `seneschal/store/` (pluggable backends).
 
 ## The daemon, briefly
 

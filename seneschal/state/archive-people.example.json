@@ -1,16 +1,19 @@
 {
  "schema": "seneschal.archive.people/1",
- "_comment": "Copy to archive-people.json (gitignored) and fill in real ids. `owner` is you (one entry, shared across everyone) and lets the archiver tell your messages from theirs. Each person maps a registry key -> per-service identity. Telegram: user_id + the ChatExport_* dir you exported from Telegram Desktop.",
+ "_comment": "Copy to archive-people.json (gitignored) and fill in real ids. `owner` is you (one entry, shared across everyone) and lets the archiver tell your messages from theirs. Each person maps a registry key -> per-service identity. Telegram: user_id + the ChatExport_* dir you exported from Telegram Desktop. Discord: user_id (their Discord user id, matched against DM recipients) and/or channel_ids (explicit channel ids), plus optionally package_dir (your extracted data package). SMS: numbers (matched by last-10-digits), plus optionally xml_file (the SMS Backup & Restore export).",
  "owner": {
   "display_name": "Owner",
-  "telegram": { "user_id": "0000000000" }
+  "telegram": { "user_id": "0000000000" },
+  "discord": { "user_id": "999888777666555444" }
  },
  "people": {
   "example-person": {
    "display_name": "Example Person",
    "aliases": ["their_handle"],
    "services": {
-    "telegram": { "user_id": "1234567890", "export_dir": "C:/path/to/Telegram Desktop/ChatExport_YYYY-MM-DD" }
+    "telegram": { "user_id": "1234567890", "export_dir": "C:/path/to/Telegram Desktop/ChatExport_YYYY-MM-DD" },
+    "discord": { "user_id": "333444555666777888", "channel_ids": ["111222333444555666"], "package_dir": "C:/path/to/discord-package" },
+    "sms": { "numbers": ["+15550000001"], "xml_file": "C:/path/to/sms-YYYYMMDDHHMMSS.xml" }
    }
   }
  }
