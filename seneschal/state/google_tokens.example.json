@@ -1,0 +1,19 @@
+{
+  "_doc": "Seed/example for seneschal/state/google_tokens.json (the REAL file is gitignored). google_auth.py writes one entry per account label; refresh_token is the durable credential. Never commit the real file.",
+  "accounts": {
+    "personal": {
+      "email": "you@gmail.com",
+      "refresh_token": "1//example-refresh-token-DO-NOT-COMMIT",
+      "scopes": "https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/userinfo.email openid",
+      "client_id": "xxxxx.apps.googleusercontent.com",
+      "obtained_at": "2026-07-10T10:00:00Z"
+    },
+    "work": {
+      "email": "you@company.com",
+      "refresh_token": "1//example-refresh-token-DO-NOT-COMMIT",
+      "scopes": "https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/userinfo.email openid",
+      "client_id": "xxxxx.apps.googleusercontent.com",
+      "obtained_at": "2026-07-10T10:00:00Z"
+    }
+  }
+}

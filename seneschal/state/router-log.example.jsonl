@@ -1,0 +1,5 @@
+{"ts": "2026-07-06T22:34:37Z", "channel": "telegram", "text_preview": "took my meds", "verdict": "trivial", "category": "ack", "confidence": 0.95, "model": "qwen3.5:4b"}
+{"ts": "2026-07-06T22:41:02Z", "channel": "telegram", "text_preview": "what's on today?", "verdict": "trivial", "category": "status", "confidence": 0.9, "model": "qwen3.5:4b"}
+{"ts": "2026-07-06T23:02:18Z", "channel": "telegram", "text_preview": "when's my next dentist appointment?", "verdict": "trivial", "category": "recall", "confidence": 0.85, "model": "qwen3.5:4b"}
+{"ts": "2026-07-06T23:10:55Z", "channel": "discord", "text_preview": "draft a reply to Alex declining the Thursday meeting", "verdict": "escalate", "category": "other", "confidence": 0.98, "model": "qwen3.5:4b"}
+{"ts": "2026-07-06T23:15:41Z", "channel": "telegram", "text_preview": "hmm, not sure about that one — thoughts?", "verdict": "escalate", "category": "other", "confidence": 1.0, "model": "qwen3.5:4b"}

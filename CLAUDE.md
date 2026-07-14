@@ -14,6 +14,38 @@ registry.
 **Status: under construction.** Content lands phase by phase on `develop`; this file grows
 with it. Until v0.1.0, expect referenced components to be missing.
 
+## Layout (so far)
+
+```
+.claude/commands/  assistant.md — the /assistant slash command (opens an in-character chat)
+seneschal/
+  SKILL.md         the orchestrator — modes (Chat/Brief/Wrap/Triage/Ask/Watch/Dream/Journal/
+                   Reminders/Forge/Archive), execution rules, the Advisor Chain, reference index
+  references/      databases (placeholder-id schema registry), calendar/comms mapping, briefing,
+                   reminders-policy, autonomy-policy(+config), memory protocol, advisor-chain,
+                   salience, archons, notion-rate-limits, proposed-learnings (Dream's PR target)
+  docs/            asyncio-daemon-design.md + asyncio-daemon-plan.md (the reactive-core design)
+  scripts/         presence.py (resident asyncio daemon), sentinel.py (helper/one-shot),
+                   telegram/discord/proton/google comms bridges, reminders_* queue+ack ledger,
+                   rag_* (local semantic index), router.py, salience tooling, health/presence
+                   pipelines, archive_common.py + telegram_ingest.py + archive_aggregate.py
+                   (message archiver), check_placeholders.py (CI guard), *_SETUP.md guides,
+                   seneschald-control.ps1 + run-*.cmd (Windows scheduled-task wrappers)
+  state/           local-first runtime cache — gitignored except README + *.example.*
+```
+
+Still to land: `subagents/` (the delegated skills), `persona/` (default persona + wizard),
+`seneschal/store/` (pluggable backends), `phone/` (call-screener + Android app), `archons/`
+(Forge worked example).
+
+## The daemon, briefly
+
+`seneschal/scripts/presence.py` is the always-on nerve center: a reactive asyncio core holding a
+warm `claude` CLI chat session (subscription-billed; it scrubs `ANTHROPIC_API_KEY`), firing
+reminders from the local queue, and running a cheap Watch comms-peek on cadence. It runs off
+`main` and reloads itself when a PR merges (`seneschald-update` scheduled task → ff-pull →
+graceful restart). Runtime state lives in gitignored `seneschal/state/`.
+
 ## Conventions
 
 - **Git Flow**: `main` (releases) + `develop` (integration); `feature/*` branches; PRs merge

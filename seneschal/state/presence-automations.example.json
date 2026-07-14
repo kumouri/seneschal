@@ -1,0 +1,26 @@
+{
+  "_comment": "Presence -> Home Assistant automations. Copy to presence-automations.json (gitignored) and set your real entity_ids. Each automation fires when a context EDGE matches its `on` (kind/label/transition). `approved:true` = fires on its own (act-low); anything else is draft-and-hold (ask-high). A `failsafe:true` automation is ALWAYS ask-high, no matter what. Nothing here runs until Home Assistant is configured (ha.env) AND the daemon integration is enabled — see HA_SETUP.md.",
+  "automations": [
+    {
+      "id": "arrive-home-lights",
+      "on": {"kind": "geofence", "label": "home", "transition": "enter"},
+      "call": {"domain": "light", "service": "turn_on", "data": {"entity_id": "light.living_room"}},
+      "approved": false,
+      "failsafe": false
+    },
+    {
+      "id": "leave-home-lights-off",
+      "on": {"kind": "geofence", "label": "home", "transition": "exit"},
+      "call": {"domain": "light", "service": "turn_off", "data": {"entity_id": "all"}},
+      "approved": false,
+      "failsafe": false
+    },
+    {
+      "id": "leave-home-water-failsafe",
+      "on": {"kind": "geofence", "label": "home", "transition": "exit"},
+      "call": {"domain": "switch", "service": "turn_off", "data": {"entity_id": "switch.fountain_pump"}},
+      "approved": false,
+      "failsafe": true
+    }
+  ]
+}
