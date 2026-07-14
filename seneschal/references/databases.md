@@ -8,7 +8,7 @@
 The Notion databases the assistant's **own** modes (Brief, Wrap, Triage, Ask) read and write directly.
 **Do not fetch these schemas at runtime** — use what's here.
 
-> **Canonical full map:** every journal database (Journal Transcripts, Achievements, Mood, Goals,
+> **Canonical full map:** every journal database (Achievements, Mood, Goals,
 > Run Log, …) lives in `../../subagents/journal-steward/daily-journal-steward/references/databases.md`.
 > That file is the source of truth for journal-owned databases; this file only restates the handful the
 > assistant touches outside the journal pipeline, plus the assistant's own Run Log. If a schema here
