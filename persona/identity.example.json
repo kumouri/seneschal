@@ -1,0 +1,25 @@
+{
+  "_doc": [
+    "Copy to persona/identity.json (gitignored) and fill in — or let /setup-persona and",
+    "/setup-store write it for you. Every field is optional: null values fall back to the",
+    "documented default. Scripts read this via seneschal/scripts/identity_common.py;",
+    "skills read persona/persona.md (which the wizard generates from the same answers)."
+  ],
+  "schema": 1,
+  "assistant": {
+    "name": null,
+    "nameSpoken": null,
+    "pronouns": "they/them",
+    "email": null,
+    "signoff": null,
+    "ttsProvider": null,
+    "ttsVoiceId": null
+  },
+  "owner": {
+    "name": null,
+    "nameSpoken": null,
+    "pronouns": null,
+    "email": null,
+    "timezone": null
+  }
+}

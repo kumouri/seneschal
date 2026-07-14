@@ -18,6 +18,9 @@ with it. Until v0.1.0, expect referenced components to be missing.
 
 ```
 .claude/commands/  assistant.md — the /assistant slash command (opens an in-character chat)
+persona/           who the assistant is + who it works for (see persona/README.md): tracked
+                   persona.default.md / persona.template.md / identity.example.json; the real
+                   persona.md / identity.json / owner-profile.md are gitignored per-install
 seneschal/
   SKILL.md         the orchestrator — modes (Chat/Brief/Wrap/Triage/Ask/Watch/Dream/Journal/
                    Reminders/Forge/Archive), execution rules, the Advisor Chain, reference index
@@ -26,6 +29,8 @@ seneschal/
                    salience, archons, notion-rate-limits, proposed-learnings (Dream's PR target)
   docs/            asyncio-daemon-design.md + asyncio-daemon-plan.md (the reactive-core design)
   scripts/         presence.py (resident asyncio daemon), sentinel.py (helper/one-shot),
+                   identity_common.py (persona/identity.json reader — never raises, defaults
+                   when absent; presence.py renders its grounding/slot prompts from it),
                    telegram/discord/proton/google comms bridges, reminders_* queue+ack ledger,
                    rag_* (local semantic index), router.py, salience tooling, health/presence
                    pipelines, archive_common.py + telegram_ingest.py + discord_export_ingest.py
@@ -45,7 +50,8 @@ archons/           Archon staff data (Forge mode) — the shipped `proteus/` job
                    example (profile.example.json + stdlib tools); real needs/stables/profiles
                    are gitignored on installs
 
-Still to land: `persona/` (default persona + wizard), `seneschal/store/` (pluggable backends).
+Still to land: the `/setup-persona` wizard (the `persona/` surface + identity plumbing are in),
+`seneschal/store/` (pluggable backends).
 
 ## The daemon, briefly
 

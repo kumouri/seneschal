@@ -57,6 +57,20 @@ import time
 from datetime import datetime, timezone
 
 from reminders_roll import refill_rolls
+
+# Identity plumbing (persona/identity.json → the grounding/slot prompts). Guarded like the
+# other optional sibling imports (router, discord_gateway): a missing/broken identity_common
+# must degrade to the unconfigured behavior, never keep the daemon from booting.
+try:
+    from identity_common import get_str as _identity_get
+    from identity_common import load_identity
+except ImportError:  # pragma: no cover — behave exactly like an unconfigured install
+    def load_identity(path=None):  # type: ignore[misc]
+        return {}
+
+    def _identity_get(identity, section, key):  # type: ignore[misc]
+        return None
+
 from sentinel import (  # shared helpers — sentinel is now a helper library
     DEFAULT_STATE_DIR,
     DEFAULT_TELEGRAM_ENV,
@@ -103,41 +117,43 @@ DEFAULT_NOTION_MCP = os.path.join(SCRIPT_DIR, "notion-mcp.json")
 DEFAULT_DISCORD_ENV = os.path.join(SCRIPT_DIR, "discord.env")
 
 # Heavyweight scheduled runs the daemon owns itself (replacing separate Task Scheduler entries).
-# Times are the MACHINE-LOCAL wall clock (the owner's configured timezone). Each fires at
+# Times are the MACHINE-LOCAL wall clock — assumed to match the owner's timezone (startup warns via
+# warn_tz_mismatch when identity.owner.timezone says otherwise). Each fires at
 # most once per local day; a run that's missed (machine asleep at its time) fires late on the next loop
 # IF still within the catch-up window, else it's skipped for the day. Reminder slots run the Reminders
 # subagent (which enqueues nudges the daemon then delivers); the rest run the orchestrator/journal.
-SLOTS = [
+# Prompts carry the {tz} identity token; the runnable SLOTS below is rendered by build_slots().
+SLOTS_TEMPLATE = [
     {"name": "daily-journal", "at": "05:00",
      "prompt": "Run the Daily Journal (subagents/journal-steward/daily-journal-steward/SKILL.md). "
-               "Use the owner's configured timezone. Run silently."},
+               "Use {tz}. Run silently."},
     {"name": "morning-brief", "at": "06:30",
      "prompt": "Run the morning Brief (seneschal/SKILL.md): deliver in chat + push highlights to Telegram "
-               "+ email via Proton + write the Run Log. Use the owner's configured timezone. Run silently."},
+               "+ email via Proton + write the Run Log. Use {tz}. Run silently."},
     {"name": "reminders-morning", "at": "08:00",
      "prompt": "Run Reminders mode (subagents/reminders/SKILL.md) for the MORNING slot: run the daily "
                "reset, reconcile acks, compute this slot's fires, enqueue nudges to state/reminders.json "
-               "(reminders_enqueue.py), update the tracker + Run Log. Use the owner's configured timezone. Run silently."},
+               "(reminders_enqueue.py), update the tracker + Run Log. Use {tz}. Run silently."},
     {"name": "reminders-midday", "at": "12:30",
      "prompt": "Run Reminders mode (subagents/reminders/SKILL.md) for the MIDDAY slot: reconcile acks, "
                "re-fire unacked important, re-surface snoozed, enqueue nudges to state/reminders.json, "
-               "update the tracker + Run Log. Use the owner's configured timezone. Run silently."},
+               "update the tracker + Run Log. Use {tz}. Run silently."},
     {"name": "reminders-evening", "at": "18:30",
      "prompt": "Run Reminders mode (subagents/reminders/SKILL.md) for the EVENING slot: reconcile "
                "acks, re-fire unacked important, enqueue nudges, update the tracker + Run Log. "
-               "Use the owner's configured timezone. Run silently."},
+               "Use {tz}. Run silently."},
     {"name": "eod-wrap", "at": "21:07",
      "prompt": "Run the Wrap (seneschal/SKILL.md -> subagents/eod-wrap/SKILL.md). Done-today includes "
                "Tasks completed today AND ⏰ Reminders rows with Last Acknowledged = today (never "
-               "judge by the Ack checkbox - the slots consume it). Use the owner's configured timezone. Run silently."},
+               "judge by the Ack checkbox - the slots consume it). Use {tz}. Run silently."},
     {"name": "reminders-bedtime", "at": "21:30",
      "prompt": "Run Reminders mode (subagents/reminders/SKILL.md) for the BEDTIME slot: final re-fire "
-               "of unacked important, enqueue nudges, update the tracker + Run Log. Use the owner's configured timezone. "
+               "of unacked important, enqueue nudges, update the tracker + Run Log. Use {tz}. "
                "Run silently."},
     {"name": "dream", "at": "22:00",
      "prompt": "Run the Dream consolidation (seneschal/SKILL.md): rebuild state/context-digest.md, "
                "refresh reminders, propose learnings, then commit + open a PR (Dream step 5). "
-               "Use the owner's configured timezone. Run silently."},
+               "Use {tz}. Run silently."},
 ]
 
 
@@ -150,9 +166,11 @@ def child_env() -> dict:
 
 
 def local_now() -> datetime:
-    """Machine-local wall clock as an aware datetime. The machine is set to the owner's configured
-    timezone, so this IS the owner's local time. Windows ships no zoneinfo db, so we lean on the OS
-    local tz via astimezone() rather than ZoneInfo (which would need the tzdata package)."""
+    """Machine-local wall clock as an aware datetime. The machine is assumed to be set to the
+    owner's timezone, so this IS the owner's local time (startup logs a warning via
+    warn_tz_mismatch when identity.owner.timezone disagrees). Windows ships no zoneinfo db, so we
+    lean on the OS local tz via astimezone() rather than ZoneInfo (which would need the tzdata
+    package)."""
     return datetime.now().astimezone()
 
 
@@ -163,26 +181,31 @@ def local_stamp() -> str:
     bug. Handed in explicitly so no run ever has to guess what 'now' is."""
     return local_now().strftime("%A %Y-%m-%d %H:%M %Z")
 
-GROUNDING = """You are the resident assistant — the owner's chief of staff — talking with them live over {channel}.
-The current local date and time is {now} (the owner's configured timezone) — treat this as the AUTHORITATIVE clock for
+# The warm session's first-turn grounding. Two token vocabularies live here:
+#   * identity tokens {assistant}/{owner}/{tz} — substituted ONCE at startup by
+#     _render_grounding() from persona/identity.json (generic phrases when unconfigured);
+#   * per-turn tokens {channel}/{now}/{thread}/{msg} — left untouched until the drainer's
+#     send-time GROUNDING.format(...) fills them for each new session.
+GROUNDING_TEMPLATE = """You are {assistant} — {owner}'s chief of staff — talking with them live over {channel}.
+The current local date and time is {now} ({tz}) — treat this as the AUTHORITATIVE clock for
 every "today"/"yesterday"/"tomorrow" and all date math. Do not infer the date yourself and never trust a
 UTC clock; if a reminder's text disagrees with this stamp, this stamp wins.
 Read persona/persona.md (fall back to persona/persona.default.md) and seneschal/SKILL.md (Chat mode) and
 stay fully in character: reply as the assistant in the persona's voice, never as Claude, no
 meta-narration, run any tools silently. Keep
 replies concise and chat-appropriate. Honor the act-low / ask-high gate (draft-and-hold anything
-outbound or destructive). Only tell the owner something is done/logged/marked off/cleared when the tool call
+outbound or destructive). Only tell {owner} something is done/logged/marked off/cleared when the tool call
 actually succeeded — if Notion or any tool is unreachable or errors, say so plainly and park it in
 carry-over; never claim a write that didn't land.
 You have the SAME Notion read/write access here as the full seneschal skill: reading is act-low, and act-low
-tracker writes you should just make — don't merely say you will. In particular, when the owner acknowledges a
+tracker writes you should just make — don't merely say you will. In particular, when {owner} acknowledges a
 reminder ("took'em", "done", "did it", "already ate"), immediately WRITE that ack through to the ⏰
 Reminders DB — set the row's Status = Done (for EVERY Type — a plain ack means done FOR TODAY, not
 retired; the item still re-fires on its next cycle. Only write Finished if they EXPLICITLY say they're
 FINISHED with the item, e.g. done-for-good, no more reminders),
 Last Acknowledged = today, Consecutive Misses = 0, per seneschal/references/databases.md +
 reminders-policy.md. Write those FIELDS directly; do NOT just tick the
-Ack checkbox (it's the owner's one-tap affordance — reminder slots consume and untick it, so a tick alone
+Ack checkbox (it's {owner}'s one-tap affordance — reminder slots consume and untick it, so a tick alone
 is not the durable record; Last Acknowledged is what the EOD wrap counts). Then the next reminder slot
 sees it acked and stops re-firing. AFTER the Notion write, also run
 scripts/reminders_dequeue.py --reminder-id <that row's Notion page id>: I fire queued nudges by due_at and
@@ -198,13 +221,84 @@ Notion rate-limits reads: don't fan out a big parallel read burst — lean on th
 (references/databases.md, state/context-digest.md) instead of re-querying, keep concurrent Notion reads to a
 handful, and if a read returns a rate-limit/429, wait a beat and retry serially rather than hammering.
 See seneschal/references/notion-rate-limits.md.
-If the owner asks you to restart or reload yourself ("reseneschald", "restart", "reload your code"): do NOT run
+If {owner} asks you to restart or reload yourself ("reseneschald", "restart", "reload your code"): do NOT run
 seneschald-control.ps1 or otherwise kill the daemon from here — you are running INSIDE that daemon, so a
 synchronous restart kills you mid-reply, your answer never sends, and the daemon replays the request on
 every boot (a self-kill loop). Instead, finish your reply normally, then run (act-low)
 `python seneschal/scripts/request_restart.py`. The resident daemon reloads itself gracefully AFTER your reply
 is delivered — same effect as reseneschald, no dropped message. {thread}
 The owner just said: {msg}"""
+
+
+# --------------------------------------------------------------------------- identity rendering
+
+def _identity_tokens(identity) -> dict:
+    """Raw values for the three identity tokens. The fallbacks are EXACTLY the generic phrases
+    that were hardcoded in the grounding/slot prompts before persona/identity.json existed, so
+    an unconfigured install renders byte-identical prose (this templating is a no-op for it)."""
+    return {
+        "{assistant}": _identity_get(identity, "assistant", "name") or "the resident assistant",
+        "{owner}": _identity_get(identity, "owner", "name") or "the owner",
+        "{tz}": _identity_get(identity, "owner", "timezone") or "the owner's configured timezone",
+    }
+
+
+def _render_grounding(template: str, identity) -> str:
+    """Substitute the identity tokens ({assistant}/{owner}/{tz}) into the grounding template,
+    passing the per-turn tokens ({channel}/{now}/{thread}/{msg}) through UNTOUCHED for the
+    drainer's send-time .format. Deliberately str.replace on the three exact tokens rather
+    than a .format pass: format would try to resolve the per-turn tokens too (KeyError), and
+    escaping around that is fiddlier than three replaces. The substituted VALUES get their
+    braces doubled so a stray '{' in a configured name can never crash the send-time format."""
+    out = template
+    for token, value in _identity_tokens(identity).items():
+        out = out.replace(token, value.replace("{", "{{").replace("}", "}}"))
+    return out
+
+
+def build_slots(identity, template: list | None = None) -> list:
+    """SLOTS_TEMPLATE with the identity tokens substituted into each prompt (fresh copies —
+    the template is never mutated). Slot prompts are handed to `claude -p` verbatim, never
+    .format()ed, so values are substituted RAW here — no brace doubling, unlike the grounding.
+    Slot fire TIMES are untouched: slots run on the machine-local wall clock regardless of
+    identity.owner.timezone (see warn_tz_mismatch)."""
+    tokens = _identity_tokens(identity)
+    slots = []
+    for s in (SLOTS_TEMPLATE if template is None else template):
+        s = dict(s)
+        for token, value in tokens.items():
+            s["prompt"] = s["prompt"].replace(token, value)
+        slots.append(s)
+    return slots
+
+
+def warn_tz_mismatch(identity, log) -> None:
+    """Best-effort startup check: if identity.owner.timezone is set AND resolvable on this
+    machine, compare its current UTC offset to the machine-local one and log ONE warning when
+    they differ — slot times and reminder math run machine-local, so a mismatch means nudges
+    land on the machine's clock, not the owner's. Windows ships no tz database (the tzdata
+    package is a later phase), so an unresolvable zone skips silently. Never raises."""
+    tz_name = _identity_get(identity, "owner", "timezone")
+    if not tz_name:
+        return
+    try:
+        import zoneinfo
+        tz = zoneinfo.ZoneInfo(tz_name)
+        now = datetime.now(timezone.utc)
+        configured, machine = now.astimezone(tz).utcoffset(), now.astimezone().utcoffset()
+    except Exception:  # noqa: BLE001 — informational check only; no tzdata/bad key = skip
+        return
+    if configured != machine:
+        log(f"! configured owner timezone {tz_name} (UTC{configured}) differs from "
+            f"machine-local (UTC{machine}) — slot times fire machine-local")
+
+
+# Loaded once at startup (import time). persona/identity.json is optional — load_identity()
+# never raises and yields the generic defaults when it's absent, so GROUNDING/SLOTS render
+# byte-identical to the pre-identity hardcoded prose on an unconfigured install.
+IDENTITY = load_identity()
+GROUNDING = _render_grounding(GROUNDING_TEMPLATE, IDENTITY)
+SLOTS = build_slots(IDENTITY)
 
 
 # --------------------------------------------------------------------------- thread continuity
@@ -1325,6 +1419,11 @@ def main() -> int:
         args.discord_env = DEFAULT_DISCORD_ENV
     if args.discord_env:
         log(f"Discord wired (gateway push, REST fallback): {args.discord_env}")
+
+    # One-line heads-up when the configured owner timezone and the machine clock disagree
+    # (slot times + reminder math fire machine-local). Best-effort: skips silently when
+    # zoneinfo can't resolve (no tzdata on Windows yet — a later phase adds it).
+    warn_tz_mismatch(IDENTITY, log)
 
     stale_sec = max(args.poll_timeout * 3, 90)
     if lock_is_live(args.state_dir, stale_sec):
