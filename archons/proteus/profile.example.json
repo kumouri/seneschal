@@ -1,0 +1,32 @@
+{
+  "_comment": "Copy to profile.json (gitignored) and fill in. This is Proteus's matching profile — score_jobs.py consumes it deterministically; the archon also reads it for resume/CV tailoring context.",
+  "name": "FULL NAME",
+  "email": "you@example.com",
+  "current_comp": 0,
+  "min_total_comp": 0,
+  "target_total_comp": 0,
+  "currency": "USD",
+  "remote": "required | preferred | any",
+  "remote_regions_ok": ["USA", "United States", "Americas", "Worldwide"],
+  "locations_ok": ["Remote", "YOUR CITY"],
+  "titles": ["Target Job Title 1", "Target Job Title 2"],
+  "title_keywords_strong": ["keyword", "that", "signals", "a", "fit", "in", "a", "title"],
+  "title_keywords_avoid": ["junior", "intern", "frontend"],
+  "seniority": ["senior", "staff", "lead", "principal"],
+  "skills": {
+    "_comment_skills": "keyword -> weight; higher = more important. Matched word-boundary, case-insensitive, in title+description.",
+    "java": 10,
+    "python": 7
+  },
+  "preferences": {
+    "_comment_preferences": "freeform keyword -> +/- score adjustment applied after the bands",
+    "ai agent": 8
+  },
+  "dealbreakers": ["security clearance"],
+  "culture_flags": [
+    "Things to check in company research — not keyword-matched; the archon weighs these when researching the employer."
+  ],
+  "resume_source": "PATH OR URL to the current resume Proteus tailors from",
+  "experience_summary": "2-6 sentence factual summary of career highlights Proteus may draw on when the resume lacks an angle the job needs.",
+  "certifications": []
+}
