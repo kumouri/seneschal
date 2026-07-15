@@ -43,22 +43,22 @@ seneschal/
                    check_placeholders.py (CI guard), *_SETUP.md guides,
                    seneschald-control.ps1 + run-*.cmd (Windows scheduled-task wrappers)
   state/           local-first runtime cache — gitignored except README + *.example.*
-```
-
 subagents/         morning-briefing, eod-wrap, email-triage, slack-triage, calendar-steward,
                    store-qa, reminders, message-archivist, journal-steward (generic core),
-                   archon-forge — the delegated skills the orchestrator dispatches to
+                   archon-forge, persona-wizard, store-setup — the delegated skills the
+                   orchestrator + the /setup commands dispatch to
 phone/             the voice call-screener (Cloudflare Workers + Twilio; deploys as
                    `seneschal-screener`) + the Seneschal Call Shield Android companion app
                    (com.kumouri.seneschal, committed Gradle project) feeding presence/health
 archons/           Archon staff data (Forge mode) — the shipped `proteus/` job-application
                    example (profile.example.json + stdlib tools); real needs/stables/profiles
                    are gitignored on installs
+```
 
-Still to land: the `/setup-persona` wizard (the `persona/` surface + identity plumbing are in) and the
-`/setup-store` flow (the `seneschal/store/` registries + backends are in; the skills + daemon now speak
-the abstraction — `/setup-store` writes the gitignored `store/config.json` + renders the real
-`store/<backend>/schema.md`).
+First-run setup is `/setup` (persona wizard → store onboarding), or the chapters standalone:
+`/setup-persona` (name/voice/demeanor → `persona/persona.md` + `identity.json`) and `/setup-store`
+(pick + provision a backend, read existing content, interview → `owner-profile.md`). The framework
+runs on the shipped defaults (default-Claude persona, no store) until they're run.
 
 ## The daemon, briefly
 

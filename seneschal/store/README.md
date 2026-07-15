@@ -33,7 +33,8 @@ sanctioned exception.
 Future backends slot in as new `store/<backend>/` pairs — same verbs, different mapping (Logseq:
 block properties; Google Workspace: verbs resolved to the existing `gcal_api.py`/`gmail_api.py`
 script bridge). The reserved `domains` key in config.json is for per-domain federation
-(one domain's home backend + read-only mirrors) — documented intent, no v1 code.
+(one domain's home backend + read-only mirrors) — documented intent in
+[`federation.md`](federation.md), no v1 code.
 
 ## config.json
 
