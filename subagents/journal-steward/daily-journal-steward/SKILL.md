@@ -10,7 +10,7 @@ description: >-
   journal automation — invoke it for any "run the journal", "process my journal", "journal steward",
   or "daily journal run" request even when not phrased exactly, and whenever a scheduled task asks to
   run the daily journal pipeline.
-compatibility: Requires the Notion MCP connector (tools named mcp__*__notion-*) connected to the owner's workspace.
+compatibility: Requires a configured seneschal store (run /setup-store). The Notion backend additionally requires the Notion MCP connector (tools named mcp__*__notion-*) connected to the owner's workspace. (This journal pipeline is a Notion-AI port and is most complete on the Notion backend.)
 ---
 
 # Daily Journal Steward (DJS)
@@ -25,14 +25,19 @@ a useful trace.**
 
 ## Prerequisites & anchors
 
-- **Notion MCP must be connected.** All reads/writes go through `mcp__<server>__notion-*` tools (search,
-  fetch, create-pages, update-page, query-database-view). See `references/notion-mcp-mapping.md` for the
-  tool mapping and the date/relation/status gotchas — read it once before your first write each run.
+- **Store access.** This pipeline speaks the six **store verbs** (`store-query` / `store-get` /
+  `store-create` / `store-update` / `store-append` / `store-search`) against the active backend
+  (`../../../seneschal/store/config.json`); the backend's `store/<backend>/mapping.md` resolves each verb
+  to concrete tools. On the **Notion backend** those are `mcp__<server>__notion-*` (search, fetch,
+  create-pages, update-page, query-database-view) — see `references/notion-mcp-mapping.md` for the
+  detailed primitive→tool map and the date/relation/status gotchas (read it once before your first write
+  each run), consolidated with `../../../seneschal/store/notion/mapping.md`.
 - **Timezone:** the owner's configured timezone. A "journal day" treats **after-midnight entries as part
   of the prior day** (owners often journal past midnight).
-- **Every database ID, property, and option value is in `references/databases.md`.** Do **not** fetch
-  schemas at runtime — that was the original agent's #1 budget killer. Only fetch a schema if a write
-  fails with an explicit property/schema error, and then only the one affected database.
+- **Every domain's fields + option values are in `references/databases.md`** (the Notion backend's
+  schema; the backend-neutral map is `store/<backend>/schema.md`). Do **not** fetch schemas at runtime —
+  that was the original agent's #1 budget killer. Only fetch a schema if a write fails with an explicit
+  property/schema error, and then only the one affected domain.
 - **Key page anchors** (full list in `references/databases.md`; placeholder ids — store setup fills a
   local copy):
   - Interstitial Journal (the working page): `00000000-0000-0000-0000-000000000010`

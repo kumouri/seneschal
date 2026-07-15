@@ -48,9 +48,14 @@ daemon — Telegram chat included — gets read/write Notion.
    the integration must be granted **read + write** in Notion, not read-only, or acks still won't land.)*
 2. Authenticate once: `claude --mcp-config seneschal/scripts/notion-mcp.json` in a terminal, then `/mcp` →
    authenticate. The cached token is reused by headless runs using the same config.
-3. **Nothing to wire** — `presence.py` **auto-detects** `scripts/notion-mcp.json` and uses it by default.
-   (Override the path with `--notion-mcp <file>`; force it off with `--no-notion`.) On startup the daemon
-   logs `Notion wired for headless runs (read/write): …` — or a warning if it found no config.
+3. **Wire it through the store config (preferred).** With the Notion backend active, `store/config.json`'s
+   `backends.notion.mcp_config` points at this file (default `seneschal/store/notion/mcp.json`), and
+   `presence.py` forwards it automatically (`resolve_store_mcp`). As a legacy fallback, when there's **no**
+   `store/config.json`, the daemon still **auto-detects** `scripts/notion-mcp.json`. Override the path with
+   `--store-mcp <file>` (the deprecated `--notion-mcp` alias still works); force it off with `--no-notion`.
+   On startup the daemon logs `Store: notion (MCP wired for headless runs: …)` — or, for a filesystem
+   backend, `Store: <backend> (filesystem — no MCP needed)`, or a warning / `run /setup-store` hint if it
+   found no usable config.
 4. **Restart the daemon.** Verify (below).
 
 ## Verify

@@ -8,7 +8,9 @@ description: >-
   "what's in my inbox", "draft a reply to …". Delegated to by the seneschal orchestrator (Triage mode).
 compatibility: >-
   Proton path requires Proton Bridge running + seneschal/scripts/proton.env (see scripts/EMAIL_SETUP.md).
-  Fallback path requires the Gmail MCP (mcp__*__*-search_threads / create_draft / label_*).
+  Fallback path requires the Gmail MCP (mcp__*__*-search_threads / create_draft / label_*). Sender lookups
+  use the configured seneschal store's People domain (run /setup-store; the Notion backend needs the
+  Notion MCP) — optional, only when resolving a sender to a known person helps.
 ---
 
 # Email Triage (Seneschal · Triage mode)
@@ -16,6 +18,12 @@ compatibility: >-
 Turn the owner's inbox into signal. Summarize + categorize + archive obvious noise (act-low); **draft
 replies as the assistant from its own configured address, held for approval** (ask-high to send). See
 `../../seneschal/references/comms-mapping.md` and `../../seneschal/references/autonomy-policy.md`.
+
+**Store access (optional, for People).** This mode's data lives in email, not the store. It touches the
+store only to resolve a sender to a known person: `store-search`/`store-query` the **People** domain (the
+mapping resolves it to the active backend — on Notion, `mcp__*__notion-*`; see
+`../../seneschal/store/config.json` for which backend). If the store isn't configured, skip the lookup
+and triage on the email alone. **Never fetch schemas at runtime.**
 
 ## Channels — triage BOTH inboxes (the owner's choice)
 
@@ -75,4 +83,5 @@ FYI (M): <sender> — <one-liner>
 - **Ask-high to send.** Drafts wait for approval; nothing leaves without it.
 - **Conservative archiving.** Only clearly-automated noise is auto-archived; anything from a real person
   stays in the inbox and gets surfaced.
-- **Cite** sender + subject; never invent a message. Resolve senders against Notion **People** when useful.
+- **Cite** sender + subject; never invent a message. Resolve senders against the store's **People**
+  domain (`store-search`/`store-query`) when useful.
