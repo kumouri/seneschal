@@ -6,7 +6,7 @@ description: >-
   carry-over). Mostly reads, but not read-only — it delivers the brief + trace and can act on what it
   surfaces under the act-low / ask-high gate. Use for "morning brief", "what's on today", "catch me up",
   or the scheduled morning run. Delegated to by the seneschal orchestrator (Brief mode).
-compatibility: Requires the Notion MCP (mcp__*__notion-*) and a Calendar MCP. Reads the assistant's persona + references.
+compatibility: Requires a configured seneschal store (run /setup-store) and a Calendar MCP. The Notion backend additionally requires the Notion MCP (mcp__*__notion-*). Reads the assistant's persona + references.
 ---
 
 # Morning Briefing (Seneschal · Brief mode)
@@ -19,49 +19,50 @@ delivery attaches in a later phase.
 
 ## Read first (once)
 
+**Store access.** Read `../../seneschal/store/config.json` for the active backend, then that backend's
+`../../seneschal/store/<backend>/schema.md` + `mapping.md`. Speak the six **store verbs** (`store-query`
+/ `store-get` / `store-create` / `store-update` / `store-append` / `store-search`) plus domain nouns and
+canonical, **emoji-free** option values; the mapping resolves them to the backend's tools. This mode only
+reads the store (`store-query`/`store-get`). **Never fetch schemas at runtime.**
+
 - `../../persona/persona.md` (else `../../persona/persona.default.md`) and
   `../../persona/owner-profile.md` (if present) — voice + who the owner is.
 - `../../seneschal/references/briefing.md` — the exact sections, ordering, and rules (this is the spec).
-- `../../seneschal/references/databases.md` — Notion IDs/queries for Tasks, Projects, Important Flags.
+- `../../seneschal/references/databases.md` — the domain/ID map for Tasks, Projects, Important Flags
+  (Notion backend).
 - `../../seneschal/references/calendar-mapping.md` — Calendar MCP tools + finding the primary calendar.
-- Notion write/query mechanics (only querying here):
-  `../journal-steward/daily-journal-steward/references/notion-mcp-mapping.md`.
-
-**Do not fetch Notion schemas at runtime** — the IDs/columns you need are in `databases.md`.
+- Backend query mechanics (only reading here): `../../seneschal/store/<backend>/mapping.md` — on Notion,
+  the `date:<Prop>:start` projection + throttle rules.
 
 ## Steps
 
 **1 — Orient + read the pre-stage.** Determine "today" in **the owner's configured timezone**.
 (After-midnight = still the prior day for journal/carry-over purposes.) Then read
 `../../seneschal/state/context-digest.md`'s **`## Brief pre-stage (Dream)`** block — last night's Dream
-snapshotted this Brief's Notion inputs (open Tasks due/overdue today + tomorrow, Active/Carrying-Over
+snapshotted this Brief's store inputs (open Tasks due/overdue today + tomorrow, Active/Carrying-Over
 Flags, In-Progress Projects) there, timestamped. It's the **base set**; step 2 only delta-checks it live
-rather than re-firing the full Notion batch. **If the block is absent or its stamp isn't last night**
-(fresh checkout / Dream didn't run), skip this and take the full-batch path noted in step 2.
+rather than re-firing the full `store-query` batch. **If the block is absent or its stamp isn't last
+night** (fresh checkout / Dream didn't run), skip this and take the full-batch path noted in step 2.
 
-**2 — Gather, read-only.** Prefer **pre-staged base + delta live-queries** over a full fan-out
-(`../../seneschal/references/notion-rate-limits.md` — Dream digest pre-staging keeps the morning read
-cheap).
+**2 — Gather, read-only.** Prefer **pre-staged base + delta live-queries** over a full fan-out (on the
+Notion backend this keeps the morning read cheap — `../../seneschal/store/notion/mapping.md` → Throughput).
 - **Calendar:** `list_events` for today across the owner's **include-set** of calendars (see the
   confirmed list in `calendar-mapping.md` — an owner often has many calendars; don't assume only the
-  primary, and de-dupe any to-do-app task-mirror calendars against Notion). If it's early and today is
-  light, also grab the next upcoming event. (Always live — the digest is Notion-only.)
-- **Notion — delta path (when the pre-stage block is fresh):** take Tasks / Flags / Projects from the
-  block as the base, then issue only the **delta** queries the late-evening snapshot can't cover:
-  **Tasks** (`00000000-0000-0000-0000-000000000001`) with `"date:Completed:start" = today` **or**
-  created since the block's stamp — to drop what's since been done and add same-day-new due items; and
-  any **Flag** (`00000000-0000-0000-0000-000000000003`) / **Project**
-  (`00000000-0000-0000-0000-000000000002`) whose `Last Updated`/last-edited ≥ the stamp. Filter on
-  `"date:Due:start"`, never `"Due"` (SQL projection gotcha in `databases.md`).
-- **Notion — full-batch fallback (no fresh block):** run the original three reads in ONE parallel batch —
-  **Tasks (`00000000-0000-0000-0000-000000000001`)** due on/before today with `Status` not in
-  (`Done`,`Archived`) (filter `"date:Due:start"`, not `"Due"`; most tasks are an undated stale backlog,
-  so the date filter is what keeps the brief to genuinely due/overdue items); **Important Flags
-  (`00000000-0000-0000-0000-000000000003`)** `Status` in (`Active`,`Carrying Over`); **Projects
-  (`00000000-0000-0000-0000-000000000002`)** `Status = In Progress`.
-- **Carry-over (always live):** `notion-fetch` the Interstitial Journal
-  (`00000000-0000-0000-0000-000000000010`) and read its top carry-over callout — it changes overnight
-  and is never pre-staged.
+  primary, and de-dupe any to-do-app task-mirror calendars against the store's Tasks). If it's early and
+  today is light, also grab the next upcoming event. (Always live — the digest is store-only.)
+- **Store — delta path (when the pre-stage block is fresh):** take Tasks / Flags / Projects from the
+  block as the base, then `store-query` only the **delta** the late-evening snapshot can't cover:
+  **Tasks** completed today **or** created since the block's stamp — to drop what's since been done and
+  add same-day-new due items; and any **Flag** / **Project** changed since the stamp. Filter on the
+  due-date field (on Notion the `date:Due:start` projection, never the bare `Due` — the gotcha lives in
+  `../../seneschal/store/notion/mapping.md`).
+- **Store — full-batch fallback (no fresh block):** run the original three reads in ONE parallel
+  `store-query` batch — **Tasks** due on/before today with status not in (done, archived) (most tasks are
+  an undated stale backlog, so the date filter is what keeps the brief to genuinely due/overdue items);
+  **Important Flags** status in (active, carrying-over); **Projects** status = in-progress. (Exact
+  option strings + collection ids per backend are in `databases.md` / `store/<backend>/schema.md`.)
+- **Carry-over (always live):** `store-get` the Interstitial Journal and read its top carry-over callout
+  — it changes overnight and is never pre-staged.
 - **Pending rulings (always live, local — no Notion read):** read the **Pending** section of
   `../../seneschal/references/proposed-learnings.md`. Every un-ruled proposal goes into the brief's
   **📜 Rulings wanted** section until the owner rules on it (their standing instruction).

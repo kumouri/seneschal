@@ -24,9 +24,14 @@ persona/           who the assistant is + who it works for (see persona/README.m
 seneschal/
   SKILL.md         the orchestrator — modes (Chat/Brief/Wrap/Triage/Ask/Watch/Dream/Journal/
                    Reminders/Forge/Archive), execution rules, the Advisor Chain, reference index
-  references/      databases (placeholder-id schema registry), calendar/comms mapping, briefing,
-                   reminders-policy, autonomy-policy(+config), memory protocol, advisor-chain,
-                   salience, archons, notion-rate-limits, proposed-learnings (Dream's PR target)
+  store/           the pluggable system of record (see store/README.md): config.json picks the
+                   active backend; each store/<backend>/ pair is schema.md (domain map) + mapping.md
+                   (the six store verbs → that backend's tools). Ships notion/ (MCP; the reference
+                   backend), obsidian/ + markdown/ (filesystem). Skills speak backend-neutral verbs
+  references/      databases (placeholder-id schema registry, Notion backend), calendar/comms mapping,
+                   briefing, reminders-policy, autonomy-policy(+config), memory protocol, advisor-chain,
+                   salience, archons, notion-rate-limits (stub → store/notion/mapping.md),
+                   proposed-learnings (Dream's PR target)
   docs/            asyncio-daemon-design.md + asyncio-daemon-plan.md (the reactive-core design)
   scripts/         presence.py (resident asyncio daemon), sentinel.py (helper/one-shot),
                    identity_common.py (persona/identity.json reader — never raises, defaults
@@ -41,7 +46,7 @@ seneschal/
 ```
 
 subagents/         morning-briefing, eod-wrap, email-triage, slack-triage, calendar-steward,
-                   notion-qa, reminders, message-archivist, journal-steward (generic core),
+                   store-qa, reminders, message-archivist, journal-steward (generic core),
                    archon-forge — the delegated skills the orchestrator dispatches to
 phone/             the voice call-screener (Cloudflare Workers + Twilio; deploys as
                    `seneschal-screener`) + the Seneschal Call Shield Android companion app
@@ -50,16 +55,21 @@ archons/           Archon staff data (Forge mode) — the shipped `proteus/` job
                    example (profile.example.json + stdlib tools); real needs/stables/profiles
                    are gitignored on installs
 
-Still to land: the `/setup-persona` wizard (the `persona/` surface + identity plumbing are in),
-`seneschal/store/` (pluggable backends).
+Still to land: the `/setup-persona` wizard (the `persona/` surface + identity plumbing are in) and the
+`/setup-store` flow (the `seneschal/store/` registries + backends are in; the skills + daemon now speak
+the abstraction — `/setup-store` writes the gitignored `store/config.json` + renders the real
+`store/<backend>/schema.md`).
 
 ## The daemon, briefly
 
 `seneschal/scripts/presence.py` is the always-on nerve center: a reactive asyncio core holding a
 warm `claude` CLI chat session (subscription-billed; it scrubs `ANTHROPIC_API_KEY`), firing
-reminders from the local queue, and running a cheap Watch comms-peek on cadence. It runs off
-`main` and reloads itself when a PR merges (`seneschald-update` scheduled task → ff-pull →
-graceful restart). Runtime state lives in gitignored `seneschal/state/`.
+reminders from the local queue, and running a cheap Watch comms-peek on cadence. It forwards the
+**store's MCP** (if any) into every spawned headless `claude` — resolved store-config-driven
+(`--store-mcp` override → `store/config.json`'s active backend → legacy `scripts/notion-mcp.json` →
+None; filesystem backends need none, `resolve_store_mcp`). It runs off `main` and reloads itself when a
+PR merges (`seneschald-update` scheduled task → ff-pull → graceful restart). Runtime state lives in
+gitignored `seneschal/state/`.
 
 ## Conventions
 

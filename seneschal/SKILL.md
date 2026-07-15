@@ -10,8 +10,9 @@ description: >-
   assistant for a briefing/"what's on today", to triage or screen email/Slack/invites, to answer
   a schedule/todo/project question, to run the journal, or any request addressed to the assistant.
 compatibility: >-
-  Requires the Notion MCP (tools mcp__*__notion-*) and a Calendar MCP. Email/Slack/SMS channels are
-  optional integrations (see references/comms-mapping.md). Reads the persona from ../persona/.
+  Requires a configured seneschal store (run /setup-store) and a Calendar MCP. The Notion backend
+  additionally requires the Notion MCP (tools mcp__*__notion-*). Email/Slack/SMS channels are optional
+  integrations (see references/comms-mapping.md). Reads the persona from ../persona/.
 ---
 
 # Seneschal — orchestrator
@@ -28,17 +29,27 @@ assistant's voice and tuned to the owner.
 
 ## Anchors & prerequisites
 
-- **Notion MCP must be connected.** All Notion reads/writes go through `mcp__<server>__notion-*`. The
-  schema/ID map is in `references/databases.md`; the canonical full map (every journal database) is in
-  `../subagents/journal-steward/daily-journal-steward/references/databases.md`. **Never fetch schemas
-  at runtime** — that is the #1 budget killer.
-- **Notion rate-limits *reads*.** Batched-but-unbounded parallel reads trip Notion's ~3 req/s limit
-  (429), while singular writes don't — cap concurrent `notion-*` reads and reuse baked-in references.
-  See `references/notion-rate-limits.md` (and execution rule #3 below).
+- **Store access — speak verbs, not backends.** The owner's durable data lives in a **store** whose
+  backend is their choice (Notion, Obsidian, or plain Markdown). Read `store/config.json` for the active
+  backend, then that backend's `store/<backend>/schema.md` (domain map: which collection/folder holds
+  each domain, its fields, canonical option values) and `store/<backend>/mapping.md` (how each verb
+  executes). Skill prose speaks the six backend-neutral **store verbs** — `store-query` / `store-get` /
+  `store-create` / `store-update` / `store-append` / `store-search` — plus domain nouns and canonical,
+  **emoji-free** option values (`status: done`, `importance: critical`); the mapping resolves them to the
+  backend's tools (on Notion, `mcp__<server>__notion-*`). The assistant-facing domain/ID map is in
+  `references/databases.md`; the canonical full map (every journal database) is in
+  `../subagents/journal-steward/daily-journal-steward/references/databases.md`. **Never fetch schemas at
+  runtime** — that is the #1 budget killer; trust `schema.md` / `databases.md`.
+- **Mind the store's throughput rules.** On the Notion backend, batched-but-unbounded parallel reads trip
+  its ~3 req/s limit (429) while singular writes don't, and the SQL query path has a second upstream
+  throttle — cap concurrent reads and prefer fetch-by-id / cached ids. Those quirks (and the mitigations)
+  live in `store/notion/mapping.md` → Throughput. Filesystem backends have no such limit; batch freely.
+  See also execution rule #3 below.
 - **Calendar MCP** for time/availability (see `references/calendar-mapping.md`).
 - **Timezone:** the owner's configured timezone; after-midnight activity counts as the prior day.
-- **Notion → MCP mechanics & gotchas** (dates, relations, status-vs-select, callouts/toggles): reuse
-  `../subagents/journal-steward/daily-journal-steward/references/notion-mcp-mapping.md`.
+- **Backend mechanics & gotchas** (dates, relations, status-vs-select, callouts/toggles, throttles) live
+  in the active backend's `store/<backend>/mapping.md` — on Notion, `store/notion/mapping.md` (the
+  journal-steward's `references/notion-mcp-mapping.md` remains the detailed Notion-AI-primitive map).
 
 ## Modes — pick one from the trigger
 
@@ -48,7 +59,7 @@ assistant's voice and tuned to the owner.
 | **Brief** | "morning brief", "what's on today", "catch me up", scheduled morning run | ✅ built (`../subagents/morning-briefing/`) |
 | **Wrap** | "end of day", "wrap up", "what did I do today", scheduled evening run | ✅ built (`../subagents/eod-wrap/`) |
 | **Triage** | "triage my inbox/Slack/invites", "what needs me", a screening sweep | ✅ built — Slack, Email (Proton+Gmail), calendar invites |
-| **Ask** | a question about schedule / todos / projects / notes | ✅ built (`../subagents/notion-qa/`) |
+| **Ask** | a question about schedule / todos / projects / notes | ✅ built (`../subagents/store-qa/`) |
 | **Watch** | the sentinel woke the brain (cheap comms-peek gate; headless) | ✅ built — see below |
 | **Dream** | nightly consolidation after Wrap (condense the day, propose learnings) | ✅ built — see below |
 | **Daily Journal** | "run the journal", "process my journal", "DJS", scheduled early-morning run | ✅ built — delegate to `../subagents/journal-steward/daily-journal-steward/SKILL.md` |
@@ -64,15 +75,18 @@ delegate to the **Daily Journal** subagent and follow *its* SKILL.md exactly —
 
 1. **Critical path first.** Do the can't-fail core of the mode before any optional enrichment, so a
    cut-short run still delivers value.
-2. **Never load DB schemas at runtime** — use `references/databases.md` (and the journal-steward map).
-   Only fetch a schema if a write fails with an explicit property error, and only that one DB.
-3. **Batch aggressively — but cap concurrent Notion reads.** Issue independent reads/writes for a phase
-   in parallel; only split when a later call needs an ID/URL from an earlier one. **Aggressive ≠
-   unbounded:** Notion rate-limits reads at ~3 req/s, so keep concurrent `notion-*` reads to a handful,
-   prefer one broad query over many narrow fetches, and lean on the baked-in references
-   (`references/databases.md`, `state/context-digest.md`) instead of re-querying. On a `429`, back
-   off and retry serially — never re-fire the whole batch. See `references/notion-rate-limits.md`.
-   (Writes are singular, so they don't burst — this is a read-side concern.)
+2. **Never load DB schemas at runtime** — use `references/databases.md` / the active backend's
+   `store/<backend>/schema.md` (and the journal-steward map). Only fetch a schema if a write fails with
+   an explicit property error, and only that one domain.
+3. **Batch aggressively — but respect the store's throughput rules.** Issue independent store verbs for a
+   phase in parallel; only split when a later call needs an ID/URL from an earlier one. **Aggressive ≠
+   unbounded:** on the **Notion backend**, reads throttle at ~3 req/s (429) so keep concurrent reads to a
+   handful, prefer one broad `store-query` over many narrow `store-get`s (but prefer `store-get`/cached
+   ids when you already hold them — the SQL path has a second upstream throttle), and lean on the baked-in
+   references (`references/databases.md`, `state/context-digest.md`) instead of re-querying. On a `429`,
+   back off and retry serially — never re-fire the whole batch. Filesystem backends have no such limit.
+   Full quirks + mitigations: `store/notion/mapping.md` → Throughput. (Writes are singular, so they don't
+   burst — this is a read-side concern.)
 4. **Don't re-narrate.** Plan in one internal pass, then act. Lead the user-facing output with the
    decision, not your process.
 5. **Respect the approval gate — every mode can write.** No mode is read-only. Any skill (Brief and Wrap
@@ -80,8 +94,9 @@ delegate to the **Daily Journal** subagent and follow *its* SKILL.md exactly —
    deliverable, reconciling reminders — and must **draft-and-hold ask-high** ones (flipping/merging/
    archiving Tasks & Goals, outbound sends, calendar RSVPs) for approval (`references/autonomy-policy.md`).
    When unsure which side of the line an action is on, ask.
-6. **Leave a trace.** Substantive runs write a Run Log entry (the 🧭 Notion DB — system of record —
-   mirrored to `state/run-log.md`) and, where relevant, update the carry-over (`state/carry-over.md`).
+6. **Leave a trace.** Substantive runs write a Run Log entry (`store-create` + `store-append` in the Run
+   Log domain — the active store is the system of record — mirrored to `state/run-log.md`) and, where
+   relevant, update the carry-over (`state/carry-over.md`).
    Both live files are gitignored local-first caches; the protocol for all of the assistant's memory
    files is `references/memory.md`. Read-only one-off questions need not.
 7. **Delegate, don't duplicate.** When a subagent owns a domain, load its SKILL.md and run it; never
@@ -165,30 +180,34 @@ This is the assistant's primary interactive surface — an ongoing conversation,
 4. **Leave a trace only when it's earned.** A substantive run (a triage sweep, sends, Notion writes)
    writes a Run Log entry; idle chat and read-only questions do not.
 5. **Acks persist to the store, not just to chat.** When the owner acknowledges a reminder in
-   conversation ("took'em", "done", "did that", "already ate"), **write the ack through to the ⏰
-   Reminders DB now** — set the row's `Status = Done` (for **every** `Type` — a plain ack means done
-   *for today*, not retired; the item still re-fires on its next cycle. Write `Finished` **only** if
-   they explicitly say they're *finished* with the item), `Last Acknowledged = today`,
-   `Consecutive Misses = 0` (act-low; see `references/databases.md` +
-   `references/reminders-policy.md`). Write those **fields** directly — do **not** just tick `Ack`:
-   the checkbox is the owner's one-tap affordance, and reconciling runs consume + untick it, so a tick
-   alone isn't the durable record. This way the next reminder slot sees it acked and stops re-firing,
-   and the EOD Wrap (which counts done-today off `Last Acknowledged`) picks it up.
+   conversation ("took'em", "done", "did that", "already ate"), **`store-update` the reminder row now** —
+   set `status: done` (for **every** reminder type — a plain ack means done *for today*, not retired; the
+   item still re-fires on its next cycle. Set `status: finished` **only** if they explicitly say they're
+   *finished* with the item), `last_acknowledged: today`, `consecutive_misses: 0` (act-low; see
+   `references/databases.md` + `references/reminders-policy.md`). Write those **fields** directly — do
+   **not** just flip the one-tap `ack` affordance: reconciling runs consume + reset it, so it alone isn't
+   the durable record. This way the next reminder slot sees it acked and stops re-firing, and the EOD Wrap
+   (which counts done-today off `last_acknowledged`) picks it up. On the **Notion backend**, resolve the
+   reminder row **by its cached page id** (skip the throttled query path) and set the emoji-bearing option
+   strings — the by-cached-id ack flow is worked end-to-end in `store/notion/mapping.md` → "the reminders
+   ack".
    **Then cancel the obsolete re-nudge:** run `scripts/reminders_dequeue.py --reminder-id <the row's
-   page id>` to drop any un-fired `state/reminders.json` nudge already staggered for that row — the
+   ref/id>` to drop any un-fired `state/reminders.json` nudge already staggered for that row — the
    daemon fires by `due_at` and can't read acks, so without this a nudge for the thing they just did
-   still buzzes (act-low; `references/reminders-policy.md` step 3, `state/README.md`). The chat session
-   is volatile (it winds down after idle, and a reboot clears it); the store is the durable record, so
-   an ack that lands only in chat is *lost* and the loop re-nudges the owner. Match the ack to the row
-   by reminder name/time. Flipping a *linked* Task/Goal to Done stays ask-high.
-   (This is why the presence daemon wires read/write Notion into the warm session —
-   `scripts/presence.py` `--notion-mcp` / auto-detected `scripts/notion-mcp.json`; see
-   `scripts/NOTION_MCP_SETUP.md`.)
+   still buzzes (act-low; `references/reminders-policy.md` step 3, `state/README.md`). This dequeue is
+   **daemon-local and backend-independent** (it never touches the store). The chat session is volatile
+   (it winds down after idle, and a reboot clears it); the store is the durable record, so an ack that
+   lands only in chat is *lost* and the loop re-nudges the owner. Match the ack to the row by reminder
+   name/time. Flipping a *linked* Task/Goal to Done stays ask-high.
+   (This is why the presence daemon wires the store's MCP into the warm session — `scripts/presence.py`
+   `--store-mcp` / the store-config-driven resolution; filesystem backends need none. See
+   `scripts/NOTION_MCP_SETUP.md` for the Notion backend.)
 6. **Never claim a write you didn't make.** Only say something is "done / logged / marked off / cleared /
    scheduled" when the underlying tool call **actually succeeded** — you saw it land, not just intended
-   it. If the Notion (or any) MCP is unreachable or a write errors, say so plainly in voice (*"I can't
-   reach the store this session, so I've parked that in carry-over to record on the next connected
-   run"*) and write it to carry-over / `state/pending-approvals.json` so it isn't lost. A cheerful
+   it. If the store (Notion MCP or the filesystem backend) is unreachable or a write errors, say so
+   plainly in voice (*"I can't reach the store this session, so I've parked that in carry-over to record
+   on the next connected run"*) and write it to carry-over / `state/pending-approvals.json` so it isn't
+   lost. A cheerful
    "✅ done" that didn't persist is worse than an honest "couldn't record it yet" — it desyncs the
    Tasks/Reminders DB from reality and silently breaks the Brief/Wrap. When unsure a write landed,
    **read it back** before claiming it.
@@ -247,16 +266,17 @@ the most recent Run Log carry-over and the journal's carry-over callout for anyt
 predates. Determine "today" in the owner's timezone.
 
 **Phase 1 — Gather (read-only) — pre-staged block first, then delta live-queries.**
-- **Notion (pre-staged):** last night's Dream snapshotted the Brief's Phase-1 Notion inputs — open Tasks
+- **Store (pre-staged):** last night's Dream snapshotted the Brief's Phase-1 store inputs — open Tasks
   due/overdue (today + tomorrow), Active/Carrying-Over Important Flags, in-flight Projects — into the
   **`## Brief pre-stage (Dream)`** block of `state/context-digest.md`, timestamped. **Read that block
-  first** and treat it as the base set — do **not** re-fire the full 4-read Notion batch. Then issue only
-  **delta** live-queries for what the digest can't have (it's ~22:00 the night before): Tasks with
-  `date:Completed:start = today` or newly created since the digest stamp (to drop what's since done and
-  add same-day new due items), and any Flag/Project change since that stamp (`Last Updated`/`Last edited`
-  ≥ stamp). If the block is **absent or stale** (no digest, or its stamp isn't last night), fall back to
-  the full parallel Notion batch. Always still fetch the **journal carry-over** callout live (cheap, and
-  it changes overnight). See `references/databases.md` + `references/briefing.md`.
+  first** and treat it as the base set — do **not** re-fire the full 4-read `store-query` batch. Then
+  issue only **delta** live `store-query`s for what the digest can't have (it's ~22:00 the night before):
+  Tasks completed today or newly created since the digest stamp (to drop what's since done and add
+  same-day new due items), and any Flag/Project changed since that stamp. If the block is **absent or
+  stale** (no digest, or its stamp isn't last night), fall back to the full parallel `store-query` batch.
+  Always still fetch the **journal carry-over** callout live (cheap, and it changes overnight). Filter on
+  the due-date field, not the raw name — on the Notion backend that's the `date:<Prop>:start` projection
+  (see `store/notion/mapping.md`). See `references/databases.md` + `references/briefing.md`.
 - **Calendar:** today's events (and the next event if early) — always live (not pre-staged; the digest is
   Notion-only). See `references/calendar-mapping.md`.
 - **Pending rulings:** read `references/proposed-learnings.md` → **Pending** (a local file — free, no
@@ -272,10 +292,11 @@ handle it under the gate (act-low directly; ask-high held).
 
 **Advisors:** `[trace?, orientation, retrieval, dispatch, gate]` — Trace off for read-only one-offs.
 
-Delegate to `../subagents/notion-qa/SKILL.md`. In short: route the question to the right source
-(Tasks/Projects/Goals/Flags/People, or `notion-search` for fuzzy/journal content), answer concisely and
-**cite the pages**, and treat any **write** (add/update a task, change status) as **ask-high** —
-draft → approve → execute. Reads are act-low. Defer journal specifics to the journal-steward.
+Delegate to `../subagents/store-qa/SKILL.md`. In short: route the question to the right domain
+(`store-query` Tasks / Projects / Goals / Flags / People, or `store-search` for fuzzy/journal content),
+answer concisely and **cite the pages/refs**, and treat any **write** (`store-create`/`store-update` a
+task, change status) as **ask-high** — draft → approve → execute. Reads are act-low. Defer journal
+specifics to the journal-steward.
 
 ## Wrap mode — end-of-day
 
@@ -283,26 +304,27 @@ draft → approve → execute. Reads are act-low. Defer journal specifics to the
 
 Delegate to `../subagents/eod-wrap/SKILL.md`: a short evening recap (done / slipped / waiting
 on you / tomorrow preview), write-enabled under the gate. Complements the morning Brief. "Done today"
-comes from **both** Tasks (`Completed` = today) **and** ⏰ Reminders (`Last Acknowledged` = today,
-`Status IN (Done, Finished)` — both count as acked-done: `Done` = done-for-today, `Finished` = a retired
-item acked on its way out) — so acks made over Telegram/chat count; never judge completion by the `Ack`
-checkbox (it's consumed + unticked by the reminder slots).
+comes from **both** Tasks (`completed` = today) **and** Reminders (`last_acknowledged` = today,
+`status` in (done, finished) — both count as acked-done: `done` = done-for-today, `finished` = a retired
+item acked on its way out) — so acks made over Telegram/chat count; never judge completion by the one-tap
+`ack` affordance (it's consumed + reset by the reminder slots).
 
 ## Reminders mode — nudges & accountability
 
 **Advisors:** full chain **+ Prioritize** — `[trace, orientation, retrieval, dispatch, gate, prioritize]`. The **status digest** is a pull surface (rank, show all); an actual **nudge** is push (adaptive vital-few), still fired **staggered, one per buzz** — the gate picks the few, it never merges them.
 
 Delegate to `../subagents/reminders/SKILL.md`. In short: the assistant tracks the things the owner wants
-reminding of — recurring habits, today's unconfirmed todos, and deadlines approaching — in the **⏰
-Reminders** DB, and runs on four daily slots (e.g. 08:00 / 12:30 / 18:30 / 21:30 local) plus on demand.
-It **expects a response**: important items (`🚨 Critical`/`⭐ High`) re-fire until confirmed done;
-low-stakes ones stop re-nagging but accumulate misses, and a repeated low-stakes skip earns **one dry,
-factual rib** (never shaming). Behavior — slots, the state machine, the rib threshold, the tone ladder —
-lives in `references/reminders-policy.md`. The tracker writes are **act-low**; flipping a *linked*
-Task/Goal to Done is **ask-high** (propose it). v1 ack = the `Ack` checkbox or telling the assistant in
-chat — either way the run applies it to the row (`Status = Done` for every `Type` — done *for today*,
-still active; `Finished` is explicit-retire only — `Last Acknowledged = today`, misses zeroed) and
-**unticks `Ack`**; `Last Acknowledged` is the durable done-record the Wrap reads.
+reminding of — recurring habits, today's unconfirmed todos, and deadlines approaching — in the
+**Reminders** domain of the store, and runs on four daily slots (e.g. 08:00 / 12:30 / 18:30 / 21:30
+local) plus on demand. It **expects a response**: important items (`importance: critical` / `high`)
+re-fire until confirmed done; low-stakes ones stop re-nagging but accumulate misses, and a repeated
+low-stakes skip earns **one dry, factual rib** (never shaming). Behavior — slots, the state machine, the
+rib threshold, the tone ladder — lives in `references/reminders-policy.md`. The tracker writes are
+**act-low**; flipping a *linked* Task/Goal to Done is **ask-high** (propose it). v1 ack = the one-tap
+`ack` affordance or telling the assistant in chat — either way the run `store-update`s the row
+(`status: done` for every type — done *for today*, still active; `status: finished` is explicit-retire
+only — `last_acknowledged: today`, misses zeroed) and **resets `ack`**; `last_acknowledged` is the
+durable done-record the Wrap reads.
 
 ## Triage mode — screen comms
 
@@ -380,13 +402,14 @@ On a Dream run:
    carry-over (`state/carry-over.md` + the journal carry-over). **Overwrite** the digest with a tight
    view: what happened, open loops, what's queued for tomorrow, active flags, pending reminders. Keep it
    short — it's the cheap orientation the morning **Brief** reads first, not a transcript.
-1b. **Pre-stage the Brief's Phase-1 Notion inputs (act-low, read-only) → the `## Brief pre-stage (Dream)`
-   block of the digest.** In the same consolidation pass, snapshot the Brief's read-only Notion reads so
-   the morning Brief can skip its full 4-read batch and only delta-check (`references/notion-rate-limits.md`
-   — Dream digest pre-staging). Query, in **one parallel batch** (these are Notion reads Dream already has
-   the MCP for): open **Tasks** due/overdue **today _and_ tomorrow** (`Status NOT IN ('Done','Archived')`
-   and `date:Due:start ≤ tomorrow`), **Active/Carrying-Over Important Flags**, and **In-Progress
-   Projects** (see `references/databases.md`). Write them into a **clearly-labeled, timestamped**
+1b. **Pre-stage the Brief's Phase-1 store inputs (act-low, read-only) → the `## Brief pre-stage (Dream)`
+   block of the digest.** In the same consolidation pass, snapshot the Brief's read-only store reads so
+   the morning Brief can skip its full 4-read batch and only delta-check (`store/notion/mapping.md` →
+   Throughput — Dream digest pre-staging). `store-query`, in **one parallel batch**: open **Tasks**
+   due/overdue **today _and_ tomorrow** (status not in (done, archived) and due ≤ tomorrow),
+   **Active/Carrying-Over Important Flags**, and **In-Progress Projects** (see `references/databases.md`;
+   the Notion backend's exact option strings + `date:Due:start` filter are in `store/notion/mapping.md`).
+   Write them into a **clearly-labeled, timestamped**
    `## Brief pre-stage (Dream)` block (lead line `_Snapshot: <ISO local timestamp>._`) with each item's
    name + `id`/`url` so the Brief can cite and diff. **Staleness caveat, kept explicit:** this snapshot is
    ~22:00 the night before, so it predates any overnight/early-morning change — the Brief still runs a
@@ -398,7 +421,8 @@ On a Dream run:
    the current context snapshot unaffected).
 2b. **Refresh the semantic index (act-low, local — Retrieval advisor phase B).** Incrementally update the
    local RAG index so tomorrow's retrieval has today's history. Fetch journal/notes entries new-or-changed
-   since the last index **via the Notion MCP** (Dream has it), write them to a JSONL
+   since the last index **from the store** (`store-query`/`store-search` the journal & notes domains),
+   write them to a JSONL
    (`{"source","ref","text"}` per line), then run `python scripts/rag_index.py --local --ingest <jsonl>`
    (incremental — unchanged docs skip; local-only, no outbound). If Ollama/`nomic-embed-text` is
    unavailable, skip silently — the index is a regenerable cache and Retrieval falls back to Notion-search.
@@ -518,13 +542,15 @@ it — is in `references/memory.md`.
 
 | File | Use it for |
 |------|------------|
-| `references/databases.md` | Assistant-facing Notion schema subset (Tasks, Projects, Flags, People, Goals) + the Run Log; pointer to the canonical journal map. Placeholder ids until store setup fills a local copy. |
+| `store/README.md` | **The store abstraction:** the three-step indirection (`config.json` → `<backend>/schema.md` → `<backend>/mapping.md`), the six store verbs, and the backends (notion / obsidian / markdown). Read to understand how a skill's verbs reach the owner's data. |
+| `store/<backend>/schema.md` / `mapping.md` | The active backend's domain map (fields, canonical option values) + how each store verb executes on it. `store/notion/mapping.md` also holds the throughput/429 rules + the by-cached-id reminders-ack flow. |
+| `references/databases.md` | Assistant-facing domain/schema subset (Tasks, Projects, Flags, People, Goals) + the Run Log — the Notion backend's schema restated for the assistant's own modes; pointer to the canonical journal map. Placeholder ids until store setup fills a local copy. |
 | `references/calendar-mapping.md` | Calendar MCP tools + which calendar is the owner's. |
 | `references/comms-mapping.md` | Email (Proton/Gmail), Slack, Twilio/SMS tool mapping + gotchas. |
 | `references/advisor-chain.md` | The Advisor Chain — the ordered per-turn interceptor pipeline (Spring-AI-style): the advisors, their in/out hooks, the shared turn-context, per-mode composition, and the deferred code-backed rails. |
 | `references/briefing.md` | What a morning Brief / EOD Wrap contains and how to source each part. |
 | `references/reminders-policy.md` | Reminders/nudges: slots, escalation state machine, rib threshold + tone ladder. |
-| `references/notion-rate-limits.md` | Why Notion 429s reads (not writes) + rules to keep reads cheap/unbursty. |
+| `references/notion-rate-limits.md` | Stub → the Notion backend's throughput rules now live in `store/notion/mapping.md` (why Notion 429s reads, not writes, + how to stay under). |
 | `references/autonomy-policy.md` | Act-low vs ask-high rules; the dial toward fuller autonomy. |
 | `references/autonomy-config.json` | Machine-readable companion to the policy — the autonomy dial. |
 | `references/memory.md` | **The one doc** for the assistant's local-first memory: the Run Log write protocol, the carry-over + held-approval loop, and the context-digest. The live data lives in `../state/` (below); this is just how it works. |

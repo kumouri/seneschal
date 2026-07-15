@@ -25,9 +25,9 @@ Durability: inbound messages are consumed off Telegram/Discord with the offset c
 persists its **action queue** (unanswered messages) to state/presence-state.json after every step and on
 exit, and reloads it on startup — a restart (routine via `reseneschald` after a PR merge) never drops a
 message it had already taken. The fire-and-forget headless runs (peek + scheduled slots) are serialized
-to one at a time so their Notion read-bursts don't overlap and trip Notion's rate limit; they are ALSO
-deferred while the warm chat session is actively processing a turn, so a chat turn's reads and a slot's
-read-burst never overlap either. Chat is priority and is never delayed — only the slot/peek waits (it
+to one at a time so their store read-bursts don't overlap and (on a rate-limited backend like Notion)
+trip its limit; they are ALSO deferred while the warm chat session is actively processing a turn, so a
+chat turn's reads and a slot's read-burst never overlap either. Chat is priority and is never delayed — only the slot/peek waits (it
 retries on the next tick, reusing the same deferral path as an in-flight headless run).
 
 **Subscription, not API.** The warm session is the `claude` **CLI** (`-p --input-format stream-json
@@ -115,10 +115,16 @@ CONTROL_QUEUE = "control-queue.json"
 # When a defer-until-idle control is waiting, wind the warm session down after just this much quiet (1 min)
 # instead of the full --idle-min, so the reload lands promptly after the owner stops typing (never mid-exchange).
 CONTROL_PENDING_IDLE_SEC = 60.0
-# Default Notion MCP config: a read/write Notion server the headless daemon threads into every claude it
-# spawns. The interactive app's Notion connector is NOT inherited by headless `claude -p`, so without this
-# the warm Telegram session can chat but can't read/write Notion (acks never persist → the next slot re-fires).
-# Drop scripts/notion-mcp.json in place (see NOTION_MCP_SETUP.md) and it's picked up automatically.
+# Store-config file: which backend the assistant uses, and (for MCP-backed backends like Notion) the MCP
+# config to thread into every spawned claude. The daemon reads backends[active].mcp_config from here — see
+# resolve_store_mcp(). Gitignored (written by /setup-store); seed is store/config.example.json.
+STORE_CONFIG = os.path.join(REPO_ROOT, "seneschal", "store", "config.json")
+# Legacy Notion MCP config (back-compat): a read/write Notion server the headless daemon threads into every
+# claude it spawns. The interactive app's Notion connector is NOT inherited by headless `claude -p`, so
+# without a store MCP the warm Telegram session can chat but can't read/write the store (acks never persist
+# → the next slot re-fires). This path is now a FALLBACK — the store config (above) is the primary source;
+# an install predating /setup-store that has scripts/notion-mcp.json still works. Drop it in place (see
+# NOTION_MCP_SETUP.md) and it's picked up when no store/config.json exists.
 DEFAULT_NOTION_MCP = os.path.join(SCRIPT_DIR, "notion-mcp.json")
 # discord.env is auto-detected the same way (see DISCORD_SETUP.md): drop the file in scripts/ and the
 # two-way Discord channel (gateway push, REST fallback) turns on — no launcher edit. --no-discord opts out.
@@ -173,6 +179,83 @@ def child_env() -> dict:
     return env
 
 
+# --------------------------------------------------------------------------- store MCP resolution
+
+def _load_store_config(path: str) -> "tuple[dict, bool]":
+    """Read store/config.json defensively — NEVER raises (wrapped exactly like load_identity, so a
+    broken/absent config can't keep the daemon from booting). Returns (config_dict, ok): ok is False
+    when the file is absent or unparseable (config_dict is {} then), True when it parsed to a dict."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):  # missing file / bad JSON — treat as "not configured"
+        return {}, False
+    if isinstance(data, dict):
+        return data, True
+    return {}, False
+
+
+def _resolve_store_path(p: str) -> str:
+    """Resolve a store-config path string. Paths are forward-slash (Windows-safe JSON); `~` is expanded
+    here, and a relative path is taken against the repo root (mcp_config ships as e.g.
+    'seneschal/store/notion/mcp.json'). See store/README.md."""
+    p = os.path.expanduser(p)
+    if not os.path.isabs(p):
+        p = os.path.join(REPO_ROOT, p)
+    return os.path.normpath(p)
+
+
+def resolve_store_mcp(args, config_path: str | None = None,
+                      legacy_mcp: str | None = None) -> "tuple[str | None, str]":
+    """Decide which MCP config (if any) the daemon forwards into every spawned headless `claude` — now
+    driven by the pluggable store config (store/README.md), not hardwired to Notion. Returns
+    (path_or_None, log_line); the caller assigns the path to args.notion_mcp (the attribute the peek /
+    slot / warm-session spawns still read) and logs the line. Never raises.
+
+    Resolution order:
+      1. **Explicit flag** — `--store-mcp` (or the deprecated `--notion-mcp` alias), i.e. args.store_mcp.
+      2. **store/config.json** — `backends[active].mcp_config`, when that key exists AND the file is
+         present. This is how a Notion-configured install wires its MCP.
+      3. **Legacy auto-detect** — scripts/notion-mcp.json, ONLY when config.json is absent/unparseable
+         (back-compat for an install that predates /setup-store).
+      4. **None.**
+
+    Filesystem backends (obsidian/markdown) carry no mcp_config, so they resolve to None — and that is
+    HEALTHY (logged informationally, not warned). The one WARN case is an active **notion** backend whose
+    mcp_config names a file that is missing. An absent/unparseable config.json logs a 'run /setup-store'
+    hint and forwards no MCP (chat still works)."""
+    config_path = config_path or STORE_CONFIG
+    legacy_mcp = legacy_mcp or DEFAULT_NOTION_MCP
+
+    explicit = getattr(args, "store_mcp", None)
+    if explicit:
+        return explicit, f"Store MCP wired for headless runs (explicit --store-mcp): {explicit}"
+
+    cfg, ok = _load_store_config(config_path)
+    if ok:
+        active = cfg.get("active") or "?"
+        backends = cfg.get("backends")
+        backend = backends.get(active) if isinstance(backends, dict) else None
+        mcp = backend.get("mcp_config") if isinstance(backend, dict) else None
+        if mcp:
+            resolved = _resolve_store_path(mcp)
+            if os.path.exists(resolved):
+                return resolved, f"Store: {active} (MCP wired for headless runs: {resolved})"
+            # A store that names an MCP but is missing it is genuinely broken — WARN, forward nothing.
+            return None, (f"! Store: active backend '{active}' names mcp_config '{mcp}' but the file is "
+                          f"missing ({resolved}) — headless runs can't reach the store (acks won't "
+                          "persist). Run /setup-store (see seneschal/store/notion/mapping.md).")
+        # No mcp_config → a filesystem backend (obsidian/markdown). Nothing to forward, and that's fine.
+        return None, f"Store: {active} (filesystem — no MCP needed)"
+
+    # config.json absent/unparseable: fall back to the legacy Notion MCP if present, else nudge to setup.
+    if os.path.exists(legacy_mcp):
+        return legacy_mcp, (f"Store not configured (no store/config.json); using legacy Notion MCP "
+                            f"{legacy_mcp}. Run /setup-store to migrate.")
+    return None, ("store not configured — run /setup-store. Spawning without a store MCP "
+                  "(chat still works; the store can't be read/written this run).")
+
+
 def local_now() -> datetime:
     """The owner's current local time as an aware datetime, via tz_common: the configured
     identity.owner.timezone when it resolves (tzdata ships in the uv venv now), else the
@@ -207,32 +290,31 @@ stay fully in character: reply as the assistant in the persona's voice, never as
 meta-narration, run any tools silently. Keep
 replies concise and chat-appropriate. Honor the act-low / ask-high gate (draft-and-hold anything
 outbound or destructive). Only tell {owner} something is done/logged/marked off/cleared when the tool call
-actually succeeded — if Notion or any tool is unreachable or errors, say so plainly and park it in
+actually succeeded — if the store or any tool is unreachable or errors, say so plainly and park it in
 carry-over; never claim a write that didn't land.
-You have the SAME Notion read/write access here as the full seneschal skill: reading is act-low, and act-low
+You have the SAME store read/write access here as the full seneschal skill: reading is act-low, and act-low
 tracker writes you should just make — don't merely say you will. In particular, when {owner} acknowledges a
-reminder ("took'em", "done", "did it", "already ate"), immediately WRITE that ack through to the ⏰
-Reminders DB — set the row's Status = Done (for EVERY Type — a plain ack means done FOR TODAY, not
-retired; the item still re-fires on its next cycle. Only write Finished if they EXPLICITLY say they're
-FINISHED with the item, e.g. done-for-good, no more reminders),
-Last Acknowledged = today, Consecutive Misses = 0, per seneschal/references/databases.md +
-reminders-policy.md. Write those FIELDS directly; do NOT just tick the
-Ack checkbox (it's {owner}'s one-tap affordance — reminder slots consume and untick it, so a tick alone
-is not the durable record; Last Acknowledged is what the EOD wrap counts). Then the next reminder slot
-sees it acked and stops re-firing. AFTER the Notion write, also run
-scripts/reminders_dequeue.py --reminder-id <that row's Notion page id>: I fire queued nudges by due_at and
-cannot read Notion acks, so that one call does two things — it pulls any obsolete nudge already staggered
+reminder ("took'em", "done", "did it", "already ate"), immediately `store-update` that reminder — set
+status: done (for EVERY type — a plain ack means done FOR TODAY, not retired; the item still re-fires on
+its next cycle. Only set status: finished if they EXPLICITLY say they're FINISHED with the item, e.g.
+done-for-good, no more reminders), last_acknowledged: today, consecutive_misses: 0 — resolving the write
+through the active store's mapping (store/<backend>/mapping.md) per reminders-policy.md. Set those FIELDS
+directly; do NOT just flip the one-tap ack affordance (reminder slots consume and reset it, so it is not
+the durable record; last_acknowledged is what the EOD wrap counts). Then the next reminder slot
+sees it acked and stops re-firing. AFTER the store write, also run
+scripts/reminders_dequeue.py --reminder-id <that reminder's ref>: I fire queued nudges by due_at and
+cannot read store acks, so that one call does two things — it pulls any obsolete nudge already staggered
 for the thing they just did, AND it records the ack to the durable local ledger (state/acks.json) so my
 fire path suppresses any OTHER un-fired nudge for that row (including a soft-digest that covers it, which a
 per-id pull can't reach). Run it once per acked row. The warm session is volatile (it winds down / a
-reboot clears it); Notion + that ledger are the durable record, so the ack MUST land there, not just in
+reboot clears it); the store + that ledger are the durable record, so the ack MUST land there, not just in
 this chat. Confirm only once the write succeeded; if
-Notion is unreachable, say so plainly and park it in carry-over. Flipping a *linked* Task/Goal to Done
+the store is unreachable, say so plainly and park it in carry-over. Flipping a *linked* Task/Goal to Done
 stays ask-high.
-Notion rate-limits reads: don't fan out a big parallel read burst — lean on the baked-in references
-(references/databases.md, state/context-digest.md) instead of re-querying, keep concurrent Notion reads to a
-handful, and if a read returns a rate-limit/429, wait a beat and retry serially rather than hammering.
-See seneschal/references/notion-rate-limits.md.
+Keep reads cheap: don't fan out a big parallel read burst — lean on the baked-in references
+(store/<backend>/schema.md, state/context-digest.md) instead of re-querying, and honor the active
+backend's throughput notes. On the Notion backend specifically, keep concurrent reads to a handful and,
+on a 429, wait a beat and retry serially rather than hammering (store/notion/mapping.md).
 If {owner} asks you to restart or reload yourself ("reseneschald", "restart", "reload your code"): do NOT run
 seneschald-control.ps1 or otherwise kill the daemon from here — you are running INSIDE that daemon, so a
 synchronous restart kills you mid-reply, your answer never sends, and the daemon replays the request on
@@ -1321,7 +1403,9 @@ def _respawn_detached(log) -> bool:
 
 # --------------------------------------------------------------------------- entry point
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The daemon's CLI parser. Extracted so the store-MCP flags (and their deprecated alias) can be
+    unit-tested without spinning the whole daemon."""
     p = argparse.ArgumentParser(description="Resident presence daemon (warm Telegram chat + reminders + peek).")
     p.add_argument("--state-dir", default=DEFAULT_STATE_DIR)
     p.add_argument("--telegram-env", default=DEFAULT_TELEGRAM_ENV)
@@ -1333,12 +1417,17 @@ def main() -> int:
     p.add_argument("--no-discord-gateway", action="store_true",
                    help="force Discord inbound onto REST polling even when websockets is available")
     p.add_argument("--claude-bin", default="claude", help="path to the claude CLI")
-    p.add_argument("--notion-mcp", default=None,
-                   help="path to an MCP config JSON (e.g. notion-mcp.json) giving the headless daemon "
-                        "read/write Notion; passed as --mcp-config to every spawned claude (chat + slots "
-                        "+ peek). If omitted, auto-detects scripts/notion-mcp.json when present.")
+    # --store-mcp is the primary flag; the store config (store/config.json) is the normal source, so this
+    # is only for an override. --notion-mcp is a DEPRECATED ALIAS (same dest) kept for back-compat.
+    p.add_argument("--store-mcp", dest="store_mcp", default=None,
+                   help="override: path to an MCP config JSON giving the headless daemon read/write access "
+                        "to the store; passed as --mcp-config to every spawned claude (chat + slots + peek). "
+                        "If omitted, resolved from store/config.json (backends[active].mcp_config), then a "
+                        "legacy scripts/notion-mcp.json. Filesystem backends (obsidian/markdown) need none.")
+    p.add_argument("--notion-mcp", dest="store_mcp", default=None,
+                   help="DEPRECATED alias for --store-mcp (same effect). Prefer --store-mcp / store/config.json.")
     p.add_argument("--no-notion", action="store_true",
-                   help="don't wire Notion even if scripts/notion-mcp.json exists (chat can't read/write Notion)")
+                   help="don't wire any store MCP even if one is configured (chat can't read/write the store)")
     p.add_argument("--model", default=None, help="model id for the warm chat session (default: CLI default)")
     p.add_argument("--permission-mode", default="bypassPermissions",
                    help="claude --permission-mode (the assistant's act-low/ask-high gate is the real safety)")
@@ -1378,7 +1467,11 @@ def main() -> int:
     p.add_argument("--log-file", default=None,
                    help="append daemon log lines here too (Task Scheduler drops stdout, so without this "
                         "there's no trace of e.g. a failed Telegram send). Rotated at ~2 MB.")
-    args = p.parse_args()
+    return p
+
+
+def main() -> int:
+    args = build_parser().parse_args()
 
     os.makedirs(args.state_dir, exist_ok=True)
 
@@ -1412,18 +1505,17 @@ def main() -> int:
                     # after main() closed the file) — stdout above still got the line.
                     pass
 
-    # Wire Notion (read/write) into every spawned claude. Explicit --notion-mcp wins; otherwise
-    # auto-detect scripts/notion-mcp.json so a headless daemon can persist acks/edits to Notion by
-    # default. --no-notion forces it off. Without a config here the warm session has no Notion at all.
+    # Wire the store's MCP (if any) into every spawned claude. The resolution is store-config-driven —
+    # see resolve_store_mcp(): explicit --store-mcp / --notion-mcp → store/config.json's active backend →
+    # legacy scripts/notion-mcp.json → None. Filesystem backends (obsidian/markdown) resolve to None, and
+    # that's HEALTHY. --no-notion forces it off entirely. The resolved path is kept on args.notion_mcp —
+    # the attribute the warm session / slots / peek spawns forward as --mcp-config.
     if args.no_notion:
         args.notion_mcp = None
-    elif not args.notion_mcp and os.path.exists(DEFAULT_NOTION_MCP):
-        args.notion_mcp = DEFAULT_NOTION_MCP
-    if args.notion_mcp:
-        log(f"Notion wired for headless runs (read/write): {args.notion_mcp}")
+        log("! Store MCP disabled (--no-notion) — headless chat/slots can't read or write the store.")
     else:
-        log("! Notion NOT wired — chat/slots can't read or write Notion (acks won't persist). "
-            "See scripts/NOTION_MCP_SETUP.md.")
+        args.notion_mcp, store_log = resolve_store_mcp(args)
+        log(store_log)
 
     # Auto-detect discord.env like notion-mcp.json: drop the file in scripts/ and Discord turns on.
     if args.no_discord:

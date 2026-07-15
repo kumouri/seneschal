@@ -405,20 +405,20 @@ This governs how `reminders_enqueue` computes `due_at` and how the Reminders mod
 
 ## Acknowledgment channel (v1 → v2)
 
-- **v1 (now):** the owner acks by ticking the `Ack` checkbox in Notion **or** telling the assistant in a
-  chat session (terminal `/assistant` or Telegram). Each slot reads that state first, so any ack before
-  the next run is honored. The nudge ends with *"tick Ack in Notion or tell me."* **A chat ack is only
-  honored if the Chat session writes it through to Notion** — the ⏰ row is the durable record; an ack that
-  stays in the (volatile, reboot-clearing) warm session is lost and the next slot re-fires it. Telegram
-  Chat runs headless, so the presence daemon must be wired with read/write Notion for this to land —
-  auto-detected `scripts/notion-mcp.json`, see `scripts/NOTION_MCP_SETUP.md`. (Chat write-through is
-  `seneschal/SKILL.md` Chat mode rule 5.)
-  **The checkbox is consumed, not kept:** the next reconciling run applies a tick (`Status = Done`, `Last
-  Acknowledged = today`, misses zeroed) and **unticks `Ack`**. So "were things finished today?" is
-  answered by `Last Acknowledged = today` + `Status`, never by scanning for ticked boxes — seeing all
-  `Ack` boxes unticked in the evening is the system working, not evidence nothing got done. Chat
-  write-through likewise sets the fields directly and leaves `Ack` alone (it's the owner's affordance,
-  not the agents').
+- **v1 (now):** the owner acks by the one-tap `ack` affordance in the store **or** telling the assistant
+  in a chat session (terminal `/assistant` or Telegram). Each slot reads that state first, so any ack
+  before the next run is honored. The nudge ends with *"tick Ack or tell me."* **A chat ack is only
+  honored if the Chat session writes it through to the store** — the Reminders row is the durable record;
+  an ack that stays in the (volatile, reboot-clearing) warm session is lost and the next slot re-fires it.
+  Telegram Chat runs headless, so the presence daemon must be wired with the store's read/write MCP for
+  this to land — resolved store-config-driven (`store/config.json`; a legacy auto-detect of
+  `scripts/notion-mcp.json` on the Notion backend), see `scripts/NOTION_MCP_SETUP.md`. Filesystem backends
+  need no MCP. (Chat write-through is `seneschal/SKILL.md` Chat mode rule 5.)
+  **The one-tap `ack` is consumed, not kept:** the next reconciling run applies it (`status: done`,
+  `last_acknowledged: today`, misses zeroed) and **resets `ack`**. So "were things finished today?" is
+  answered by `last_acknowledged: today` + `status`, never by scanning for set flags — seeing all `ack`
+  flags cleared in the evening is the system working, not evidence nothing got done. Chat write-through
+  likewise sets the fields directly and leaves `ack` alone (it's the owner's affordance, not the agents').
 - **v2 (later, designed-for):** the warm Telegram session already parses a reply like `done` / `skip` /
   `later <which>` and writes it back to the **same** Reminders fields (v1 already does the write-through
   above); v2 layers on richer reply grammar and ack-gated `Call Me` escalation — no schema or

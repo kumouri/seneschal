@@ -5,7 +5,7 @@ description: >-
   #team, #eng) — summarizes what happened, and surfaces what actually needs a reply, drafting responses
   (held for approval) where useful. Use for "triage my Slack", "what did I miss on Slack", "anything
   need me in Slack". Delegated to by the seneschal orchestrator (Triage mode).
-compatibility: Requires the Slack MCP (mcp__*__slack_*). Reads the assistant's persona + references.
+compatibility: Requires the Slack MCP (mcp__*__slack_*). Sender lookups use the configured seneschal store's People domain (run /setup-store; the Notion backend needs the Notion MCP) — optional. Reads the assistant's persona + references.
 ---
 
 # Slack Triage (Seneschal · Triage mode)
@@ -13,6 +13,12 @@ compatibility: Requires the Slack MCP (mcp__*__slack_*). Reads the assistant's p
 Screen the owner's Slack and hand them **signal, not a transcript** — in the persona's voice,
 decision-first. Reading and summarizing is act-low. **Sending/posting is ask-high** — draft-and-hold,
 never auto-send (`../../seneschal/references/autonomy-policy.md`).
+
+**Store access (optional, for People).** This mode's data lives in Slack, not the store. It touches the
+store only to resolve a sender to a known person: `store-search`/`store-query` the **People** domain (the
+mapping resolves it to the active backend — on Notion, `mcp__*__notion-*`; see
+`../../seneschal/store/config.json` for which backend). If the store isn't configured, skip the lookup.
+**Never fetch schemas at runtime.**
 
 The owner's Slack `user_id` (the connected account) is a per-install value — resolve it once
 (`slack_search_users` / `slack_read_user_profile`) and record it in your local copy of
@@ -31,7 +37,7 @@ Unix timestamps for `before`/`after`.
 - **Threads they're in / busy channels:** `slack_read_thread` for threads surfaced above; skim
   high-volume channels (e.g. #team, #eng) only if the owner asked.
 
-**3 — Classify each item** (resolve senders against Notion **People** when useful):
+**3 — Classify each item** (resolve senders against the store's **People** domain — `store-search`/`store-query` — when useful):
 - **Needs a reply** — a direct question/ask to the owner.
 - **FYI** — useful to know, no action.
 - **Noise** — automated/bot chatter, resolved threads. (Bot messages excluded by default.)
