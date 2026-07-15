@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "globalMode": "ask-high",
+  "_doc": "Machine-readable companion to autonomy-policy.md — the seed + schema + rationale anchor for the autonomy dial. globalMode/channel values are 'act-low' (do it) or 'ask-high' (draft-and-hold). Keep graduationLog in step with the dial log in autonomy-policy.md.",
+  "channels": {
+    "email": { "send": "ask-high", "respond": "ask-high", "trackerWrites": "act-low" },
+    "slack": { "send": "ask-high", "respond": "ask-high" },
+    "calendar": { "respond": "ask-high" },
+    "notion": { "trackerWrites": "act-low" },
+    "reminders": { "fire": "act-low", "trackerWrites": "act-low", "linkedTaskGoalDone": "ask-high" }
+  },
+  "graduationLog": [
+    {
+      "at": "2026-06-28",
+      "change": "Example entry — auto-archive an expanded set of obvious noise (calendar/social/app notifications, shipping updates, expired/used OTP codes, plus the original newsletters/marketing/receipts) — reversible, inbound-only, gated by a precise noise definition with a 'never archive' guard list (comms-mapping.md); clears all five graduation gates — decided by the owner."
+    },
+    {
+      "at": "2026-06-28",
+      "change": "Example entry — maintain the ⏰ Reminders tracker + fire reminder nudges to the owner's own channels (Telegram via the presence daemon; Notion) — daily reset, miss/streak counters, gentle rib — reversible (tracker-only writes), inbound (the owner's own content), bounded by reminders-policy.md, never touches other people, audited (Run Log Mode=Reminders + carry-over). Boundary: flipping a linked Task/Goal to Done, or creating a persistent Task from 'remind me to…', stays ask-high — decided by the owner."
+    }
+  ]
+}

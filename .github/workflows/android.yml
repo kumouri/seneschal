@@ -1,0 +1,40 @@
+name: Android
+
+# Builds the Call Shield companion app (phone/android/). Gated on Android paths so the
+# SDK download + build only runs when the app actually changes.
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'phone/android/**'
+      - '.github/workflows/android.yml'
+  pull_request:
+    paths:
+      - 'phone/android/**'
+      - '.github/workflows/android.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: App build (assembleDebug)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Install required SDK packages
+        run: sdkmanager "platforms;android-36" "build-tools;36.1.0"
+      - name: Build debug APK
+        working-directory: phone/android
+        # Debug builds self-sign with the auto-generated debug keystore; BuildConfig
+        # endpoints default to "" so this builds with no secrets / no local.properties.
+        run: ./gradlew :app:assembleDebug --no-daemon --console=plain

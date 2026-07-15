@@ -1,0 +1,3 @@
+{"ts":"2026-07-06T13:31:00Z","mode":"Triage","model":"opus","reads":6,"rate_limited":0,"drafts_held":[{"kind":"email"},{"kind":"slack"}],"actions":{"act_low":3,"ask_high":2},"correction":null,"outcome":"Success","run_log":"<🧭 row id>"}
+{"ts":"2026-07-06T13:45:00Z","mode":"Chat","model":"opus","reads":1,"rate_limited":0,"drafts_held":[{"kind":"calendar_response"}],"actions":{"act_low":0,"ask_high":1},"correction":"approved_as_is","outcome":"Success","run_log":"<🧭 row id>"}
+{"ts":"2026-07-06T18:30:00Z","mode":"Reminders","model":"haiku","reads":2,"rate_limited":0,"drafts_held":[],"actions":{"act_low":1,"ask_high":0},"correction":null,"outcome":"Success","run_log":"<🧭 row id>"}

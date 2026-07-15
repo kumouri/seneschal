@@ -1,0 +1,18 @@
+[
+  {
+    "id": "rmd-2026-06-29-appointment",
+    "text": "Dentist appointment — leave by 2:40 for the 3:00 appt",
+    "due_at": "2026-06-29T19:45:00Z",
+    "channel": "telegram",
+    "created_at": "2026-06-29T14:02:00Z",
+    "fired_at": null
+  },
+  {
+    "id": "rmd-2026-06-30-plants",
+    "text": "Water the plants",
+    "due_at": "2026-06-30T13:00:00Z",
+    "channel": "telegram",
+    "created_at": "2026-06-29T22:10:00Z",
+    "fired_at": null
+  }
+]

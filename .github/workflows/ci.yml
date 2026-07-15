@@ -7,6 +7,13 @@ on:
     branches: [main, develop]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   python:
     name: Python syntax, tests & guards
@@ -19,10 +26,46 @@ jobs:
           python-version: "3.12"
 
       - name: Byte-compile every tracked Python file
+        # The repo is a Markdown skill suite with helper scripts (stdlib-first).
+        # py_compile catches syntax breakage without installing anything.
         run: git ls-files '*.py' -z | xargs -0 --no-run-if-empty python -m py_compile
 
       - name: Run unit tests
+        # stdlib unittest only — no pip install.
         run: python -m unittest discover -s seneschal/scripts -p "test_*.py"
 
+      - name: Check uv lockfile consistency
+        # uv.lock must stay in step with pyproject.toml — the live daemon's update flow
+        # runs `uv sync --frozen` before every graceful reload, and a stale lockfile
+        # would block deploys (see seneschal/docs/asyncio-daemon-design.md).
+        run: python -m pip install --quiet uv && uv lock --check
+
       - name: UUID placeholder guard
+        # No real workspace/account UUID may be committed — docs and registries use
+        # 00000000-… placeholders that setup fills into gitignored local copies.
         run: python seneschal/scripts/check_placeholders.py
+
+  references:
+    name: Reference data check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate machine-readable references (JSON)
+        run: python -c "import json; json.load(open('seneschal/references/autonomy-config.json')); print('autonomy-config.json OK')"
+
+  screener:
+    name: Call screener typecheck + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: phone/package-lock.json
+      - working-directory: phone
+        run: npm ci
+      - working-directory: phone
+        run: npm run typecheck
+      - working-directory: phone
+        run: npm test
