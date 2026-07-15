@@ -105,7 +105,7 @@ minimally; the store onboarding enriches them later.
    so persona changes mean re-running this wizard and re-applying the block.
 4. **Named alias command (offer, optional):** if the assistant got a name, offer to generate
    `.claude/commands/<name>.md` — a two-line command that invokes the same Chat mode as
-   `/assistant` (so the owner can type `/margo`-style their assistant's actual name). Keep
+   `/assistant` (so the owner can type their assistant's actual name as a command). Keep
    `/assistant` as the canonical tracked command.
 5. Close with what was written, and that re-running the wizard is the way to change any of it.
 

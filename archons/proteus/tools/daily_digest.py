@@ -23,7 +23,7 @@ PROTEUS_DIR = os.path.dirname(TOOLS_DIR)
 REPO_ROOT = os.path.dirname(os.path.dirname(PROTEUS_DIR))
 HOURLY_DIR = os.path.join(PROTEUS_DIR, "out", "hourly")
 DIGEST_DIR = os.path.join(PROTEUS_DIR, "out", "digests")
-SCRIPTS = os.path.join(REPO_ROOT, "margo", "scripts")
+SCRIPTS = os.path.join(REPO_ROOT, "seneschal", "scripts")
 
 EMAIL_TO = os.environ.get("PROTEUS_DIGEST_TO", "")  # the owner's address; set via env or run-proteus-digest.cmd
 
@@ -120,7 +120,7 @@ def build_digest(ledger: dict, cycles: list[dict], day: str, threshold: float, n
     _section(f"## Gone since yesterday ({len(gone)}) — closed or delisted, in case one got away",
              gone, 8)
     lines.append("")
-    lines.append("Reply to Margo to work any of these up (tailored resume + cover letter + research) — "
+    lines.append("Reply to the assistant to work any of these up (tailored resume + cover letter + research) — "
                  "nothing is applied to without your word.")
     return "\n".join(lines), stats
 

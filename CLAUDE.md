@@ -11,10 +11,12 @@ framework: the assistant ships with a default personality, a persona wizard buil
 one, and the data store (Notion / Obsidian / Markdown folder) is pluggable behind a schema
 registry.
 
-**Status: under construction.** Content lands phase by phase on `develop`; this file grows
-with it. Until v0.1.0, expect referenced components to be missing.
+The framework is feature-complete for its first release: default persona + wizard, three
+pluggable data backends + onboarding, the full orchestrator/subagent suite, the presence daemon,
+the phone screener + Android app, local RAG/salience, and the Forge. The private assistant it was
+distilled from stays private; this is the machinery with the person removed.
 
-## Layout (so far)
+## Layout
 
 ```
 .claude/commands/  assistant.md — the /assistant slash command (opens an in-character chat)

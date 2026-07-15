@@ -30,9 +30,9 @@ TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
 PROTEUS_DIR = os.path.dirname(TOOLS_DIR)
 REPO_ROOT = os.path.dirname(os.path.dirname(PROTEUS_DIR))
 OUT_DIR = os.path.join(PROTEUS_DIR, "out", "hourly")
-QUIET_FILE = os.path.join(REPO_ROOT, "margo", "state", "quiet.json")
-TELEGRAM_SEND = os.path.join(REPO_ROOT, "margo", "scripts", "telegram_send.py")
-TELEGRAM_ENV = os.path.join(REPO_ROOT, "margo", "scripts", "telegram.env")
+QUIET_FILE = os.path.join(REPO_ROOT, "seneschal", "state", "quiet.json")
+TELEGRAM_SEND = os.path.join(REPO_ROOT, "seneschal", "scripts", "telegram_send.py")
+TELEGRAM_ENV = os.path.join(REPO_ROOT, "seneschal", "scripts", "telegram.env")
 
 # Only alert on a fresh find; older ones wait for the daily digest.
 NOTIFY_FRESH_HOURS = 6.0
