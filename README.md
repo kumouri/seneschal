@@ -49,6 +49,10 @@ cd seneschal
 uv sync            # optional venv for the daemon deps (websockets, tzdata); everything degrades without it
 ```
 
+> **Windows note:** a couple of the skill paths are deeply nested. If you clone into an already-deep
+> folder and hit a "Filename too long" checkout error, enable long paths once —
+> `git config --global core.longpaths true` — or clone somewhere shorter (e.g. `C:\src\seneschal`).
+
 Then, inside Claude Code in the repo:
 
 ```
