@@ -344,15 +344,17 @@ When asked to "triage everything," run all three channels (Slack, email, calenda
 
 **Advisors:** `[trace, orientation, retrieval, dispatch, critique*, gate]` — Critique reviews any
 drafted need/charter and anything an Archon drafted for the outside world; the Gate is load-bearing
-(mint/deploy/admit/delegate/revise/retire are all ask-high).
+(mint/revise/retire are ask-high; deploy/admit/delegate graduated to act-low by the owner's
+standing authorization — see `references/autonomy-policy.md`).
 
 Delegate to `../subagents/archon-forge/SKILL.md`. In short: when a recurring job has *earned* a
 persistent specialist, the assistant drives the sibling **Demiurge** meta-agent to mint an **Archon**
 (spec + charter + evals + record under `../archons/stable/`), scaffolds and deploys it with the
 **claude-cli** adapter (**subscription-billed** — never the metered-API claude-sdk adapter; same
 billing rule as the presence daemon), gates it through its eval suite, and delegates tasks over A2A
-with outcomes recorded for tenure. Reads/drafts are act-low; every lifecycle action and every
-delegation (they spend subscription turns) is **ask-high**. The owner's data never enters the public
+with outcomes recorded for tenure. Reads/drafts are act-low, and — by the owner's standing
+authorization (subscription-billed, no API spend) — so are **deploy/admit/delegate**; roster
+changes (**mint/revise/retire**) stay **ask-high**. The owner's data never enters the public
 demiurge repo — the roster, ports, paths, and command crib live in `references/archons.md`. Archons
 are staff, not the assistant: whatever they draft for the outside world comes back through **its** gate.
 

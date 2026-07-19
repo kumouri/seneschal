@@ -14,6 +14,8 @@ Sources (all public, no auth unless noted):
   - Workday     <tenant>.<host>.myworkdayjobs.com/wday/cxs/... (per-company; UNOFFICIAL endpoint the
                 public career sites themselves use — POST search + capped per-posting detail GETs;
                 treat as best-effort, it can change without notice)
+  - Rippling    api.rippling.com/platform/api/ats/v1/board/<slug>/jobs (per-company; public board API +
+                capped per-posting detail GETs for descriptions/comp)
   - Adzuna      api.adzuna.com (aggregator; OPTIONAL — needs ADZUNA_APP_ID/ADZUNA_APP_KEY env)
 
 Reads a watchlist JSON (see watchlist.json next to this tool), emits one normalized JSON document:
@@ -37,8 +39,14 @@ import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
 
+from proteus_comp import comp_from_text
+from source_tiers import tier_rank
+
 USER_AGENT = "proteus-job-fetch/1.0 (personal job search; stdlib urllib)"
 TIMEOUT = 25
+# Storage cap only — the cached jobs-latest.json is already tens of MB at this size. NOT a parse cap:
+# _job() reads comp out of the full text before applying this, because pay ranges live at the foot
+# of a JD.
 MAX_DESC_CHARS = 12000
 
 
@@ -58,7 +66,12 @@ class _TextExtractor(HTMLParser):
 
 
 def html_to_text(html: str) -> str:
-    """Best-effort HTML → plain text (stdlib), collapsed whitespace, block-aware newlines."""
+    """Best-effort HTML → plain text (stdlib), collapsed whitespace, block-aware newlines.
+
+    Returns the FULL text. Truncation to ``MAX_DESC_CHARS`` happens in ``_job()``, *after* the comp
+    parse — this function used to cap here, which silently ate the pay-range disclosure that
+    Greenhouse/Ashby render at the foot of a JD (see ``_job``).
+    """
     if not html:
         return ""
     parser = _TextExtractor()
@@ -69,11 +82,14 @@ def html_to_text(html: str) -> str:
         text = re.sub(r"<[^>]+>", " ", html)
     text = re.sub(r"[ \t\r\f\v]+", " ", text)
     text = re.sub(r"\n\s*\n+", "\n", text)
-    return text.strip()[:MAX_DESC_CHARS]
+    return text.strip()
 
 
-def _get_json(url: str, warnings: list[str], label: str, post_body: dict | None = None):
+def _get_json(url: str, warnings: list[str], label: str, post_body: dict | None = None,
+              extra_headers: dict | None = None):
     headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+    if extra_headers:
+        headers.update(extra_headers)
     data = None
     if post_body is not None:
         data = json.dumps(post_body).encode("utf-8")
@@ -90,11 +106,26 @@ def _get_json(url: str, warnings: list[str], label: str, post_body: dict | None 
 def _job(**fields) -> dict:
     base = {
         "source": None, "company": None, "title": None, "location": None, "remote": None,
-        "url": None, "posted_at": None, "comp_min": None, "comp_max": None,
+        "workplace_type": None, "url": None, "posted_at": None, "comp_min": None, "comp_max": None,
         "comp_currency": None, "comp_note": None, "employment_type": None,
         "external_id": None, "description": "",
     }
     base.update(fields)
+
+    # Every source funnels through here, so this is the one place the comp rescue has to live.
+    # Pay-transparency ranges are prose at the BOTTOM of a Greenhouse/Ashby JD, not a structured
+    # field — and the MAX_DESC_CHARS cap used to run before anything read them. A role posting a
+    # range that fails the profile floor at top-of-band got stored as comp unknown and scored a free
+    # +8/15 "neutral" — better than if it had disclosed honestly. Parse the FULL text, THEN truncate
+    # for storage, so the cache stays bounded either way.
+    description = base.get("description") or ""
+    if base.get("comp_min") is None and base.get("comp_max") is None:
+        low, high, note = comp_from_text(description)
+        if low or high:
+            base["comp_min"], base["comp_max"] = low, high
+            base["comp_currency"] = base.get("comp_currency") or "USD"
+            base["comp_note"] = base.get("comp_note") or note
+    base["description"] = description[:MAX_DESC_CHARS]
     return base
 
 
@@ -132,7 +163,7 @@ def normalize_lever(company: str, payload: list) -> list[dict]:
             comp_currency=salary.get("currency"),
             employment_type=categories.get("commitment"),
             external_id=str(row.get("id", "")),
-            description=(row.get("descriptionPlain") or html_to_text(row.get("description", "")))[:MAX_DESC_CHARS],
+            description=(row.get("descriptionPlain") or html_to_text(row.get("description", ""))),
         ))
     return jobs
 
@@ -141,17 +172,36 @@ def normalize_ashby(company: str, payload: dict) -> list[dict]:
     jobs = []
     for row in (payload or {}).get("jobs", []):
         compensation = row.get("compensation") or {}
+        summary = compensation.get("compensationTierSummary") or ""
+        cmin, cmax = parse_comp_range(summary)   # "$238K – $290K • Offers Equity" → 238000, 290000
+        # workplaceType is AUTHORITATIVE over the flaky isRemote flag (roles come back isRemote=true
+        # while workplaceType="Hybrid" at a named office — the hybrid wins).
+        wt = (row.get("workplaceType") or "").strip().lower()
+        if wt == "remote":
+            remote = True
+        elif wt in ("hybrid", "onsite", "on-site", "in office"):
+            remote = False
+        else:
+            remote = row.get("isRemote")
+        location = row.get("location")
+        secs = [s.get("location") for s in (row.get("secondaryLocations") or [])
+                if isinstance(s, dict) and s.get("location")]
+        if secs:
+            location = ", ".join([location] + secs) if location else ", ".join(secs)
         jobs.append(_job(
             source="ashby", company=company,
             title=row.get("title"),
-            location=row.get("location"),
-            remote=row.get("isRemote"),
+            location=location,
+            remote=remote,
+            workplace_type=(row.get("workplaceType") or None),
             url=row.get("jobUrl") or row.get("applyUrl"),
             posted_at=row.get("publishedAt"),
-            comp_note=compensation.get("compensationTierSummary"),
+            comp_min=cmin, comp_max=cmax,
+            comp_currency="USD" if (cmin or cmax) else None,
+            comp_note=summary or None,
             employment_type=row.get("employmentType"),
             external_id=str(row.get("id", "")),
-            description=(row.get("descriptionPlain") or html_to_text(row.get("descriptionHtml", "")))[:MAX_DESC_CHARS],
+            description=(row.get("descriptionPlain") or html_to_text(row.get("descriptionHtml", ""))),
         ))
     return jobs
 
@@ -254,12 +304,34 @@ def normalize_remoteok(payload: list) -> list[dict]:
     return jobs
 
 
+_HN_MONEY = re.compile(r"\$\s?(\d{1,3}(?:,\d{3})+|\d{2,3})\s?([kK])?\b")
+_ONSITE_MARK = re.compile(r"\bon[\s-]?site\b|\bin[\s-]?office\b", re.I)
+
+
+def parse_comp_range(text: str) -> tuple[int | None, int | None]:
+    """Best-effort (min, max) USD/year from headline text like '$150K-$210K' or '$150,000-$210,000'.
+    Bare 2-3 digit numbers and 'k'-suffixed ones are read as thousands; only $30k–$1M is trusted."""
+    vals = []
+    for m in _HN_MONEY.finditer(text):
+        raw = int(m.group(1).replace(",", ""))
+        if m.group(2) or raw < 1000:      # 'k' suffix, or a bare "150" → 150,000
+            raw *= 1000
+        if 30_000 <= raw <= 1_000_000:
+            vals.append(raw)
+    if len(vals) >= 2:
+        return min(vals[0], vals[1]), max(vals[0], vals[1])
+    if len(vals) == 1:
+        return None, vals[0]
+    return None, None
+
+
 def normalize_hn_hiring(comments: list[dict], story_id: str) -> list[dict]:
     """Top-level comments of the monthly 'Ask HN: Who is hiring?' thread, one job post each.
 
-    Convention: first line reads 'Company | Role | Location | Comp | REMOTE'; kept as-is for the
-    title with the company split out. The whole comment is the description the scorer reads.
-    """
+    Convention: the first line is pipe-delimited tags — 'Company | Role | Location | ONSITE/REMOTE |
+    $comp'. Location/comp/remote live in that text (no structured fields), so parse them: the scorer's
+    text-aware location read handles the rest. remote is only asserted when the post says remote AND
+    not ONSITE (an explicit ONSITE marker wins)."""
     jobs = []
     for row in comments or []:
         if str(row.get("parent_id", "")) != str(story_id):
@@ -270,14 +342,58 @@ def normalize_hn_hiring(comments: list[dict], story_id: str) -> list[dict]:
         first_line = text.split("\n", 1)[0].strip()[:160]
         company = first_line.split("|", 1)[0].strip()[:80] or (row.get("author") or "unknown")
         comment_id = row.get("objectID") or row.get("story_id")
+        onsite = bool(_ONSITE_MARK.search(first_line))
+        remote = True if (re.search(r"\bremote\b", first_line, re.I) and not onsite) else None
+        cmin, cmax = parse_comp_range(first_line)
         jobs.append(_job(
             source="hn_hiring", company=company,
             title=first_line or f"HN hiring post by {row.get('author')}",
-            remote=True if re.search(r"\bremote\b", text, re.I) else None,
+            remote=remote,
+            comp_min=cmin, comp_max=cmax, comp_currency="USD" if (cmin or cmax) else None,
             url=f"https://news.ycombinator.com/item?id={comment_id}",
             posted_at=(row.get("created_at") or "")[:19] or None,
             external_id=str(comment_id),
             description=text,
+        ))
+    return jobs
+
+
+def normalize_rippling(company: str, listing: list, details: dict | None = None) -> list[dict]:
+    """Rippling ATS (api.rippling.com/platform/api/ats/v1/board/<slug>/jobs). The list carries
+    title/location/url; `details` maps uuid → the per-job detail (description dict {company, role} +
+    payRangeDetails), fetched separately and capped."""
+    jobs = []
+    for row in listing or []:
+        uuid = str(row.get("uuid", ""))
+        wl = row.get("workLocation") or {}
+        location = wl.get("label") if isinstance(wl, dict) else (wl or None)
+        detail = (details or {}).get(uuid) or {}
+        desc_obj = detail.get("description")
+        description = ""
+        if isinstance(desc_obj, dict):
+            description = html_to_text("\n".join(str(v) for v in desc_obj.values() if v))
+        elif isinstance(desc_obj, str):
+            description = html_to_text(desc_obj)
+        locs = detail.get("workLocations")
+        if isinstance(locs, list) and locs:
+            location = ", ".join(str(x) for x in locs)
+        cmin = cmax = None
+        for pr in (detail.get("payRangeDetails") or []):
+            if isinstance(pr, dict):
+                cmin = pr.get("min") or pr.get("minValue") or cmin
+                cmax = pr.get("max") or pr.get("maxValue") or cmax
+        emp = detail.get("employmentType") or {}
+        jobs.append(_job(
+            source="rippling", company=company,
+            title=row.get("name"),
+            location=location,
+            remote=True if location and "remote" in location.lower() else None,
+            url=row.get("url"),
+            posted_at=(detail.get("createdOn") or "")[:19] or None,
+            comp_min=cmin, comp_max=cmax,
+            employment_type=(emp.get("id") if isinstance(emp, dict) else None),
+            external_id=uuid,
+            description=description,
         ))
     return jobs
 
@@ -451,6 +567,24 @@ def fetch_all(watchlist: dict, warnings: list[str], max_per_company: int) -> lis
                 details[path] = detail
         jobs.extend(normalize_workday(tenant, base, {"jobPostings": listings}, details)[:max_per_company])
 
+    rippling = watchlist.get("rippling")
+    if rippling:
+        slugs = rippling if isinstance(rippling, list) else rippling.get("companies", [])
+        detail_cap = 25 if isinstance(rippling, list) else int(rippling.get("detail_cap", 25))
+        for slug in slugs:
+            base = f"https://api.rippling.com/platform/api/ats/v1/board/{urllib.parse.quote(slug)}/jobs"
+            payload = _get_json(base, warnings, f"rippling:{slug}")
+            listing = payload if isinstance(payload, list) else []
+            details = {}
+            for row in listing[:detail_cap]:
+                uuid = str(row.get("uuid", ""))
+                if not uuid:
+                    continue
+                detail = _get_json(f"{base}/{uuid}", warnings, f"rippling:{slug}:{uuid[:12]}")
+                if detail:
+                    details[uuid] = detail
+            jobs.extend(normalize_rippling(slug, listing, details)[:max_per_company])
+
     adzuna = watchlist.get("adzuna")
     if adzuna:
         app_id = os.environ.get("ADZUNA_APP_ID", "")
@@ -472,17 +606,65 @@ def fetch_all(watchlist: dict, warnings: list[str], max_per_company: int) -> lis
     return dedupe(jobs)
 
 
+TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
+PROTEUS_DIR = os.path.dirname(TOOLS_DIR)
+
+sys.path.insert(0, TOOLS_DIR)
+import proteus_paths  # noqa: E402  (canonical state/ vs out/ paths)
+
+
+def _role_key(job: dict) -> tuple[str, str] | None:
+    """A cross-source identity for the SAME role: normalized (company, title). None if either is blank."""
+    company = re.sub(r"\s+", " ", (job.get("company") or "").strip().lower())
+    title = re.sub(r"\s+", " ", (job.get("title") or "").strip().lower())
+    return (company, title) if company and title else None
+
+
 def dedupe(jobs: list[dict]) -> list[dict]:
-    """Drop duplicates (same URL, or same source+external_id)."""
+    """De-duplicate in two passes.
+
+    1. **Exact** — drop a posting already seen at the same URL (or same ``source:external_id``).
+    2. **Cross-posting** — an aggregator (tier-B: HN/Adzuna and other open aggregation) repost of a
+       role already carried by a direct/curated board (tier S/A) is the biggest noise vector. Drop it,
+       but record its source on the surviving board row's ``also_sources`` so attribution still
+       credits it with surfacing the role. Multiple aggregator reposts of one role collapse to one.
+       Direct/curated rows are never merged with each other — two same-title reqs on one board are
+       distinct jobs, kept apart.
+    """
     seen: set[str] = set()
-    unique = []
+    unique: list[dict] = []
     for job in jobs:
         key = (job.get("url") or f"{job.get('source')}:{job.get('external_id')}").strip().lower()
         if key and key in seen:
             continue
         seen.add(key)
         unique.append(job)
-    return unique
+
+    # First direct/curated (tier S/A) row per role — the survivor an aggregator repost folds into.
+    sa_by_role: dict[tuple[str, str], dict] = {}
+    for job in unique:
+        if tier_rank(job.get("source")) >= 2:      # S or A
+            rk = _role_key(job)
+            if rk and rk not in sa_by_role:
+                sa_by_role[rk] = job
+
+    out: list[dict] = []
+    seen_b_roles: set[tuple[str, str]] = set()
+    for job in unique:
+        rk = _role_key(job)
+        if rk and tier_rank(job.get("source")) <= 1:   # tier B (aggregator)
+            survivor = sa_by_role.get(rk)
+            if survivor is not None:                    # a direct/curated board already carries this role
+                also = set(survivor.get("also_sources") or [])
+                if job.get("source"):
+                    also.add(job["source"])
+                survivor["also_sources"] = sorted(also)
+                continue
+            if rk in seen_b_roles:                      # a second aggregator repost of the same role
+                continue
+            seen_b_roles.add(rk)
+        out.append(job)
+    return out
 
 
 def main(argv=None) -> int:
@@ -503,10 +685,18 @@ def main(argv=None) -> int:
         "warnings": warnings,
         "jobs": jobs,
     }
-    os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
-    with open(args.out, "w", encoding="utf-8") as fh:
+    # A raw board aimed at out/ lands in state/runs/ instead — it's machinery, not a deliverable.
+    # score_jobs applies the same redirect to --jobs, so the charter's Phase-1 chain still resolves.
+    out_path = proteus_paths.resolve_raw_artifact(args.out)
+    redirected = str(out_path) != str(args.out)
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as fh:
         json.dump(document, fh, ensure_ascii=False, indent=1)
-    print(json.dumps({"ok": True, "count": len(jobs), "warnings": warnings, "out": args.out}))
+    result = {"ok": True, "count": len(jobs), "warnings": warnings, "out": str(out_path)}
+    if redirected:
+        result["note"] = (f"raw board written to state/ (not {args.out}) — it's runtime churn, not a "
+                          "deliverable; out/ is for what a run produces for the owner")
+    print(json.dumps(result))
     return 0
 
 

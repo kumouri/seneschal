@@ -20,8 +20,10 @@ Run the assistant's staff. A recurring job that has *earned* a persistent specia
 **Archon**: the assistant frames the need, Demiurge mints it (spec + charter + evals + record), the
 claude-cli adapter deploys it A2A-addressable on the **subscription** (never the metered API), the
 eval gate admits it, and every delegated task lands in its ledger for tenure review. Reading the
-stable and drafting a need are **act-low**; **minting, deploying, admitting, delegating, revising,
-and retiring are ask-high** — each one either changes the roster or spends subscription turns.
+stable, drafting a need, and **deploying / admitting / delegating** are **act-low** (the owner's
+standing authorization — "spin up archons as needed"; the claude-cli adapter is subscription-billed,
+so the spend that gate guarded was never real). **Minting, revising, and retiring stay ask-high** —
+they change *who is on the staff*, which is a roster judgment, not a spend one.
 
 ## Read first
 
@@ -36,8 +38,10 @@ and retiring are ask-high** — each one either changes the roster or spends sub
 ## Steps
 
 **Phase 0 — Orient (act-low).** Read `archons.md` (roster + ports) and, for an existing Archon, its
-`archons/stable/<id>/record.json`, `eval-report.json`, and `ledger.jsonl` tail. Status questions
-("how's my staff doing", "tenure review") are answered here — reads only, cite the files.
+`archons/stable/<id>/record.json`, `eval-report.json`, and the `archons/<id>/state/ledger.jsonl` tail
+(the ledger sits with the archon's runtime state, **not** in the tracked stable — see `archons.md`).
+Status questions ("how's my staff doing", "tenure review") are answered here — reads only, cite the
+files.
 
 **Phase 1 — Frame the need (act-low, the judgment step).** A new specialist starts as a draft
 `archons/need/<id>.need.yaml`. Hold the persistence bar: `why_persistent` must argue why this
@@ -58,13 +62,37 @@ needs (profiles, watchlists) live under `archons/<id>/` per `archons.md` — nev
 never in the public demiurge repo. The shipped `archons/proteus/` (a job-application archon's
 tools + `profile.example.json`) is the worked example of this layout.
 
-**Phase 4 — Deploy + Admit (ASK-HIGH — spend).** Deploy on the Archon's registered port (detached;
-`demiurge deploy` blocks in the foreground) and run `demiurge admit` — every eval case is a
-subscription-billed CLI turn. Report the case-by-case results. A failed gate goes back to Phase 1
-as a `demiurge revise` (also ask-high). Tear the process down when the session's work is done —
-Archons don't idle.
+**Mint the home directory with the standard layout** — do this now, not once the archon has already
+scattered state around (`archons.md` → *"Archon internal layout"*). Every archon gets:
 
-**Phase 5 — Delegate + Curate (ASK-HIGH per task — spend).** `demiurge delegate` with a
+```
+archons/<id>/
+  .gitignore        state/* (+ !state/README.md), out/, *.env (+ !*.env.example),
+                    __pycache__/, *.log, *.pid   ← copy archons/proteus/.gitignore as the template
+  state/README.md   documents each runtime file; keeps the dir present
+  out/              deliverables (created on first run)
+  tools/            if it has any
+```
+
+- **`state/` = runtime churn** (ledgers, latest-caches, counters, queues, sentinels, logs) —
+  anything a run rewrites every cycle. **`out/` = deliverables** — what a run produces for the owner.
+- **That includes demiurge's own delegation ledger.** Pass
+  `--ledger-dir <M>\archons\<id>\state` on **every** `delegate`/`verdict`/`distill`/`tenure` — the
+  same path on all four, or a verdict can't find the delegation it judges. Left in the tracked
+  stable it churns a live checkout dirty (arming the `pull --ff-only` reload failure) and writes
+  every request/response into git history. Rationale + crib: `../../seneschal/references/archons.md`.
+- The **per-archon `.gitignore` is the point**: it makes the split travel with the archon wherever
+  it's checked out, rather than depending on this repo's root ignore file.
+- If the archon has more than one tool, give it **one paths module** they all import
+  (`tools/<id>_paths.py`, modeled on `proteus_paths.py`) so they can't disagree about where state lives.
+
+**Phase 4 — Deploy + Admit (act-low, standing authorization).** Deploy on the Archon's registered
+port (detached; `demiurge deploy` blocks in the foreground) and run `demiurge admit` — every eval
+case is a subscription-billed CLI turn, which the owner has budgeted for. Report the case-by-case
+results. A failed gate goes back to Phase 1 as a `demiurge revise` (**still ask-high** — it changes
+the roster). Tear the process down when the session's work is done — Archons don't idle.
+
+**Phase 5 — Delegate + Curate (act-low, standing authorization).** `demiurge delegate` with a
 self-contained request (inline the private context it needs — profile, paths, dates; the spec's
 instructions say *how*, the request says *what/with-what*). Afterward record the outcome
 (`demiurge verdict`), distill any failure into a regression eval (`demiurge distill`), and check
@@ -87,10 +115,16 @@ any held approvals or a mid-lifecycle Archon.
   does the assistant. Offer the cheaper shape (just do it, or a one-off headless run).
 - **Charter is the scope authority.** Work outside an Archon's charter is a new need (or the
   assistant's own), never a stretched delegation.
-- **Spend is a decision.** Deploy/admit/delegate burn subscription turns the owner also chats on —
-  batch delegations, keep eval suites lean, wind Archons down after use.
+- **Spend is authorized, not unlimited.** The owner has budgeted the subscription turns, so
+  deploy/admit/delegate no longer need a per-action go-ahead — but they still run on the same
+  subscription the owner chats on, and the spec's `budget` rails (`max_duration_seconds`,
+  `max_steps`, `max_token_usage`) are hard limits a fat delegation will hit and truncate. Batch
+  delegations to fit the rails, keep eval suites lean, and wind Archons down after use.
 - **One character, one gate.** Archons are staff with their own names; they never speak as the
   assistant or as the owner, and nothing they produce goes outbound except through the assistant's
   draft-and-hold gate.
 - **Leave the demiurge repo green.** If a Forge run changes demiurge itself (rare), its gates run
-  (`uv run pytest`, `uv run ruff check .`) before the change lands — and via its normal PR flow.
+  (**all three**: `uv run pytest`, `uv run ruff check .`, **and `uv run ruff format --check .`**)
+  before the change lands — and via its normal PR flow. The format gate is separate from the lint
+  gate and CI runs both; passing `ruff check` says nothing about `ruff format --check` (a PR once
+  went up red on every Python version because only two of the three ran locally).

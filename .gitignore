@@ -50,13 +50,20 @@ seneschal/store/config.json
 seneschal/store/notion/schema.md
 seneschal/store/notion/mcp.json
 
-# Archons (Forge mode) — generated scaffolds, run outputs, and per-archon private
-# inputs (profile, watchlist, voice profile) stay local; only *.example.* and tools
-# are tracked
+# Archons (Forge mode) — generated scaffolds, run outputs, runtime state, and
+# per-archon private inputs (profile, watchlist, voice profile) stay local; only
+# *.example.*, state/README.md, and tools are tracked. Each archon also carries its
+# own .gitignore (the layout rule in seneschal/references/archons.md); these root
+# rules are the safety net for archons that lack one.
 archons/scaffolds/
 archons/need/
 archons/stable/
 archons/*/out/
+archons/*/state/*
+!archons/*/state/README.md
+!archons/*/state/*.example.json
+!archons/*/state/*.example.jsonl
+!archons/*/state/*.example.md
 archons/*/profile.json
 archons/*/watchlist.json
 archons/*/voice-profile.md
