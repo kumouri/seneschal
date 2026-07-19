@@ -92,6 +92,7 @@ from sentinel import (  # shared helpers — sentinel is now a helper library
     save_json,
     send_discord,
     send_telegram,
+    session_is_live,
 )
 
 REPO_ROOT = os.path.normpath(os.path.join(SCRIPT_DIR, "..", ".."))
@@ -775,11 +776,16 @@ def maybe_peek(state_dir: str, args, log, children: list | None = None,
     Deferred while another headless run is in flight (`children`) OR the warm chat session is mid-turn
     (`warm_busy`) so a peek's Notion reads never stampede in parallel with a slot's or a chat turn's;
     a skipped peek just runs on the next loop once the cadence is still due. Chat is never delayed —
-    only the peek waits."""
+    only the peek waits. Also skipped — without consuming the cadence — while an interactive
+    /assistant session is live (`sentinel.session_is_live`): a human is already looking, so the
+    peek is redundant this cycle."""
     if args.peek_interval_min <= 0 or not (args.watch_prompt or args.watch_cmd):
         return False
     if warm_busy or (children is not None and heavy_run_in_flight(children)):
         return False  # a chat turn or another headless run is active — don't add a second concurrent reader
+    if session_is_live(state_dir, datetime.now(timezone.utc)):
+        return False  # a human is engaged in a live /assistant session — the peek is redundant; skip this
+                      # cycle (it resumes on the next cadence once the session ages out of the TTL)
     peek_file = os.path.join(state_dir, "last-peek")
     last = load_json(peek_file, None)
     now = datetime.now(timezone.utc)

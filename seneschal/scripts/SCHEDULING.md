@@ -173,6 +173,40 @@ first-ever cycle with a `--no-notify` flag so it seeds the seen-ledger without r
 items. The loop is the tripwire, not the writer — anything that drafts for the outside world stays an
 on-demand, gated delegation.
 
+### 5. Session registry hooks — machine-wide (manual setup)
+
+The **session registry** (`state/sessions/` — see `../references/reminders-policy.md` → "Live-session
+defer") learns about *every* Claude Code session on the box through a machine-wide hook:
+`session_stamp.py` writes/refreshes an awareness-only `build` entry on session events, and on
+**SessionEnd** it also fire-and-forgets the `mini_dream.py` distiller (→
+`state/session-distillations.jsonl`). The daemon and a desktop `/assistant` session register
+themselves separately (`sentinel.write_session_heartbeat` / `session_heartbeat.py`) — the hook covers
+everything else.
+
+Wire it in **your user-level `~/.claude/settings.json`** — *not* this repo's `.claude/settings.json*`
+(a repo-shipped hook would impose it on every install and double-fire beside the user copy; personal
+hook config never ships). All **four events** point at the same script, absolute-pathed into the live
+checkout so any project's session lands entries in the shared state dir (replace `$REPO` with your
+checkout path, e.g. `C:/Users/you/workspace/seneschal`):
+
+```json
+{
+  "env": { "PYTHONUTF8": "1" },
+  "hooks": {
+    "SessionStart":     [ { "hooks": [ { "type": "command", "command": "python $REPO/seneschal/scripts/session_stamp.py", "timeout": 10 } ] } ],
+    "UserPromptSubmit": [ { "hooks": [ { "type": "command", "command": "python $REPO/seneschal/scripts/session_stamp.py", "timeout": 10 } ] } ],
+    "Stop":             [ { "hooks": [ { "type": "command", "command": "python $REPO/seneschal/scripts/session_stamp.py", "timeout": 10 } ] } ],
+    "SessionEnd":       [ { "hooks": [ { "type": "command", "command": "python $REPO/seneschal/scripts/session_stamp.py", "timeout": 10 } ] } ]
+  }
+}
+```
+
+Notes: the `timeout: 10` keeps a wedged git/filesystem from ever stalling a session (the script itself
+is fail-silent and always exits 0); the `PYTHONUTF8=1` env entry stops Windows' legacy console codepage
+from tripping Python over emoji/UTF-8 transcript content. The hook prints nothing by contract
+(SessionStart/UserPromptSubmit stdout would be injected into the session's context). The setup wizard
+will automate this registration later — this is the manual path.
+
 ## Pre-approving tools (one-time)
 
 For each Desktop Scheduled Task, **Run now** once and approve the Notion / Calendar / Proton / Telegram

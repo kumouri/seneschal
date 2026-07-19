@@ -1,0 +1,11 @@
+{
+  "session_id": "daemon",
+  "pid": 12345,
+  "source": "daemon",
+  "started_at": "2026-07-15T14:02:11-05:00",
+  "last_seen": "2026-07-15T14:09:41-05:00",
+  "working_on": "warm chat with the owner (Telegram/Discord)",
+  "cwd": "C:/Users/you/projects/example",
+  "branch": "main",
+  "phase": "active"
+}
