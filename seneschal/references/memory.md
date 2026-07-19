@@ -128,3 +128,48 @@ reminders* — so the next morning's **Brief** can orient cheaply without re-que
 - **Brief reads** it first, at Phase 0, before any store query.
 - **If missing**, fall back to carry-over + the store; the next Dream regenerates it. Keep it short —
   cheap orientation, not a transcript.
+
+---
+
+## Durable act-low writes — the write-behind outbox (Notion backend)
+
+The run-log and carry-over above are how the assistant remembers *across runs*; the **outbox** is how
+its **act-low Notion-backend writes don't get lost** *within* the failure window. An ack (⏰ row →
+`Status`/`Last Acknowledged`), a med-intake row, and (phase 2) a run-log finalize are **journaled to a
+durable local store first** — `../state/notion-outbox.sqlite`, via `../scripts/outbox.py` — **then
+flushed to Notion** by the LLM turn via MCP, retried until they land. This closes the chat→store
+ack write-through gap (acks that reached `state/acks.json` but never flipped the store row, silently
+desyncing the system of record).
+
+- **Journal-first is the guarantee.** Once `outbox.py ack …` (or `medlog …`) returns `ok`, the write
+  *will* land even across a reboot — so the assistant may honestly tell the owner "recorded" the
+  instant it's journaled, superseding the old **manual "park it in carry-over to record next run"**
+  step *for those writes*. Carry-over parking remains the fallback for writes the outbox doesn't cover.
+- **Belt-and-suspenders.** The happy path still does the direct MCP write in-turn (zero added latency);
+  the outbox only earns its keep when that write fails. Enqueue is idempotent, so the double-write is a
+  no-op — see the ack flow in `SKILL.md` (Chat mode) and the schema/lifecycle in `../state/README.md`.
+- **Fail-closed**, the mirror of `acks.json`'s fail-open gate: an entry retries until Notion confirms,
+  then dead-letters (surfaced, never dropped). Full design + the flush (a)/(b) fork:
+  `../docs/notion-write-behind-outbox-spec.md`. Filesystem backends write locally and atomically, so
+  their act-low writes never route through the outbox (see the spec's backend-scope section).
+
+## Session distillations — the mini-dream (cross-instance memory, phase 2b)
+
+The registry (`state/sessions/`) says who's live *now*; the **mini-dream** is how sessions that already
+ended stay part of the assistant's memory (an LSM-tree analogy): a **fast append path** per session, and
+a **slow compaction path** nightly.
+
+- **Fast path (append).** On every SessionEnd — any Claude Code session on the machine, via the global
+  `session_stamp.py` hook — `scripts/mini_dream.py` distills the transcript into one JSON line appended
+  to `state/session-distillations.jsonl`, **anchored to the assistant's home repo no matter what project
+  the session ran in**. Salience-laddered: trivial sessions leave no record; small ones get a free
+  deterministic distillate; substantial ones (≥ 6 real user turns) get a headless LLM distill
+  (`claude -p`, cheap model, subscription-billed with `ANTHROPIC_API_KEY` scrubbed) that falls back to
+  deterministic on any failure. Idempotent per session id; a distiller's own session never dreams itself
+  (`SENESCHAL_MINI_DREAM`).
+- **Read at orientation.** Every assistant surface (the `/assistant` grounding, the Orientation advisor)
+  tails the last ~5 records — "what did the other instances do lately?" — and folds anything relevant in.
+- **Slow path (compaction, Dream step 2b).** Nightly, Dream ingests new distillates into the local RAG
+  index (`{"source": "session-distillation", "ref": <id>, "text": …}`) and prunes the log
+  (`mini_dream.py --prune-days 30`) — recent context is a cheap tail read, old context is semantic
+  recall from the index, and the log never accretes. Schema + ladder details: `../state/README.md`.

@@ -1,0 +1,2 @@
+{"ts": "2026-01-01T20:41:00Z", "action": "control.restart", "detail": {"reason": "cockpit restart button", "already_queued": false}}
+{"ts": "2026-01-01T20:42:03Z", "action": "control.restart", "detail": {"reason": "cockpit restart button", "already_queued": true}}

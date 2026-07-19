@@ -46,7 +46,7 @@ schemas at runtime.**
   habits/todos the owner acked today, whether by the one-tap flag or by telling the assistant over
   Telegram/chat. (`done` = done-for-today, any type; `finished` = a retired item acked on its way out;
   **query both**, both count as done today.)
-  **Never use the one-tap `ack` flag as the signal** — it's a one-shot input the reminder slots consume
+  **Never use the one-tap `ack` flag as the signal** — it's a one-shot input the reminder runs consume
   and reset (`databases.md`); all-cleared flags in the evening is normal, not "nothing finished."
   `status: skipped` with today's `last_acknowledged` = an honest "not today" — neither done nor slipped.
   A done **Today Todo** whose `related_task` isn't flipped yet → surface it under "Waiting on you" as a

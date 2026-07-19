@@ -36,9 +36,13 @@ seneschal/
                    salience, archons, notion-rate-limits (stub → store/notion/mapping.md),
                    proposed-learnings (Dream's PR target)
   docs/            asyncio-daemon-design.md + asyncio-daemon-plan.md (the reactive-core design),
+                   cockpit-spec.md (the Seneschal Cockpit design spec — pipe, model dials/Fable
+                   delegation, Oikonomos, health panels; the auth stack documented as deferred),
                    notion-write-behind-outbox-spec.md (durable act-low Notion writes; Notion
-                   backend only), slack-draft-and-hold-spec.md (Slack reply drafting: SSOT +
-                   held approvals) + spec-prompts/ (the historical planning prompts behind specs)
+                   backend only), reminder-exact-time-scheduling-spec.md (the slots→exact-times
+                   rework), telegram-inbound-spec.md (attachments/replies/reactions),
+                   slack-draft-and-hold-spec.md (Slack reply drafting: SSOT + held approvals)
+                   + spec-prompts/ (the historical planning prompts behind specs)
   scripts/         presence.py (resident asyncio daemon), sentinel.py (helper/one-shot),
                    identity_common.py (persona/identity.json reader — never raises, defaults
                    when absent; presence.py renders its grounding/slot prompts from it),
@@ -94,8 +98,13 @@ quoted context, reactions map to intents (a same-day 👍 on a nudge auto-acks; 
 ack also journals through the outbox), and a post-restart burst gets one backlog ack
 (`docs/telegram-inbound-spec.md`). A **cockpit pipe** (`cockpit_pipe.py`, localhost websocket,
 `--no-cockpit` to disable) streams warm-session turns and accepts chat as a third channel; **model
-dials** (`state/model-config.json`) pick the warm model + the Fable-delegation ceiling (`!fable`
-force-routes; the Oikonomos governor meters token spend). It forwards the
+dials** (`state/model-config.json`) pick the warm model + the Fable-delegation ceiling — when a turn
+needs more, the warm session **delegates up** via `fable_delegate.py` (a `claude -p` subprocess
+one-shot, never a session handoff, badged in the transcript), triggered by the router's ceiling-gated
+**fable arm**, its own judgment, or a `!fable` force-route (bypasses the classifier, never the gate);
+the **Oikonomos governor** (`governor.py`, Advisor Chain order 15) meters every turn's token spend and
+hard-gates delegation quotas (rails), with advisory knobs surfaced honestly as guidance
+(`docs/cockpit-spec.md`). It forwards the
 **store's MCP** (if any) into every spawned headless `claude` — resolved store-config-driven
 (`--store-mcp` override → `store/config.json`'s active backend → legacy `scripts/notion-mcp.json` →
 None; filesystem backends need none, `resolve_store_mcp`) — alongside an auto-detected
@@ -113,7 +122,9 @@ session on the box — the daemon defers non-piercing nudges into a live interac
 machine-wide `session_stamp.py` hook (installed in the user's `~/.claude/settings.json`, never shipped
 here — see `scripts/SCHEDULING.md` → "Session registry hooks") stamps sessions and, on SessionEnd,
 fire-and-forgets `mini_dream.py`, which distills the transcript into
-`state/session-distillations.jsonl` — the cross-instance memory Dream compacts nightly.
+`state/session-distillations.jsonl` — the cross-instance memory Dream compacts nightly. The cockpit
+displays these distillates as the **oneiroi** feed (singular *oneiros*; canonical pronunciation is the
+ancient Greek — "oh-NAY-roy" — script/file names are unchanged).
 
 ## Conventions
 

@@ -90,7 +90,7 @@ Wrap-specific sourcing (on top of the table above):
 | Section | Source | How |
 |---------|--------|-----|
 | Done today | Notion **Tasks** | `Status = Done` and `"date:Completed:start"` = today |
-| Done today | Notion **⏰ Reminders** | `"date:Last Acknowledged:start"` = today and `Status IN (Done, Finished)` — covers acks made in Notion **or** over Telegram/chat (`Done` = done-for-today, `Finished` = a retired item acked on its way out; query both). **Never the `Ack` checkbox** — it's consumed + unticked by the reminder slots (`reminders-policy.md`) |
+| Done today | Notion **⏰ Reminders** | `"date:Last Acknowledged:start"` = today and `Status IN (Done, Finished)` — covers acks made in Notion **or** over Telegram/chat (`Done` = done-for-today, `Finished` = a retired item acked on its way out; query both). **Never the `Ack` checkbox** — it's consumed + unticked by the reminder runs (`reminders-policy.md`) |
 | Slipped | Notion **⏰ Reminders** | fired today but still `Pending`/`Reminded`/`Snoozed` — surface the important / `Nag Until Done` ones |
 
 The Wrap also seeds tomorrow's carry-over (`../state/carry-over.md`; protocol in `memory.md`).

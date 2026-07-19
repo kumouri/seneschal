@@ -81,6 +81,23 @@ runs** (one persona, one brain, one approval gate); the *to-the-owner* register 
   returns new messages and advances the offset. The **sentinel** polls each cycle; a new message wakes
   the brain in **Chat mode** (`SKILL.md`) to reply via `telegram_send.py`. A short rolling thread is
   cached in `../state/telegram-thread.json` so fresh sessions keep conversational continuity.
+- **Reactions (act-low, observe-first):** a reaction on one of the assistant's messages arrives as
+  `[the owner reacted 👍 (= ack) to: "…"]` — the emoji→intent map is the owner's
+  (`../state/telegram-reactions.json`: 👍 ack · ❤ liked · 👎 reject · 😴/🥱 snooze · 🤝/🙏 hold ·
+  ✍/🤔 elaborate; anything else = note; emoji outside Telegram's allowed reaction set are mapped but
+  can't fire). The intent is a **hint**: the assistant acts on it in context (drop the draft, snooze
+  the item, elaborate). The **only** automated path is a 👍 on a **same-day reminder nudge**, which
+  runs the normal ack (dequeue + outbox `Done`) and says so in the line. A reaction can never send —
+  **a reaction approving an outbound draft is ask-high and deliberately unbuilt** (spec §3.4 Phase C).
+- **Reply context (act-low):** when the owner swipe-replies to an earlier message, the quoted message
+  rides in as `(replying to: "…") <their text>` (truncated ~300 chars; a quoted *file* is described,
+  not dropped) — so they never have to restate what they're answering.
+- **Inbound attachments (act-low):** a document/photo/voice/audio/video the owner sends is downloaded
+  to `../state/inbox/` (daemon poll only — `--download-dir`) and surfaced to the warm session as
+  `[attachment: … saved to <path>] <caption>`, so the assistant can act on the file in context. It
+  **never auto-runs a tool on it**; the turn decides. Over Telegram's ~20 MB `getFile` ceiling it says
+  so and points at the local-file path instead. Fail-open: a bad fetch loses the file, never the
+  message. Spec: `../docs/telegram-inbound-spec.md`.
 - **Creds** live in `../scripts/telegram.env` (git-ignored); offset in `../state/telegram-offset`.
   An allowlist (`TELEGRAM_ALLOWED_CHAT_IDS`) restricts who can drive the assistant.
 - **Asleep machine:** Telegram retains updates ~24h, so messages are picked up on the next poll
