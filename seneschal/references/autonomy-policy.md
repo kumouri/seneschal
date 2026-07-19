@@ -20,7 +20,10 @@ config change, not a rewrite.
 - File a note, log/extract a task, update a Notion **tracker** row (mood/flag/achievement) as part of a
   pipeline the subagent owns.
 - Mark a clear spam call/message.
-- Prepare a **draft** (email reply, calendar response, Slack message) and hold it.
+- Prepare a **draft** (email reply, calendar response, Slack message) and hold it. Slack replies are
+  drafted from the pinned **Slack SSOT** (`slack-ssot.md`) under the derivation contract —
+  drafting/consulting the SSOT/Retrieval reads are all act-low; **posting to Slack stays ask-high,
+  permanently** (see below).
 - Read the Archon stable (records, ledgers, eval reports, tenure reviews) and **draft** a need
   statement or scaffold a minted Archon (`archons.md`) — local, regenerable, no spend.
 - **Deploy, admit, and delegate to an already-minted Archon** (`archons.md`) — the owner's standing
@@ -51,8 +54,10 @@ config change, not a rewrite.
 
 ## How "draft-and-hold" works
 
-- Email/Slack drafts are created in the channel's draft store (Proton/Gmail drafts; Slack draft) and
-  **surfaced to the owner** with a one-line "ready to send?" — never auto-sent.
+- Email drafts are created in the channel's draft store (Proton/Gmail drafts) and **surfaced to the
+  owner** with a one-line "ready to send?" — never auto-sent. **Slack holds no channel-side draft copy**
+  — the held entry in `pending-approvals.json` is the single copy, sent verbatim on approval (the Slack
+  spec, Q5).
 - Calendar responses are proposed in the brief/triage output ("I'd decline X; ok?") and only executed
   on the owner's go-ahead.
 - Held drafts are tracked in the carry-over (`carry-over.md`) so they don't get lost.

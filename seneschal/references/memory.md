@@ -77,11 +77,16 @@ as well as the Notion carry-over (system of record). Each held item gets a **sta
 reply can refer to it.
 
 **Holding (when the assistant drafts something ask-high):**
-1. Write the draft to its channel store where applicable (Proton/Gmail draft, Slack draft).
+1. Write the draft to its channel store **where applicable** (Proton/Gmail draft). **Slack has no channel
+   store** — the held entry's stored text is the single copy, sent verbatim on approve (a Slack draft
+   would be a second mutable copy with no reliable cleanup on reject; see the Slack spec, Q5).
 2. Append an entry to `pending-approvals.json` and the Notion carry-over with: `id`, `kind`
    (`email` | `slack` | `calendar_response` | `notion_write` | `archon` — a Forge lifecycle action or
    delegation, see `archons.md`), `channelRef`, `summary`, `bodyPreview`, `created_at`,
-   `status: "pending"`.
+   `status: "pending"`. **Slack drafts add:** `body` (the verbatim send text — the assistant always
+   signs; the unsigned/as-the-owner variant was deferred), `sources` (the derivation-contract citations),
+   `critique_note`, and `thread_seen_ts` (the newest thread message at draft time — powers the freshness
+   re-check). Schema: `../state/README.md`.
 3. **Surface it** to the owner on whatever surface fits — in chat (if they're live), and/or a Telegram
    push (*"Drafted a reply to Alex — reply `send a3` or `drop a3`."*), and/or a Notion comment. Use the
    short id so a one-word reply is unambiguous.
@@ -89,16 +94,25 @@ reply can refer to it.
 **Detecting the owner's decision:**
 - **Chat / Telegram:** the sentinel pulls the reply into the inbox; Watch/Chat reads intent — `send`/`yes`/
   `approve` (+ id, or the most recent if only one is pending) → **approve**; `drop`/`no`/`reject` →
-  **reject**. Ambiguous → ask, don't guess.
+  **reject**. A **Slack** draft is a single signed body (the unsigned variant was deferred), so
+  `send a7` is unambiguous. `edit a7: <text>` / *"change a7 to say…"* re-holds under the same id
+  (`edited_before_approve`). Ambiguous → ask, don't guess.
 - **Notion:** Watch checks for new comments on the carry-over / pending-approvals surface and reads the
   same intent. (This is an LLM-tier read — the sentinel doesn't parse Notion.)
 
 **Executing (reuse the `approve_draft` / `reject_draft` path in `SKILL.md`):**
 - **Approve →** send/execute via the normal local path (email → `../scripts/proton_send.py` without
-  `--dry-run`; Slack → Slack MCP send; calendar → `respond_to_event`). Set the entry `status: "sent"`.
-- **Reject →** discard the draft; set `status: "rejected"`.
+  `--dry-run`; Slack → **freshness re-check** the thread since `thread_seen_ts`, then `slack_send_message`
+  the stored **`body` verbatim**; calendar → `respond_to_event`). Set the entry `status: "sent"`.
+- **Reject →** discard the draft; set `status: "rejected"`. (A Slack reject has nothing to clean up — no
+  channel-side copy was written.)
 - Either way, **remove it from the open carry-over** and leave a Run Log trace. A failed send →
-  `status: "failed"`, kept in carry-over so it isn't lost.
+  `status: "failed"`, kept in carry-over so it isn't lost (**no automatic Slack retry** — re-read the
+  channel to see if it landed, report, and let a fresh `send` re-attempt).
+- **Slack-hands gap** — a session that *understands* a `send` but lacks Slack tools records
+  `status: "approved"` (approved-but-unsent, kept in carry-over) and says so; the next Slack-capable turn
+  drains `approved` entries first, re-running the freshness re-check. Closed by wiring the daemon's
+  `slack-mcp.json` (`../scripts/SLACK_MCP_SETUP.md`, Q9).
 
 `pending-approvals.json` schema is documented in `../state/README.md`.
 

@@ -303,19 +303,58 @@ Local mirror of the held drafts in the carry-over record (the system of record).
 when it drafts something ask-high; the owner approves/rejects via chat, Telegram, or a Notion comment, and
 the brain flips `status` and executes. See `../references/memory.md` for the full loop.
 
+**Base fields (every kind):**
+
 ```json
 [
   {
-    "id": "a3",                       // short, stable — so a one-word reply ("send a3") is unambiguous
-    "kind": "email",                  // email | slack | calendar_response | notion_write
+    "id": "a3",                       // short, stable — so a one-word reply ("send a3") is unambiguous.
+                                      //   ONE id space across email/slack/calendar (a<N>).
+    "kind": "email",                  // email | slack | calendar_response | notion_write | archon
     "channelRef": "<thread/event id>",
     "summary": "Reply to Alex re: design feedback",
     "bodyPreview": "Hi Alex — thanks for the…",
     "created_at": "2026-06-29T18:20:00Z",
-    "status": "pending"                // pending | sent | rejected | failed
+    "status": "pending"                // pending | sent | rejected | failed | approved
   }
 ]
 ```
+
+- **`status: "approved"`** (additive) = approved-but-not-yet-sent — a session understood the approval but
+  lacked hands to execute (the Slack-hands gap); the next capable turn drains it. See
+  `../references/memory.md`.
+
+**Slack drafts add these fields** (`kind: "slack"`; base fields unchanged — see the Slack spec
+`../docs/slack-draft-and-hold-spec.md`):
+
+```json
+{
+  "id": "a7",
+  "kind": "slack",
+  "channelRef": "slack:C00000000:1720900000.123400",   // slack:<channel_id>[:<thread_ts>] — DM uses the DM channel id
+  "to": "Alex (#team, thread)",
+  "summary": "Reply to Alex re: review timing",
+  "bodyPreview": "Hi Alex — <assistant> here (<owner>'s assistant). They're free after…",
+  "body": "<full verbatim send text — the assistant always signs (send a7)>",
+  "sources": ["ssot#availability", "calendar:2026-07-16", "thread"],  // derivation-contract citations (audit)
+  "critique_note": "tightened the tone; removed an unverifiable date",
+  "thread_seen_ts": "1720900000.123400",              // newest thread msg at draft time → freshness re-check
+  "created_at": "2026-07-13T22:40:00Z",
+  "status": "pending"
+}
+```
+
+- **`body`** is the **verbatim** send text (`send a7`). The assistant always signs — the
+  unsigned/as-the-owner variant (spec Q4) was **deferred by the owner**, so there's one body per draft,
+  not `bodyA`/`bodyB`. What the owner approves is exactly what posts (no re-generation at send).
+- **`sources`** makes each factual claim auditable (SSOT / live read / thread — the derivation contract).
+- **`thread_seen_ts`** powers the on-approve **freshness re-check** (a moved thread re-surfaces, never
+  blind-sends).
+- Slack holds **no channel-side draft copy** (Q5) — the stored `body` is the single copy.
+
+> **Daemon Slack access** for executing a Telegram `send a7` lives in `../scripts/slack-mcp.json`
+> (git-ignored; seed `slack-mcp.json.example`), auto-detected by `presence.py` (Q9). Setup:
+> `../scripts/SLACK_MCP_SETUP.md`.
 
 ## `archive-people.json` schema + `archives/<person>/` layout
 

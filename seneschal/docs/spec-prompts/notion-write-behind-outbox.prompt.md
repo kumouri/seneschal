@@ -47,7 +47,7 @@ ordered, retried until it lands.
 - **Spec first.** Write `seneschal/docs/notion-write-behind-outbox-spec.md` (Markdown is canonical), tone like
   `seneschal/docs/asyncio-daemon-design.md`. **Name the (a)/(b) fork as the open decision. Stop for my sign-off
   before implementation.**
-- Conventional Commits (`docs(notion):`, `feat(notion):`). Branch off `develop` (Git Flow; `develop` deploys, `master` is the release point).
+- Conventional Commits (`docs(notion):`, `feat(notion):`). Branch off `develop` (Git Flow; `develop` integrates, `main` releases — and the daemon deploys from `main`).
 - CI green before any merge; **never merge red/pending**; **merge commit** only.
 - `git -c core.fsmonitor=false …` on every git command.
 - Stdlib-first (sqlite3 + urllib are already the house style); don't add deps without asking.

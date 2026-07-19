@@ -32,11 +32,13 @@ seneschal/
                    backend), obsidian/ + markdown/ (filesystem). Skills speak backend-neutral verbs
   references/      databases (placeholder-id schema registry, Notion backend), calendar/comms mapping,
                    briefing, reminders-policy, autonomy-policy(+config), memory protocol, advisor-chain,
+                   slack-ssot (template: the pinned fact sheet Slack drafts assert from),
                    salience, archons, notion-rate-limits (stub → store/notion/mapping.md),
                    proposed-learnings (Dream's PR target)
   docs/            asyncio-daemon-design.md + asyncio-daemon-plan.md (the reactive-core design),
                    notion-write-behind-outbox-spec.md (durable act-low Notion writes; Notion
-                   backend only) + spec-prompts/ (the historical planning prompts behind specs)
+                   backend only), slack-draft-and-hold-spec.md (Slack reply drafting: SSOT +
+                   held approvals) + spec-prompts/ (the historical planning prompts behind specs)
   scripts/         presence.py (resident asyncio daemon), sentinel.py (helper/one-shot),
                    identity_common.py (persona/identity.json reader — never raises, defaults
                    when absent; presence.py renders its grounding/slot prompts from it),
