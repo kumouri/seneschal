@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -218,6 +219,92 @@ class PosixRender(Base):
         self.assertIn("request_control.py", upd)
         self.assertIn("uv sync --frozen", upd)
         self.assertIn("core.fsmonitor=false", upd)
+
+
+class UpdateScriptParity(Base):
+    """The rendered POSIX updater mirrors seneschald-control.ps1 -Action Update (the
+    reference implementation): self-heal gates, per-path health stamping, rate-limited
+    verified alerting, and the crash-to-blocked-stamp trap."""
+
+    def upd(self) -> str:
+        return self.plan_texts("linux")["run-seneschald-update.local.sh"]
+
+    def test_bash_targeted_no_global_errexit(self):
+        upd = self.upd()
+        self.assertTrue(upd.startswith("#!/usr/bin/env bash\n"))
+        self.assertIn("\nset -u\n", upd)
+        self.assertNotIn("set -e", upd)  # errors are handled per-step, like the ps1
+
+    def test_sources_daemon_env_like_the_presence_local(self):
+        upd = self.upd()
+        self.assertIn('DAEMON_ENV="${XDG_CONFIG_HOME:-$HOME/.config}/seneschal/daemon.env"', upd)
+        self.assertIn('. "$DAEMON_ENV"', upd)
+
+    def test_self_heal_gates_merge_base_and_branch_claimed(self):
+        upd = self.upd()
+        # (a) the parked branch must carry nothing origin/$DeployBranch lacks...
+        self.assertIn('merge-base --is-ancestor HEAD "origin/$DEPLOY_BRANCH"', upd)
+        # ...(b) AND the session registry must say it's free (fail-closed).
+        self.assertIn("sentinel.py", upd)
+        self.assertIn("--branch-claimed", upd)
+        self.assertIn('claim_state=unknown', upd)
+        # The ps1's reason split: a broken claim check is its own fact, never
+        # disguised as an ordinary off-branch park.
+        self.assertIn("off-deploy-branch", upd)
+        self.assertIn("claim-check-failed", upd)
+
+    def test_health_stamp_carries_the_ps1_fields(self):
+        upd = self.upd()
+        self.assertIn("seneschald-health.json", upd)
+        for field in ("status", "reason", "detail", "branch", "head",
+                      "consecutive_blocked", "blocked_since", "last_ok",
+                      "last_alert", "updated_at"):
+            self.assertIn(f'"{field}"', upd)
+
+    def test_failure_honesty_reasons_all_present(self):
+        upd = self.upd()
+        for reason in ("fetch-failed", "pull-failed", "dep-sync-failed",
+                       "reattach-failed", "detached-divergent", "checkout-failed",
+                       "off-deploy-branch", "claim-check-failed", "update-error"):
+            self.assertIn(reason, upd)
+        self.assertIn("pending-restart", upd)  # dep-sync hold defers, then retries
+
+    def test_alert_constants_and_verified_send(self):
+        upd = self.upd()
+        self.assertIn("ALERT_AFTER_CYCLES=3", upd)
+        self.assertIn("REALERT_HOURS=6", upd)
+        self.assertIn("telegram_send.py", upd)
+        self.assertIn("--text", upd)
+        # last_alert is written by the block that runs only on telegram_send exit 0.
+        self.assertIn('h["last_alert"]', upd)
+        self.assertIn("NOT rate-limiting", upd)  # a failed send retries next cycle
+
+    def test_trap_converts_crashes_into_a_blocked_stamp(self):
+        upd = self.upd()
+        self.assertIn("trap on_exit EXIT", upd)
+        self.assertIn("update-error", upd)
+
+    def test_header_no_longer_claims_simplified_but_keeps_the_reference(self):
+        upd = self.upd()
+        self.assertNotIn("simplified", upd.lower())
+        self.assertIn("reference implementation", upd)
+
+    def test_helpers_use_python_not_jq_or_pwsh(self):
+        upd = self.upd()
+        self.assertNotIn("jq ", upd)
+        self.assertNotIn("pwsh", upd)
+
+    def test_bash_syntax_check(self):
+        bash = shutil.which("bash")
+        if not bash:
+            self.skipTest("bash not on PATH")
+        target = Path(self._tmp.name) / "run-seneschald-update.local.sh"
+        target.write_text(self.upd(), encoding="utf-8", newline="\n")
+        proc = subprocess.run(
+            [bash, "-n", str(target).replace("\\", "/")],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
 
     def test_launchd_plists_labels_and_schedules(self):
         texts = self.plan_texts("darwin")
