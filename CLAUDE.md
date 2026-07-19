@@ -57,8 +57,12 @@ seneschal/
                    rag_* (local semantic index), router.py, salience tooling, health/presence
                    pipelines, archive_common.py + telegram_ingest.py + discord_export_ingest.py
                    + sms_ingest.py + archive_aggregate.py (message archiver),
+                   setup_state.py + setup_env.py (the /setup wizard's deterministic
+                   substrate: resumability ledger + manifest-driven env-file writer),
                    check_placeholders.py (CI guard), *_SETUP.md guides,
                    seneschald-control.ps1 + run-*.cmd (Windows scheduled-task wrappers)
+  setup/           env-manifest.json — the machine-readable manifest of every configurable env
+                   surface, which the /setup wizard's env walker + the doctor read
   state/           local-first runtime cache — gitignored except README + *.example.*
 cockpit/           the Seneschal Cockpit — a local-first web observatory over the daemon
                    (see cockpit/README.md): server/ is a FastAPI backend (127.0.0.1:8760; the

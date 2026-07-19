@@ -1,0 +1,708 @@
+{
+  "_doc": [
+    "Machine-readable manifest of EVERY configurable env surface in seneschal — the single source",
+    "the /setup wizard's env walker, the doctor, and setup_env.py/setup_state.py read. Tracked;",
+    "contains no secrets (only variable NAMES, defaults, and validation shapes).",
+    "",
+    "Entry fields: id (manifest id; the wizard's chapter is 'env:<id>'), title, required (core",
+    "channel vs optional), enable_question (the wizard's opt-in question; null when required or",
+    "owned elsewhere), format ('env' = KEY=VALUE file rendered from the example by setup_env.py;",
+    "'json' = a JSON config copied/edited by its owning chapter — var parity checks don't apply),",
+    "path (the real, gitignored file), example (the tracked template; always path + '.example'),",
+    "docs (the setup walkthrough), depends[] (string dep id, or {id, soft, why} — soft deps degrade",
+    "gracefully instead of blocking), notes[], vars[], post[] (follow-up steps after the file is",
+    "written), verify {cmd, expect, user_confirm?} (a REAL command; '{path}' expands to the entry's",
+    "path; success = exit 0 AND expect appearing in stdout; user_confirm = a human must confirm the",
+    "out-of-band effect), ollama_models[] (models to `ollama pull` for this feature), handled_by",
+    "(a non-env chapter owns writing this file; listed here for doctor completeness),",
+    "vars_complete (false + vars_incomplete_reason exempts an entry from bidirectional var parity).",
+    "",
+    "Var fields: name, required, secret (never echo/log/store its value — errors say <redacted>),",
+    "default (vanilla value; may reference another var as '{VAR_NAME}', expanded at render time),",
+    "prompt (wizard question), validate (Python re.fullmatch pattern applied to provided values),",
+    "discover {say, cmd, extract} (how to find the value when the owner doesn't know it).",
+    "",
+    "Known dependency ids: proton-bridge-running (Proton Mail Bridge installed + signed in),",
+    "venv-websockets (the uv venv's websockets package), ollama (local Ollama server, vanilla",
+    "http://localhost:11434), worker:deployed (the phone/ call-screener Worker deployed).",
+    "",
+    "Ordering contract: required entries precede optional ones (CI-enforced by test_env_manifest.py)."
+  ],
+  "version": 1,
+  "entries": [
+    {
+      "id": "telegram",
+      "title": "Telegram bot — the core chat + push channel",
+      "required": true,
+      "enable_question": null,
+      "format": "env",
+      "path": "seneschal/scripts/telegram.env",
+      "example": "seneschal/scripts/telegram.env.example",
+      "docs": "seneschal/scripts/TELEGRAM_SETUP.md",
+      "depends": [],
+      "notes": [
+        "No inline '# comment' after a value — everything after '=' is the value.",
+        "TELEGRAM_ALLOWED_CHAT_IDS is strongly recommended — usually just TELEGRAM_CHAT_ID.",
+        "The verify sends a real message to the owner's chat, so it doubles as the end-to-end test."
+      ],
+      "vars": [
+        {
+          "name": "TELEGRAM_BOT_TOKEN",
+          "required": true,
+          "secret": true,
+          "prompt": "Bot token from @BotFather (looks like 123456789:AA...)",
+          "validate": "^\\d+:[A-Za-z0-9_-]{30,}$"
+        },
+        {
+          "name": "TELEGRAM_CHAT_ID",
+          "required": true,
+          "secret": false,
+          "prompt": "Your chat id with the bot (the default recipient for pushes/replies)",
+          "validate": "^-?\\d+$",
+          "discover": {
+            "say": "Message the bot once (any text) so the Bot API has an update to read, then run the discover command and read chat_id from the output.",
+            "cmd": "python seneschal/scripts/telegram_poll.py --env-file {path}",
+            "extract": "messages[0].chat_id"
+          }
+        },
+        {
+          "name": "TELEGRAM_ALLOWED_CHAT_IDS",
+          "required": false,
+          "secret": false,
+          "recommended": true,
+          "default": "{TELEGRAM_CHAT_ID}",
+          "prompt": "Inbound allowlist (comma-separated chat ids; strongly recommended — usually just your own chat id)",
+          "validate": "^(-?\\d+)(,-?\\d+)*$"
+        },
+        {
+          "name": "TELEGRAM_PARSE_MODE",
+          "required": false,
+          "secret": false,
+          "default": "",
+          "prompt": "Default outbound parse mode ('' plain is safest, or MarkdownV2 / HTML)",
+          "validate": "^(|MarkdownV2|HTML)$"
+        },
+        {
+          "name": "TELEGRAM_API_BASE",
+          "required": false,
+          "secret": false,
+          "default": "https://api.telegram.org",
+          "prompt": "API base override (proxy/test harness only — keep the default)",
+          "validate": "^https?://\\S+$"
+        }
+      ],
+      "verify": {
+        "cmd": "python seneschal/scripts/telegram_send.py --env-file {path} --text \"Seneschal setup: Telegram is connected.\"",
+        "expect": "\"sent\": true",
+        "user_confirm": "Did the message arrive in your Telegram chat with the bot?"
+      }
+    },
+    {
+      "id": "proton",
+      "title": "Proton Mail Bridge — the assistant's own email address",
+      "required": false,
+      "enable_question": "Should the assistant have its own email address via Proton Mail Bridge (send + read)?",
+      "format": "env",
+      "path": "seneschal/scripts/proton.env",
+      "example": "seneschal/scripts/proton.env.example",
+      "docs": "seneschal/scripts/EMAIL_SETUP.md",
+      "depends": [
+        {
+          "id": "proton-bridge-running",
+          "soft": false,
+          "why": "the credentials come from Bridge's Mailbox details, and verify logs into Bridge's local IMAP"
+        }
+      ],
+      "notes": [
+        "GOTCHA: no inline '# comment' after a value — everything after '=' becomes the value, so an added comment silently corrupts the password.",
+        "Use the Bridge-GENERATED mailbox password (~24 chars) from Bridge -> Mailbox details, NOT the Proton login password.",
+        "Username is EXACTLY what Bridge shows — often the PRIMARY account address, not the assistant's alias.",
+        "Without this file, email-triage falls back to Gmail (draft-only)."
+      ],
+      "vars": [
+        {
+          "name": "PROTON_BRIDGE_USER",
+          "required": true,
+          "secret": false,
+          "prompt": "Bridge mailbox username (from Bridge -> Mailbox details; usually the primary account address)",
+          "validate": "^[^@\\s]+@[^@\\s]+$"
+        },
+        {
+          "name": "PROTON_BRIDGE_PASS",
+          "required": true,
+          "secret": true,
+          "prompt": "Bridge-generated mailbox password (from Bridge -> Mailbox details)",
+          "validate": "^\\S{8,}$"
+        },
+        {
+          "name": "PROTON_SMTP_HOST",
+          "required": false,
+          "secret": false,
+          "default": "127.0.0.1",
+          "prompt": "SMTP host (keep the default unless Bridge shows another)"
+        },
+        {
+          "name": "PROTON_SMTP_PORT",
+          "required": false,
+          "secret": false,
+          "default": "1025",
+          "validate": "^\\d+$"
+        },
+        {
+          "name": "PROTON_IMAP_HOST",
+          "required": false,
+          "secret": false,
+          "default": "127.0.0.1"
+        },
+        {
+          "name": "PROTON_IMAP_PORT",
+          "required": false,
+          "secret": false,
+          "default": "1143",
+          "validate": "^\\d+$"
+        },
+        {
+          "name": "PROTON_SENDER",
+          "required": false,
+          "secret": false,
+          "default": "{PROTON_BRIDGE_USER}",
+          "prompt": "The From address the assistant sends as (the assistant's alias; defaults to the bridge user)",
+          "validate": "^[^@\\s]+@[^@\\s]+$"
+        },
+        {
+          "name": "PROTON_SMTP_STARTTLS",
+          "required": false,
+          "secret": false,
+          "default": "1",
+          "validate": "^[01]$"
+        },
+        {
+          "name": "PROTON_SMTP_INSECURE",
+          "required": false,
+          "secret": false,
+          "default": "1",
+          "prompt": "Accept Bridge's local self-signed cert (keep 1 unless you've installed Bridge's CA)",
+          "validate": "^[01]$"
+        },
+        {
+          "name": "PROTON_IMAP_STARTTLS",
+          "required": false,
+          "secret": false,
+          "default": "1",
+          "validate": "^[01]$"
+        },
+        {
+          "name": "PROTON_IMAP_INSECURE",
+          "required": false,
+          "secret": false,
+          "default": "1",
+          "validate": "^[01]$"
+        }
+      ],
+      "verify": {
+        "cmd": "python seneschal/scripts/proton_read.py --env-file {path} --check-auth",
+        "expect": "Bridge IMAP login OK"
+      }
+    },
+    {
+      "id": "google",
+      "title": "Google (Calendar + Gmail) REST bridge",
+      "required": false,
+      "enable_question": "Connect Google Calendar + Gmail (reads/drafts are act-low; sending stays draft-and-hold)?",
+      "format": "env",
+      "path": "seneschal/scripts/google.env",
+      "example": "seneschal/scripts/google.env.example",
+      "docs": "seneschal/scripts/GOOGLE_SETUP.md",
+      "depends": [],
+      "notes": [
+        "One Cloud 'Desktop app' OAuth client serves ALL accounts; per-account refresh tokens land in seneschal/state/google_tokens.json (gitignored).",
+        "Publish the OAuth consent screen to 'In production' or refresh tokens expire after 7 days.",
+        "No inline '# comment' after a value — the whole line after '=' is the value."
+      ],
+      "vars": [
+        {
+          "name": "GOOGLE_CLIENT_ID",
+          "required": true,
+          "secret": true,
+          "prompt": "OAuth client ID (Cloud console -> Credentials -> OAuth client ID, type Desktop app)",
+          "validate": "^\\S+\\.apps\\.googleusercontent\\.com$"
+        },
+        {
+          "name": "GOOGLE_CLIENT_SECRET",
+          "required": true,
+          "secret": true,
+          "prompt": "OAuth client secret (same Cloud console credential)",
+          "validate": "^\\S{10,}$"
+        },
+        {
+          "name": "GOOGLE_SCOPES",
+          "required": false,
+          "secret": false,
+          "default": "",
+          "prompt": "Space-separated OAuth scopes (blank = the default calendar + gmail set)"
+        },
+        {
+          "name": "GOOGLE_TOKEN_STORE",
+          "required": false,
+          "secret": false,
+          "default": "",
+          "prompt": "Refresh-token store path (blank = seneschal/state/google_tokens.json)"
+        },
+        {
+          "name": "GOOGLE_OAUTH_PORT",
+          "required": false,
+          "secret": false,
+          "default": "",
+          "prompt": "Fixed loopback port for the consent flow (blank = pick a free port)",
+          "validate": "^\\d*$"
+        }
+      ],
+      "post": [
+        "Run the one-time per-account consent: python seneschal/scripts/google_auth.py --env-file {path} --account <label>  (opens a browser; the loopback redirect completes it). Repeat per account label."
+      ],
+      "verify": {
+        "cmd": "python seneschal/scripts/google_auth.py --env-file {path} --list",
+        "expect": "\"accounts\""
+      }
+    },
+    {
+      "id": "discord",
+      "title": "Discord bot — second two-way chat surface",
+      "required": false,
+      "enable_question": "Add Discord as a second two-way chat surface (same persona as Telegram)?",
+      "format": "env",
+      "path": "seneschal/scripts/discord.env",
+      "example": "seneschal/scripts/discord.env.example",
+      "docs": "seneschal/scripts/DISCORD_SETUP.md",
+      "depends": [
+        {
+          "id": "venv-websockets",
+          "soft": true,
+          "why": "gateway websocket push inbound needs the uv venv's websockets; without it inbound degrades to REST polling (outbound unaffected)"
+        }
+      ],
+      "notes": [
+        "Enable Developer Mode in Discord settings to copy channel/user ids (right-click -> Copy ID).",
+        "The daemon auto-detects discord.env once present (--no-discord opts out); no other wiring needed."
+      ],
+      "vars": [
+        {
+          "name": "DISCORD_BOT_TOKEN",
+          "required": true,
+          "secret": true,
+          "prompt": "Bot token from the Discord Developer Portal (Bot -> Reset Token)",
+          "validate": "^[A-Za-z0-9_.\\-]{50,}$"
+        },
+        {
+          "name": "DISCORD_CHANNEL_ID",
+          "required": true,
+          "secret": false,
+          "prompt": "The private channel id the assistant posts in and watches",
+          "validate": "^\\d{17,20}$"
+        },
+        {
+          "name": "DISCORD_ALLOWED_USER_IDS",
+          "required": false,
+          "secret": false,
+          "recommended": true,
+          "prompt": "Allowlist of author ids allowed to drive the assistant (comma-separated; set your own user id)",
+          "validate": "^\\d{17,20}(,\\d{17,20})*$"
+        },
+        {
+          "name": "DISCORD_API_BASE",
+          "required": false,
+          "secret": false,
+          "default": "https://discord.com/api/v10",
+          "prompt": "API base override (proxy/test only — keep the default)",
+          "validate": "^https?://\\S+$"
+        }
+      ],
+      "verify": {
+        "cmd": "python seneschal/scripts/discord_send.py --env-file {path} --check-auth",
+        "expect": "token OK"
+      }
+    },
+    {
+      "id": "router",
+      "title": "Front-door Router advisor (local Ollama classifier, shadow mode)",
+      "required": false,
+      "enable_question": "Enable the local front-door router (needs Ollama; phase-1 shadow classifier, log-only)?",
+      "format": "env",
+      "path": "seneschal/scripts/router.env",
+      "example": "seneschal/scripts/router.env.example",
+      "docs": "seneschal/scripts/ROUTER_SETUP.md",
+      "depends": [
+        {
+          "id": "ollama",
+          "soft": false,
+          "why": "the classifier runs on a local Ollama model; at runtime an unreachable Ollama abstains to 'escalate' (safe), but the feature does nothing without it"
+        }
+      ],
+      "ollama_models": ["qwen3.5:4b"],
+      "notes": [
+        "All vars have safe defaults baked into router.py — router.env is optional; write it only to override.",
+        "Phase 1 is shadow-only: verdicts are logged to state/router-log.jsonl, behavior unchanged.",
+        "Verify caveat: with Ollama down the router abstains to 'escalate' instead of failing, so the verify passes either way — the doctor's 'ollama' dependency probe is the real reachability check."
+      ],
+      "vars": [
+        {
+          "name": "OLLAMA_URL",
+          "required": false,
+          "secret": false,
+          "default": "http://localhost:11434",
+          "prompt": "Where the local Ollama server listens",
+          "validate": "^https?://\\S+$"
+        },
+        {
+          "name": "ROUTER_MODEL",
+          "required": false,
+          "secret": false,
+          "default": "qwen3.5:4b",
+          "prompt": "The local classifier model"
+        },
+        {
+          "name": "ROUTER_CONF_THRESHOLD",
+          "required": false,
+          "secret": false,
+          "default": "0.7",
+          "prompt": "Minimum confidence to accept a 'trivial' verdict (below = escalate)",
+          "validate": "^(0(\\.\\d+)?|1(\\.0+)?)$"
+        }
+      ],
+      "verify": {
+        "cmd": "python seneschal/scripts/router.py \"setup smoke: remind me to stretch\"",
+        "expect": "\"verdict\""
+      }
+    },
+    {
+      "id": "rag",
+      "title": "Local semantic RAG index (Retrieval advisor, phase B)",
+      "required": false,
+      "enable_question": "Enable the local semantic memory index (needs Ollama; additive — falls back to store search without it)?",
+      "format": "env",
+      "path": "seneschal/scripts/rag.env",
+      "example": "seneschal/scripts/rag.env.example",
+      "docs": "seneschal/scripts/RAG_SETUP.md",
+      "depends": [
+        {
+          "id": "ollama",
+          "soft": false,
+          "why": "embeddings come from a local Ollama model; at runtime Retrieval falls back to store search when Ollama is absent, but the index can't build without it"
+        }
+      ],
+      "ollama_models": ["nomic-embed-text"],
+      "notes": [
+        "All vars have safe defaults baked into rag_common.py — rag.env is optional; write it only to override.",
+        "Verify succeeds (exit 0) only once the index has content — run the post steps first; an empty index prints [] and exits non-zero by design (the fallback signal)."
+      ],
+      "vars": [
+        {
+          "name": "OLLAMA_URL",
+          "required": false,
+          "secret": false,
+          "default": "http://localhost:11434",
+          "prompt": "Where the local Ollama server listens",
+          "validate": "^https?://\\S+$"
+        },
+        {
+          "name": "EMBED_MODEL",
+          "required": false,
+          "secret": false,
+          "default": "nomic-embed-text",
+          "prompt": "The local embedding model"
+        },
+        {
+          "name": "CHUNK_CHARS",
+          "required": false,
+          "secret": false,
+          "default": "800",
+          "prompt": "Target chars per chunk",
+          "validate": "^\\d+$"
+        },
+        {
+          "name": "CHUNK_OVERLAP",
+          "required": false,
+          "secret": false,
+          "default": "150",
+          "prompt": "Overlap between chunks",
+          "validate": "^\\d+$"
+        }
+      ],
+      "post": [
+        "Optional project-state layer (interactive): copy seneschal/state/project-roots.example.json to seneschal/state/project-roots.json and set the roots to scan.",
+        "Build the initial index: python seneschal/scripts/rag_index.py --local"
+      ],
+      "verify": {
+        "cmd": "python seneschal/scripts/rag_query.py \"setup smoke test\" --k 1 --no-record",
+        "expect": "["
+      }
+    },
+    {
+      "id": "sentiment",
+      "title": "Offline sentiment cross-check (salience Phase 2)",
+      "required": false,
+      "enable_question": "Enable the offline sentiment cross-check for forgetting events (needs Ollama; abstains to neutral without it)?",
+      "format": "env",
+      "path": "seneschal/scripts/sentiment.env",
+      "example": "seneschal/scripts/sentiment.env.example",
+      "docs": "seneschal/scripts/SALIENCE_SETUP.md",
+      "depends": [
+        {
+          "id": "ollama",
+          "soft": false,
+          "why": "the scoring model runs on local Ollama; at runtime an absent Ollama abstains to neutral (weight 0.0) — a cross-check, never a hard dependency"
+        }
+      ],
+      "ollama_models": ["qwen3.5:4b"],
+      "notes": [
+        "Shares qwen3.5:4b with the router — one `ollama pull` covers both.",
+        "All vars have safe defaults baked into sentiment.py — sentiment.env is optional.",
+        "Verify caveat: with Ollama down the classifier abstains (weight 0.0) instead of failing — the doctor's 'ollama' dependency probe is the real reachability check."
+      ],
+      "vars": [
+        {
+          "name": "OLLAMA_URL",
+          "required": false,
+          "secret": false,
+          "default": "http://localhost:11434",
+          "prompt": "Where the local Ollama server listens",
+          "validate": "^https?://\\S+$"
+        },
+        {
+          "name": "SENTIMENT_MODEL",
+          "required": false,
+          "secret": false,
+          "default": "qwen3.5:4b",
+          "prompt": "The local scoring model"
+        }
+      ],
+      "verify": {
+        "cmd": "python seneschal/scripts/sentiment.py \"thanks, this helped a lot\"",
+        "expect": "\"weight\""
+      }
+    },
+    {
+      "id": "ha",
+      "title": "Home Assistant REST API (presence Phase 5 device control)",
+      "required": false,
+      "enable_question": "Connect Home Assistant for presence-driven device control (act-high; every automation stays draft-and-hold until approved)?",
+      "format": "env",
+      "path": "seneschal/scripts/ha.env",
+      "example": "seneschal/scripts/ha.env.example",
+      "docs": "seneschal/scripts/HA_SETUP.md",
+      "depends": [],
+      "notes": [
+        "Inert until this file exists AND each automation is individually approved; failsafes stay ask-high always.",
+        "Create the token: HA -> your profile -> Long-Lived Access Tokens -> Create Token.",
+        "ha_client has no smoke CLI, so verify is a python -c import + config-presence check; a real HA service call is act-high and belongs to the owner."
+      ],
+      "vars": [
+        {
+          "name": "HA_URL",
+          "required": true,
+          "secret": false,
+          "default": "http://homeassistant.local:8123",
+          "prompt": "Your HA base URL (e.g. http://homeassistant.local:8123, or a LAN/tailnet IP:8123)",
+          "validate": "^https?://\\S+$"
+        },
+        {
+          "name": "HA_TOKEN",
+          "required": true,
+          "secret": true,
+          "prompt": "Long-lived access token (HA -> your profile -> Long-Lived Access Tokens)",
+          "validate": "^\\S{20,}$"
+        }
+      ],
+      "post": [
+        "Copy seneschal/state/presence-automations.example.json to seneschal/state/presence-automations.json and define your context-edge -> service-call automations (each stays draft-and-hold until explicitly approved; failsafes stay ask-high)."
+      ],
+      "verify": {
+        "cmd": "python -c \"import sys; sys.path.insert(0, 'seneschal/scripts'); import ha_client; print('ha_client ok; configured:', ha_client.available())\"",
+        "expect": "ha_client ok"
+      }
+    },
+    {
+      "id": "push-call",
+      "title": "Outbound phone calls (Call Me reminders via the call-screener Worker)",
+      "required": false,
+      "enable_question": "Enable can't-miss phone-call reminders (requires the phone/ call-screener Worker deployed)?",
+      "format": "env",
+      "path": "seneschal/scripts/push-call.env",
+      "example": "seneschal/scripts/push-call.env.example",
+      "docs": "seneschal/references/comms-mapping.md",
+      "depends": [
+        {
+          "id": "worker:deployed",
+          "soft": false,
+          "why": "the Worker endpoint must exist and PUSH_CALL_SECRET must be set on it (wrangler secret put) before this env can work"
+        }
+      ],
+      "notes": [
+        "If the Worker isn't deployed yet, mark this chapter blocked and move on — deploying the Worker (cd phone && wrangler deploy) is its own task, not an inline step of the env walker.",
+        "Twilio creds stay in Cloudflare; only the Worker URL + bearer secret live here.",
+        "Verify is a --dry-run (no network, no ring); a live test call is owner-initiated."
+      ],
+      "vars": [
+        {
+          "name": "PUSH_CALL_URL",
+          "required": true,
+          "secret": false,
+          "prompt": "Full endpoint URL of the deployed Worker (include /push-call)",
+          "validate": "^https://\\S+/push-call$"
+        },
+        {
+          "name": "PUSH_CALL_SECRET",
+          "required": true,
+          "secret": true,
+          "prompt": "The bearer secret matching `wrangler secret put PUSH_CALL_SECRET` on the Worker",
+          "validate": "^\\S{16,}$"
+        },
+        {
+          "name": "PUSH_CALL_TO",
+          "required": false,
+          "secret": false,
+          "prompt": "Recipient E.164 (omit to use the Worker's USER_CELL_E164 default)",
+          "validate": "^\\+\\d{7,15}$"
+        }
+      ],
+      "verify": {
+        "cmd": "python seneschal/scripts/push_call.py --env-file {path} --text \"Setup verify: this is a dry run.\" --dry-run",
+        "expect": "\"dry_run\": true"
+      }
+    },
+    {
+      "id": "push-sms",
+      "title": "Outbound SMS pushes (via the call-screener Worker)",
+      "required": false,
+      "enable_question": "Enable SMS pushes for brief highlights (requires the phone/ call-screener Worker deployed)?",
+      "format": "env",
+      "path": "seneschal/scripts/push-sms.env",
+      "example": "seneschal/scripts/push-sms.env.example",
+      "docs": "seneschal/references/comms-mapping.md",
+      "depends": [
+        {
+          "id": "worker:deployed",
+          "soft": false,
+          "why": "the Worker endpoint must exist and PUSH_SMS_SECRET must be set on it (wrangler secret put) before this env can work"
+        }
+      ],
+      "notes": [
+        "If the Worker isn't deployed yet, mark this chapter blocked and move on — deploying the Worker is its own task, not an inline step of the env walker.",
+        "Twilio creds stay in Cloudflare; only the Worker URL + bearer secret live here.",
+        "Verify is a --dry-run (no network, no send); a live test SMS is owner-initiated."
+      ],
+      "vars": [
+        {
+          "name": "PUSH_SMS_URL",
+          "required": true,
+          "secret": false,
+          "prompt": "Full endpoint URL of the deployed Worker (include /push-sms)",
+          "validate": "^https://\\S+/push-sms$"
+        },
+        {
+          "name": "PUSH_SMS_SECRET",
+          "required": true,
+          "secret": true,
+          "prompt": "The bearer secret matching `wrangler secret put PUSH_SMS_SECRET` on the Worker",
+          "validate": "^\\S{16,}$"
+        },
+        {
+          "name": "PUSH_SMS_TO",
+          "required": false,
+          "secret": false,
+          "prompt": "Recipient E.164 (omit to use the Worker's USER_CELL_E164 default)",
+          "validate": "^\\+\\d{7,15}$"
+        }
+      ],
+      "verify": {
+        "cmd": "python seneschal/scripts/push_sms.py --env-file {path} --text \"Setup verify: this is a dry run.\" --dry-run",
+        "expect": "\"dry_run\": true"
+      }
+    },
+    {
+      "id": "cockpit",
+      "title": "Seneschal Cockpit OIDC auth (deferred — dev-no-auth ships today)",
+      "required": false,
+      "enable_question": null,
+      "handled_by": "cockpit",
+      "format": "env",
+      "path": "cockpit/server/cockpit.env",
+      "example": "cockpit/server/cockpit.env.example",
+      "docs": "cockpit/README.md",
+      "depends": [],
+      "notes": [
+        "Owned by the cockpit chapter (handled_by: cockpit) — listed here so the doctor sees every env surface.",
+        "Dev-no-auth build: leave COCKPIT_OIDC_CLIENT_ID unset until the deferred OIDC auth stack lands; setting it flips auth_mode() to 'oidc' with no login routes to serve it.",
+        "The session-cookie signing secret is deliberately NOT an env var — auto-generated to state/cockpit-session-secret."
+      ],
+      "vars": [
+        {
+          "name": "COCKPIT_OIDC_ISSUER",
+          "required": false,
+          "secret": false,
+          "default": "http://localhost:8480",
+          "prompt": "The OIDC provider's issuer URL (discovery finds the rest)"
+        },
+        {
+          "name": "COCKPIT_OIDC_CLIENT_ID",
+          "required": false,
+          "secret": false,
+          "prompt": "The cockpit's OIDC client id (PKCE public client; LEAVE UNSET until the auth stack lands)"
+        },
+        {
+          "name": "COCKPIT_OIDC_REDIRECT",
+          "required": false,
+          "secret": false,
+          "default": "http://127.0.0.1:8760/auth/callback",
+          "prompt": "Registered redirect URI (must match the OIDC app exactly)"
+        },
+        {
+          "name": "COCKPIT_ALLOWED_USER",
+          "required": false,
+          "secret": false,
+          "default": "owner",
+          "prompt": "The single allowed cockpit username"
+        }
+      ]
+    },
+    {
+      "id": "slack-mcp",
+      "title": "Slack MCP config (daemon Slack send hands)",
+      "required": false,
+      "enable_question": null,
+      "handled_by": "mcp",
+      "format": "json",
+      "path": "seneschal/scripts/slack-mcp.json",
+      "example": "seneschal/scripts/slack-mcp.json.example",
+      "docs": "seneschal/scripts/SLACK_MCP_SETUP.md",
+      "depends": [],
+      "notes": [
+        "A JSON MCP config, not an env file (format: json) — the mcp chapter owns writing it; listed here for doctor completeness.",
+        "Auto-detected by presence.py once present (--no-slack disables)."
+      ],
+      "vars": [],
+      "vars_complete": false,
+      "vars_incomplete_reason": "JSON MCP config — KEY=VALUE var parity does not apply; the mcp chapter validates its shape."
+    },
+    {
+      "id": "notion-mcp",
+      "title": "Notion MCP config (store backend + headless daemon Notion access)",
+      "required": false,
+      "enable_question": null,
+      "handled_by": "mcp",
+      "format": "json",
+      "path": "seneschal/scripts/notion-mcp.json",
+      "example": "seneschal/scripts/notion-mcp.json.example",
+      "docs": "seneschal/scripts/NOTION_MCP_SETUP.md",
+      "depends": [],
+      "notes": [
+        "A JSON MCP config, not an env file (format: json) — the mcp chapter owns writing it; listed here for doctor completeness.",
+        "Only relevant on the notion store backend; filesystem backends need no MCP.",
+        "Needs a one-time OAuth + daemon restart before headless writes work."
+      ],
+      "vars": [],
+      "vars_complete": false,
+      "vars_incomplete_reason": "JSON MCP config — KEY=VALUE var parity does not apply; the mcp chapter validates its shape."
+    }
+  ]
+}
