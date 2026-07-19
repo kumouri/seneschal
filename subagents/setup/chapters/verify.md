@@ -47,7 +47,7 @@ For each RED row, in board order: one line on what's broken, then offer the jump
 `in-progress` with `--step "walking reds"`; the wizard resumes here after). A no is fine —
 the row stays red on the board and that's an honest answer. YELLOW rows get one line each
 only where the owner can act (a declined feature's SKIP needs no speech); never nag about
-yellows that are by-design (default persona, no daemon yet).
+yellows that are by-design (default persona, a declined daemon chapter).
 
 ## 4 — Stamp + mark
 
@@ -73,5 +73,6 @@ Close the wizard in a short human paragraph, from the board — not a template, 
 - **The three doors:** `/assistant` starts a chat with the assistant right now; `/doctor`
   re-runs this health check any time; `/setup <chapter>` reopens any chapter to change an
   answer.
-- **The daemon**, until its chapter lands: starting the always-on loop is a by-hand step —
-  point at `seneschal/scripts/SCHEDULING.md`.
+- **The daemon**, if its chapter was declined or skipped: `/setup daemon` registers the
+  always-on loop platform-natively any time; `seneschal/scripts/SCHEDULING.md` is the
+  by-hand path.

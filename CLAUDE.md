@@ -59,9 +59,11 @@ seneschal/
                    rag_* (local semantic index), router.py, salience tooling, health/presence
                    pipelines, archive_common.py + telegram_ingest.py + discord_export_ingest.py
                    + sms_ingest.py + archive_aggregate.py (message archiver),
-                   setup_state.py + setup_env.py + setup_doctor.py (the /setup wizard's
-                   deterministic substrate: resumability ledger + manifest-driven env-file
-                   writer + the /doctor green/yellow/red health board),
+                   setup_state.py + setup_env.py + setup_doctor.py + settings_merge.py +
+                   render_units.py (the /setup wizard's deterministic substrate:
+                   resumability ledger + manifest-driven env-file writer + the /doctor
+                   green/yellow/red health board + the ~/.claude/settings.json hook merger
+                   + the daemon chapter's launcher/unit/plist renderer),
                    check_placeholders.py (CI guard), *_SETUP.md guides,
                    seneschald-control.ps1 + run-*.cmd (Windows scheduled-task wrappers)
   setup/           env-manifest.json — the machine-readable manifest of every configurable env
@@ -96,8 +98,14 @@ chapter marks the ledger (`seneschal/state/setup-state.json` via `setup_state.py
 respects pre-wizard work), a crashed/partial run resumes at the first unfinished chapter, and
 `/setup <chapter>` jumps anywhere. The closing `verify` chapter runs the doctor; **`/doctor`**
 re-runs that health check any time — `setup_doctor.py`'s green/yellow/red board (exit code =
-red count) plus the in-session MCP probes the script can't do. The `daemon` chapter lands in a
-follow-up PR (the sequencer marks it blocked-with-a-note until then). Standalone
+red count) plus the in-session MCP probes the script can't do. The `daemon` chapter installs
+the always-on layer tri-platform with at most ONE elevation (`render_units.py` renders
+gitignored locals into `seneschal/state/setup/` — a `register-tasks.ps1` the owner
+approves-then-runs in one `-Verb RunAs` shot on Windows, with an InteractiveToken
+`--user-level` fallback; systemd user units + the one `loginctl enable-linger` sudo on
+Linux; launchd agents, zero elevation, on macOS) and merges the §5 session hooks into the
+user's `~/.claude/settings.json` (`settings_merge.py` — diff-first, append-only,
+backup-first, refuses corrupt JSON). Standalone
 `/setup-persona` and `/setup-store` still work and update the same ledger. The framework runs
 on the shipped defaults (default-Claude persona, no store) until any of it is run.
 

@@ -2,8 +2,8 @@
 name: setup
 description: >-
   The unified first-run wizard. Sequences every setup chapter — preflight, persona, store,
-  owner interview, auth + model dials, the env walker, MCP servers, cockpit, the closing
-  verify/doctor pass — through one resumable ledger, so a crashed / restarted / partial setup picks up where it left off
+  owner interview, auth + model dials, the env walker, MCP servers, cockpit, the daemon,
+  the closing verify/doctor pass — through one resumable ledger, so a crashed / restarted / partial setup picks up where it left off
   instead of starting over. Use for "/setup", "resume setup", "finish setting up", or
   "/setup <chapter>" to jump straight to one chapter. Re-runnable forever: done chapters
   summarize and offer a redo.
@@ -90,7 +90,7 @@ domain logic; this skill owns the order, the ledger conventions, and the resume 
 | 7 | `env:<id>` (each optional manifest entry) | `chapters/env-walker.md`, with `chapters/ollama.md` inline on demand | proton, google, discord, router, rag, sentiment, ha, push-call, push-sms | that entry's `path` from the manifest |
 | 8 | `mcp:notion`, `mcp:calendar`, `mcp:slack` | `chapters/mcp.md` | MCP servers + their OAuth (incl. the manifest's `handled_by: mcp` configs) | user-scope registrations; `seneschal/scripts/slack-mcp.json` / `notion-mcp.json` when Path B |
 | 9 | `cockpit` | `chapters/cockpit.md` | the local web observatory (optional) | `cockpit/server/cockpit.env` (+ built `cockpit/web/dist`) |
-| 10 | `daemon` | `chapters/daemon.md` — **lands in a later PR** | launchers, scheduled tasks, the resident daemon | — |
+| 10 | `daemon` | `chapters/daemon.md` | launcher locals + platform registration (Task Scheduler / systemd user units / launchd), the session hooks, the resident daemon | `seneschal/state/setup/` renders (the chapter records the platform's actual files) |
 | 11 | `verify` | `chapters/verify.md` | the end-to-end doctor pass (`setup_doctor.py` board + in-session MCP probes) + the send-off | — (stamps the ledger's `doctor_last` block) |
 
 Rows 6–7 are both the **env walker** — one generic chapter driven by
@@ -100,11 +100,12 @@ Rows 6–7 are both the **env walker** — one generic chapter driven by
 first (the owner may still decline it; `declined` is a resolution, not a gap). The manifest
 lists required entries first (CI-enforced), so file order is walk order.
 
-**Missing chapter files** (row 10 until its PR lands): if a chapter's file does not
-exist, do not improvise its content. Mark it
-`blocked --summary "chapter lands in a later PR"` and say so plainly — the board stays
-honest, the wizard stays shippable, and when the file appears a re-run picks the chapter up
-(a jump to it, or `infer`-then-resume). Never treat an absent chapter file as an error.
+**Missing chapter files** (vestigial — every chapter file ships today; the rule stays for
+any future not-yet-landed chapter): if a chapter's file does not exist, do not improvise
+its content. Mark it `blocked --summary "chapter lands in a later PR"` and say so plainly —
+the board stays honest, the wizard stays shippable, and when the file appears a re-run
+picks the chapter up (a jump to it, or `infer`-then-resume). Never treat an absent chapter
+file as an error.
 
 ## Composition contract
 
@@ -127,9 +128,7 @@ honest, the wizard stays shippable, and when the file appears a re-run picks the
 4. Between chapters: one line of progress ("3 of 9 done — next: the store backend"), then
    continue. No recaps, no ceremony.
 5. At the end of the walk: the `verify` chapter (row 11) owns the close — the doctor pass,
-   the combined board, and the send-off. (Until the `daemon` chapter lands, starting the
-   daemon stays a by-hand step per `seneschal/scripts/SCHEDULING.md` — verify's send-off
-   says so.)
+   the combined board, and the send-off.
 
 ## Guardrails
 

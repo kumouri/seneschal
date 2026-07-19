@@ -67,8 +67,8 @@ uv run uvicorn cockpit.server.app:app --host 127.0.0.1 --port 8760
 Then `http://127.0.0.1:8760` — the dashboard panels render immediately from
 `seneschal/state/*` (tolerantly — a fresh install shows honest empty states); the **chat
 pane and live status need the daemon running** (its cockpit pipe), which is the daemon
-chapter's territory — until that chapter lands, `seneschal/scripts/SCHEDULING.md` is the
-by-hand path. `GET /api/health` answering `{"ok": true, ...}` is the smoke test.
+chapter's territory (`/setup daemon`; `seneschal/scripts/SCHEDULING.md` is the by-hand
+path). `GET /api/health` answering `{"ok": true, ...}` is the smoke test.
 
 ## Close
 
