@@ -2,8 +2,8 @@
 name: setup
 description: >-
   The unified first-run wizard. Sequences every setup chapter — preflight, persona, store,
-  owner interview, auth + model dials, the env walker, MCP servers, cockpit — through one
-  resumable ledger, so a crashed / restarted / partial setup picks up where it left off
+  owner interview, auth + model dials, the env walker, MCP servers, cockpit, the closing
+  verify/doctor pass — through one resumable ledger, so a crashed / restarted / partial setup picks up where it left off
   instead of starting over. Use for "/setup", "resume setup", "finish setting up", or
   "/setup <chapter>" to jump straight to one chapter. Re-runnable forever: done chapters
   summarize and offer a redo.
@@ -91,7 +91,7 @@ domain logic; this skill owns the order, the ledger conventions, and the resume 
 | 8 | `mcp:notion`, `mcp:calendar`, `mcp:slack` | `chapters/mcp.md` | MCP servers + their OAuth (incl. the manifest's `handled_by: mcp` configs) | user-scope registrations; `seneschal/scripts/slack-mcp.json` / `notion-mcp.json` when Path B |
 | 9 | `cockpit` | `chapters/cockpit.md` | the local web observatory (optional) | `cockpit/server/cockpit.env` (+ built `cockpit/web/dist`) |
 | 10 | `daemon` | `chapters/daemon.md` — **lands in a later PR** | launchers, scheduled tasks, the resident daemon | — |
-| 11 | `verify` | `chapters/verify.md` — **lands in a later PR** | the end-to-end doctor pass | — |
+| 11 | `verify` | `chapters/verify.md` | the end-to-end doctor pass (`setup_doctor.py` board + in-session MCP probes) + the send-off | — (stamps the ledger's `doctor_last` block) |
 
 Rows 6–7 are both the **env walker** — one generic chapter driven by
 `seneschal/setup/env-manifest.json` (one ledger chapter per entry, id `env:<id>`). The
@@ -100,7 +100,7 @@ Rows 6–7 are both the **env walker** — one generic chapter driven by
 first (the owner may still decline it; `declined` is a resolution, not a gap). The manifest
 lists required entries first (CI-enforced), so file order is walk order.
 
-**Missing chapter files** (rows 10–11 until their PRs land): if a chapter's file does not
+**Missing chapter files** (row 10 until its PR lands): if a chapter's file does not
 exist, do not improvise its content. Mark it
 `blocked --summary "chapter lands in a later PR"` and say so plainly — the board stays
 honest, the wizard stays shippable, and when the file appears a re-run picks the chapter up
@@ -126,10 +126,10 @@ honest, the wizard stays shippable, and when the file appears a re-run picks the
    email triage falls back to Gmail drafts").
 4. Between chapters: one line of progress ("3 of 9 done — next: the store backend"), then
    continue. No recaps, no ceremony.
-5. At the end of the walk: show the final board, name what's live and what was
-   declined/blocked, and point at the next step (today: start the daemon by hand per
-   `seneschal/scripts/SCHEDULING.md`; once the `daemon` and `verify` chapters land, they take
-   over that close).
+5. At the end of the walk: the `verify` chapter (row 11) owns the close — the doctor pass,
+   the combined board, and the send-off. (Until the `daemon` chapter lands, starting the
+   daemon stays a by-hand step per `seneschal/scripts/SCHEDULING.md` — verify's send-off
+   says so.)
 
 ## Guardrails
 
