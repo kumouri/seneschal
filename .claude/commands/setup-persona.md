@@ -9,5 +9,7 @@ Run the **persona wizard**: read `subagents/persona-wizard/SKILL.md` and follow 
   jumps straight to the name step, confirms, regenerates).
 - If the persona is already configured, take the re-run edit path — summarize, ask what to
   change, don't re-interview from scratch.
+- Standalone runs still update the shared setup ledger (the SKILL's close step), so `/setup`
+  sees this chapter as done.
 
 The request (if any): $ARGUMENTS

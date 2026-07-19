@@ -1,22 +1,19 @@
 ---
-description: First-run setup — build your assistant's persona and connect your data store
-argument-hint: [optional]
+description: First-run setup — the unified, resumable wizard (persona, store, auth, channels, cockpit)
+argument-hint: [optional chapter id to jump to, e.g. "persona" or "env:telegram"]
 ---
 
-Run the full first-run setup as a single guided flow. Welcome the owner briefly, explain the two
-chapters, then run them in order:
+Run the unified setup wizard: read `subagents/setup/SKILL.md` and follow it exactly — it owns
+the chapter order, the ledger conventions, and the chapter files under
+`subagents/setup/chapters/`. Keep this command thin; don't restate its rules.
 
-1. **Persona** — read `seneschal/subagents/persona-wizard/SKILL.md` and run it (the assistant's
-   name, voice, demeanor, channel identities). It owns `assistant.*` + `persona/persona.md`.
-2. **Store + profile** — read `seneschal/subagents/store-setup/SKILL.md` and run it (pick the
-   data backend, provision it, read existing content, interview to build
-   `persona/owner-profile.md`). It owns `owner.*` + `owner-profile.md`.
-
-Because the persona chapter runs first, the store chapter's interview should **confirm** any owner
-fields already captured (timezone, name) rather than re-asking. Either chapter is fully skippable
-— skipping both leaves the working default-Claude persona and no store (the owner can run
-`/setup-persona` or `/setup-store` later).
-
-Close by printing what was written and the next steps (start the daemon, `/brief`).
+1. **Ledger first.** `python seneschal/scripts/setup_state.py infer` (reconcile with reality —
+   respect pre-wizard work), then `python seneschal/scripts/setup_state.py board` (show it).
+2. **Jump** if the request names a chapter id from the board (`persona`, `store`,
+   `owner-interview`, `auth-models`, `env:<id>`, `mcp:<server>`, `cockpit`, …): go straight to
+   that chapter, whatever its status (a done chapter summarizes and offers a redo).
+3. **Resume** otherwise: welcome the owner briefly (first run) or note what's already done
+   (returning run), then continue at the first chapter that is pending / in-progress /
+   awaiting-auth-restart / stale, in the SKILL's chapter order.
 
 The request (if any): $ARGUMENTS

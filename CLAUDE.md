@@ -74,8 +74,9 @@ cockpit/           the Seneschal Cockpit — a local-first web observatory over 
                    for its hand-duplicated model_config/governor copies
 subagents/         morning-briefing, eod-wrap, email-triage, slack-triage, calendar-steward,
                    store-qa, reminders, message-archivist, journal-steward (generic core),
-                   archon-forge, persona-wizard, store-setup — the delegated skills the
-                   orchestrator + the /setup commands dispatch to
+                   archon-forge, persona-wizard, store-setup, setup (the unified /setup
+                   sequencer + its chapters/ files) — the delegated skills the orchestrator +
+                   the /setup commands dispatch to
 phone/             the voice call-screener (Cloudflare Workers + Twilio; deploys as
                    `seneschal-screener`) + the Seneschal Call Shield Android companion app
                    (com.kumouri.seneschal, committed Gradle project) feeding presence/health
@@ -84,10 +85,16 @@ archons/           Archon staff data (Forge mode) — the shipped `proteus/` job
                    are gitignored on installs
 ```
 
-First-run setup is `/setup` (persona wizard → store onboarding), or the chapters standalone:
-`/setup-persona` (name/voice/demeanor → `persona/persona.md` + `identity.json`) and `/setup-store`
-(pick + provision a backend, read existing content, interview → `owner-profile.md`). The framework
-runs on the shipped defaults (default-Claude persona, no store) until they're run.
+First-run setup is `/setup` — the unified, **resumable** wizard (`subagents/setup/SKILL.md` +
+its `chapters/`): preflight → persona → store → owner-interview → auth-models → the env walker
+(`env:<id>` per manifest entry, required first; an on-demand Ollama sub-chapter) → MCP servers
+(notion/calendar/slack, with the awaiting-auth-restart dance) → cockpit → daemon → verify. Every
+chapter marks the ledger (`seneschal/state/setup-state.json` via `setup_state.py`; `infer`
+respects pre-wizard work), a crashed/partial run resumes at the first unfinished chapter, and
+`/setup <chapter>` jumps anywhere. The `daemon` and `verify` chapters land in follow-up PRs (the
+sequencer marks them blocked-with-a-note until then). Standalone `/setup-persona` and
+`/setup-store` still work and update the same ledger. The framework runs on the shipped defaults
+(default-Claude persona, no store) until any of it is run.
 
 ## The daemon, briefly
 

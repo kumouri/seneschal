@@ -25,7 +25,8 @@ custom character by interviewing the owner and generating two artifacts from one
   `persona/identity.example.json`)
 
 **Ownership contract:** this wizard owns `assistant.*` in identity.json and persona.md. The
-store-onboarding flow (`/setup-store`) owns `owner.*` and `owner-profile.md`. Whichever runs
+owner-interview chapter (`subagents/setup/chapters/owner-interview.md`, reached via
+`/setup-store` or `/setup`) owns `owner.*` and `owner-profile.md`. Whichever runs
 second **confirms** shared fields rather than re-asking. Never overwrite the other flow's
 answers without showing the owner what would change.
 
@@ -107,7 +108,11 @@ minimally; the store onboarding enriches them later.
    `.claude/commands/<name>.md` — a two-line command that invokes the same Chat mode as
    `/assistant` (so the owner can type their assistant's actual name as a command). Keep
    `/assistant` as the canonical tracked command.
-5. Close with what was written, and that re-running the wizard is the way to change any of it.
+5. Close the setup ledger so `/setup` sees this chapter as done:
+   `python seneschal/scripts/setup_state.py mark persona done --artifacts persona/identity.json,persona/persona.md --summary "persona generated"`
+   (no `--hash-artifacts` here on purpose — the owner interview later merges `owner.*` into
+   identity.json, and a content hash would false-trip that merge as staleness).
+6. Close with what was written, and that re-running the wizard is the way to change any of it.
 
 ## Guardrails
 

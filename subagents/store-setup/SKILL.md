@@ -3,22 +3,26 @@ name: store-setup
 description: >-
   The store onboarding wizard. Picks the owner's data backend (Notion / Obsidian vault / plain
   Markdown folder), provisions it, reads any existing content to learn about the owner, and
-  interviews them to build persona/owner-profile.md. Use for "/setup-store", "set up my data
-  store", "connect Notion / an Obsidian vault", "switch backends", or as the store chapter of the
-  unified /setup flow. Re-runnable: detects existing config and offers reconfigure / switch.
+  hands the owner interview its candidate-facts sheet to build persona/owner-profile.md. Use
+  for "/setup-store", "set up my data store", "connect Notion / an Obsidian vault", "switch
+  backends", or as the store chapter of the unified /setup flow. Re-runnable: detects existing
+  config and offers reconfigure / switch.
 compatibility: >-
   Writes seneschal/store/config.json + (for Notion) store/notion/schema.md + store/notion/mcp.json
-  (all gitignored) and persona/owner-profile.md. Notion provisioning needs the Notion MCP; the
-  filesystem backends need only disk access.
+  (all gitignored); persona/owner-profile.md lands via the owner-interview hand-off (Phase 5).
+  Notion provisioning needs the Notion MCP; the filesystem backends need only disk access.
 ---
 
 # Store onboarding (`/setup-store`)
 
 Give the assistant a system of record. This wizard chooses a backend, stands it up, learns what
-it can from what's already there, and — with the owner's consent, fact by fact — builds their
-owner profile. Callable standalone or as the "where does your data live" chapter of `/setup`
-(where it runs after the persona wizard; it **owns `owner.*` in identity.json and
-owner-profile.md**, and confirms rather than re-asks anything the persona wizard already set).
+it can from what's already there, and — with the owner's consent, fact by fact — assembles the
+candidate-facts sheet the **owner interview** turns into a profile. Callable standalone or as
+the "where does your data live" chapter of `/setup` (where it runs after the persona wizard).
+The interview itself lives in the unified wizard
+(`subagents/setup/chapters/owner-interview.md`, which **owns `owner.*` in identity.json and
+owner-profile.md** and confirms rather than re-asks anything the persona wizard already set);
+Phase 5 below hands off to it.
 
 Read `seneschal/store/README.md` first — it defines the three backends and the indirection every
 skill uses.
@@ -84,24 +88,27 @@ the explicit read is for provenance) and the project `CLAUDE.md`. Pull only owne
 (name, role, preferences, pronouns) into the candidate sheet, tagged `source: your global
 CLAUDE.md`. Never lift anything you wouldn't show the owner.
 
-## Phase 5 — Interview → owner-profile.md (skippable, resumable)
+## Phase 5 — Owner interview (hand-off)
 
-A short structured pass filling the persona template's `owner-profile.md` sections: name +
-pronunciation, pronouns, IANA timezone + the after-midnight day-boundary rule, work, top ~3
-projects, key people, habits worth tracking (these seed Reminders), and escalation preferences
-(quiet hours, nag tolerance, call-me appetite). Present the Phase 3–4 candidates as **prefills to
-confirm / edit / reject — never silently write an inferred personal fact.** Accepted facts land
-in `persona/owner-profile.md`; rejected ones vanish without trace. Write `owner.*` fields
-(name/nameSpoken/pronouns/timezone/email) into `persona/identity.json` (merge, don't clobber
-assistant.* the persona wizard set).
+Run the owner-interview chapter — `subagents/setup/chapters/owner-interview.md` — with the
+Phase 3–4 candidate-facts sheet. It owns the interview, `persona/owner-profile.md`, and the
+`owner.*` identity fields (prefills confirmed / edited / rejected — never a silent write), and
+marks its own ledger chapter. Standalone `/setup-store` runs it inline here; the unified
+`/setup` runs it as its own chapter right after this one.
 
 ## Phase 6 — Seed + hand off
 
-Offer to seed starter Reminders from the habits confirmed in Phase 5 (one `store-create` per
-habit, act-low). Copy any relevant `state/*.example.*` seeds. Then print a plain summary: what was
-written (config.json, the filled registry / vault skeleton, owner-profile.md, identity.json owner
-fields), and next steps — start the daemon, run `/brief`, and that re-running `/setup-store`
-changes any of it.
+Offer to seed starter Reminders from the habits confirmed in the owner interview (one
+`store-create` per habit, act-low). Copy any relevant `state/*.example.*` seeds. Then close the
+setup ledger for this chapter:
+
+```
+python seneschal/scripts/setup_state.py mark store done --artifacts seneschal/store/config.json --hash-artifacts --summary "<backend> backend provisioned"
+```
+
+Finally print a plain summary: what was written (config.json, the filled registry / vault
+skeleton, owner-profile.md, identity.json owner fields), and next steps — start the daemon, run
+`/brief`, and that re-running `/setup-store` changes any of it.
 
 ## Guardrails
 
@@ -110,5 +117,6 @@ changes any of it.
 - Phase 3's ingestion and Phase 4's CLAUDE.md read are **each** gated on explicit consent.
 - Every owner fact is confirmed, never inferred-and-written. No fact leaves the machine.
 - Switching backends never deletes the old store; say so before switching.
-- Coordinate with the persona wizard: it owns `assistant.*` + persona.md; you own `owner.*` +
-  owner-profile.md. Confirm shared fields, don't re-ask.
+- Coordinate with the persona wizard (`assistant.*` + persona.md) and the owner interview
+  (`owner.*` + owner-profile.md — the chapter Phase 5 hands off to). Confirm shared fields,
+  don't re-ask.
