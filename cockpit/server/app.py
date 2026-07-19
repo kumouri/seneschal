@@ -1,16 +1,17 @@
 """Seneschal Cockpit — the seneschald cockpit backend (v0 skeleton + v1 read-only monitor + v2 daemon
-pipe/chat + v3 model dials/router + v3.5 Oikonomos/Thresholds + v4 health/workout/meal panels + the
-archon tiles/proxy).
+pipe/chat + v3 model dials/router + v3.5 Oikonomos/Thresholds + v4 health/workout/meal panels + v5
+real OIDC auth / archon SSO proxy).
 
 FastAPI app, 127.0.0.1-only (enforced twice: bind at the uvicorn layer — see README.md's run
 command — AND a belt-and-braces middleware here that rejects any client host that isn't loopback).
 Every route under /api except /api/health and /api/auth/status is gated behind `require_auth`
-(`auth.py`) — the COCKPIT_DEV_NO_AUTH=1 dev stub, else 503 (see `auth.auth_mode`'s precedence; the
-full OIDC auth stack is a deferred follow-up, see "Auth" in ../README.md). Every mutating route ALSO
-depends on `require_csrf` (a no-op outside real-auth mode). The writes in this app are the restart
-enqueue, the model-config PUT (v3), the governor-config PUT (v3.5), their audit-log lines
-(control.py), and the chat-fallback inbox append (_append_inbox_fallback, below) — everything else is
-a tolerant read over `seneschal/state/*` (readers.py, transcript.py, governor.py, archons.py).
+(`auth.py`) — a real OIDC session cookie once `COCKPIT_OIDC_CLIENT_ID` is configured (v5), else the
+COCKPIT_DEV_NO_AUTH=1 dev stub, else 503 (see `auth.auth_mode`'s precedence). Every mutating route
+ALSO depends on `require_csrf` (a no-op outside real-auth mode). The writes in this app are the
+restart enqueue, the model-config PUT (v3), the governor-config PUT (v3.5), their audit-log lines
+(control.py), the chat-fallback inbox append (_append_inbox_fallback, below), and — v5 — the session/
+pending-login cookies auth.py's login/callback/logout routes set — everything else is a tolerant read
+over `seneschal/state/*` (readers.py, transcript.py, governor.py, archons.py).
 
 **v2 (daemon pipe):** a `PipeClient` (pipe_client.py) holds the ONE outbound connection to the daemon's
 cockpit pipe as a lifespan-managed background task, reconnecting with backoff. `GET /api/ws` fans every
@@ -43,12 +44,19 @@ read-only endpoints over `<state dir>/health.db` (via `health.py`, over the same
 500s, it returns an honest `"available": false`. `GET /api/meals` reads the Dream-staged meal-plan
 snapshot at `<state dir>/meals.json` — same tolerance.
 
-**Archon tiles/proxy:** `GET /api/auth/status` is PUBLIC (no `require_auth`) and reports auth mode +
-whether THIS request is authenticated, so the frontend can show a login screen instead of a wall of
-401s. `GET /api/archons` + the `GET /archons/{id}/{path:path}` reverse proxy (`archons.py`) expose a
-live archon's own UI through this SAME server — archons never face the internet directly. The real
-OIDC auth stack (login/callback/logout, the SSO session, break-glass) is a **deferred follow-up**;
-until it lands the cockpit runs in dev-no-auth (or unconfigured/503) mode only.
+**v5 (real OIDC auth + archon SSO tiles/proxy + break-glass, cockpit-spec.md "Auth (Zitadel) & the
+archon SSO portal" / "Archon SSO tiles + proxy" / "Break-glass"):** `GET /auth/login` /
+`GET /auth/callback` / `GET /auth/logout` are the authorization-code + PKCE round trip against the
+configured OIDC issuer (`auth.py` + `oidc.py`; see their docstrings for the full trust-chain
+reasoning — no local JWT/JWKS verification). `GET /api/auth/status` is PUBLIC (no `require_auth`)
+and reports auth mode + whether THIS request is authenticated, so the frontend can show a login
+screen instead of a wall of 401s. `GET /api/archons` + the `GET /archons/{id}/{path:path}` reverse
+proxy (`archons.py`) expose a live archon's own UI through this SAME server — archons never face the
+internet directly. The break-glass ladder's rungs 1-2 (a fresh IdP re-auth) are `GET
+/api/breakglass/reauth/start` + a `bg`-flagged `/auth/callback`, which mint a short-lived signed
+assertion (`cockpit/breakglass/assertion.py`) the frontend hands to the SEPARATE break-glass
+supervisor (`cockpit/breakglass/supervisor.py`, deliberately stdlib-only — see its module docstring)
+for rung 3.
 
 Run (dev): see ../README.md. Serves the built frontend (cockpit/web/dist) as static files when present.
 """
@@ -65,12 +73,16 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import archons as archons_mod
-from . import auth, control, emotes, governor, health, model_config, readers, transcript
+from . import auth, control, emotes, governor, health, model_config, oidc, readers, transcript
 from . import session as session_mod
 from .auth import require_auth
 from .config import (
     WEB_DIST_DIR,
+    get_allowed_user,
     get_emote_dir,
+    get_oidc_client_id,
+    get_oidc_issuer,
+    get_oidc_redirect,
     get_pipe_host,
     get_pipe_port,
     get_pipe_token_path,
@@ -363,9 +375,130 @@ def api_meals():
     return health.read_meals(get_state_dir())
 
 
-# ------------------------------------------------------------------------------- archon tiles/proxy
-# (The real OIDC auth routes — /auth/login, /auth/callback, /auth/logout — are a deferred follow-up;
-# see auth.py's mode precedence. In "oidc" mode without them, every gated route just 401s.)
+# --------------------------------------------------------------------- v5: real OIDC auth (cockpit-spec.md
+# "Auth (Zitadel) & the archon SSO portal"). See auth.py + oidc.py for the trust-chain reasoning.
+
+def _oidc_unavailable_if_not_configured() -> None:
+    if not auth.oidc_configured():
+        raise HTTPException(status_code=503, detail="OIDC not configured (see cockpit.env.example)")
+
+
+def _start_oidc_round_trip(extra: Optional[dict] = None, bg_action: Optional[str] = None) -> RedirectResponse:
+    """Shared by `/auth/login` and the break-glass `reauth/start`: build the authorize URL (PKCE S256
+    + a `state` nonce), redirect there, and stash the verifier/state (+ optional break-glass marker)
+    in the short-lived signed pending-login cookie (no server-side session store — see session.py)."""
+    issuer, client_id, redirect_uri = get_oidc_issuer(), get_oidc_client_id(), get_oidc_redirect()
+    verifier, challenge = oidc.new_pkce_pair()
+    state = oidc.new_state()
+    try:
+        authorize_url = oidc.build_authorize_url(issuer, client_id, redirect_uri, state, challenge, extra=extra)
+    except oidc.OIDCError as e:
+        raise HTTPException(status_code=502, detail=f"could not reach the OIDC issuer: {e}")
+    resp = RedirectResponse(authorize_url, status_code=302)
+    pending = session_mod.create_pending_login_token(auth.session_secret(), state, verifier,
+                                                      breakglass_action=bg_action)
+    auth.set_pending_login_cookie(resp, pending)
+    return resp
+
+
+@app.get("/auth/login")
+def auth_login():
+    _oidc_unavailable_if_not_configured()
+    return _start_oidc_round_trip()
+
+
+@app.get("/auth/callback")
+def auth_callback(request: Request, code: Optional[str] = None, state: Optional[str] = None,
+                   error: Optional[str] = None):
+    """Validates `state` against the pending-login cookie, exchanges the code for tokens, then calls
+    the issuer's userinfo endpoint to establish identity (oidc.py — no local JWT/JWKS verification,
+    see auth.py's module docstring). On success: sets the real session cookie and redirects to `/`.
+    Also doubles as the break-glass ladder's rungs 1-2 callback (cockpit-spec.md "Break-glass") when
+    the pending cookie carries a `bg` action — see the branch below."""
+    _oidc_unavailable_if_not_configured()
+    state_dir = get_state_dir()
+    pending_token = request.cookies.get(session_mod.PENDING_LOGIN_COOKIE_NAME)
+    pending = session_mod.read_pending_login_token(auth.session_secret(), pending_token)
+
+    failure: Optional[str] = None
+    if error:
+        failure = f"the OIDC provider returned an error: {error}"
+    elif pending is None:
+        failure = "login session expired or missing — try logging in again"
+    elif not state or state != pending.get("state"):
+        failure = "state mismatch (possible CSRF) — try logging in again"
+    elif not code:
+        failure = "no authorization code returned"
+    if failure:
+        control.append_audit(state_dir, "auth.callback_failed", {"reason": failure})
+        raise HTTPException(status_code=400, detail=failure)
+
+    issuer = get_oidc_issuer()
+    try:
+        tokens = oidc.exchange_code(issuer, get_oidc_client_id(), get_oidc_redirect(), code, pending["cv"])
+        access_token = tokens.get("access_token")
+        if not isinstance(access_token, str) or not access_token:
+            raise oidc.OIDCError("token response carried no access_token")
+        userinfo = oidc.fetch_userinfo(issuer, access_token)
+    except oidc.OIDCError as e:
+        control.append_audit(state_dir, "auth.callback_failed", {"reason": str(e)})
+        raise HTTPException(status_code=502, detail=f"OIDC exchange failed: {e}")
+
+    allowed = get_allowed_user()
+    if not auth.matches_allowed_user(userinfo, allowed):
+        who = userinfo.get("preferred_username") or userinfo.get("sub") or "unknown"
+        control.append_audit(state_dir, "auth.forbidden", {"who": who})
+        raise HTTPException(status_code=403, detail=f"{who!r} is not the allowed cockpit user")
+
+    subject = userinfo.get("preferred_username") or userinfo.get("sub")
+    bg_action = pending.get("bg")
+    if bg_action:
+        # Break-glass ladder rungs 1-2 (fresh re-auth + TOTP) just succeeded — mint the short-lived,
+        # single-use assertion the frontend hands to the SEPARATE break-glass supervisor for rung 3.
+        # Imported lazily: cockpit/breakglass is deliberately its own stdlib-only world (never imports
+        # fastapi), and this is the one place cockpit/server (fastapi) reaches into it. assertion.py
+        # itself has zero fastapi dependency, so this costs cockpit/breakglass nothing — see its
+        # module docstring for why this ONE module is intentionally shared, not duplicated.
+        from cockpit.breakglass import assertion as breakglass_assertion  # noqa: PLC0415
+
+        bg_secret = breakglass_assertion.get_or_create_secret(state_dir)
+        bg_token = breakglass_assertion.mint(bg_secret, subject, bg_action)
+        control.append_audit(state_dir, "breakglass.reauth_ok", {"who": subject, "action": bg_action})
+        resp = RedirectResponse(f"/#breakglass-assertion={bg_token}&breakglass-action={bg_action}",
+                                 status_code=302)
+        auth.clear_pending_login_cookie(resp)
+        return resp
+
+    resp = RedirectResponse("/", status_code=302)
+    auth.clear_pending_login_cookie(resp)
+    auth.set_session_cookie(resp, subject)
+    control.append_audit(state_dir, "auth.login", {"who": subject})
+    return resp
+
+
+@app.get("/auth/logout")
+def auth_logout():
+    resp = RedirectResponse("/", status_code=302)
+    auth.clear_session_cookie(resp)
+    control.append_audit(get_state_dir(), "auth.logout", {})
+    return resp
+
+
+@app.get("/api/breakglass/reauth/start", dependencies=[Depends(require_auth)])
+def breakglass_reauth_start(action: str):
+    """Break-glass ladder rungs 1-2 (cockpit-spec.md "Break-glass"): a FRESH IdP re-auth
+    (`prompt=login&max_age=0`, so an already-live IdP session doesn't skip password/TOTP) for the
+    given action. Requires an already-authenticated cockpit session (this is a step-UP, not a bypass of
+    the normal login)."""
+    _oidc_unavailable_if_not_configured()
+    if action not in ("restart", "force-pull"):
+        raise HTTPException(status_code=400, detail="action must be 'restart' or 'force-pull'")
+    resp = _start_oidc_round_trip(extra={"prompt": "login", "max_age": "0"}, bg_action=action)
+    control.append_audit(get_state_dir(), "breakglass.reauth_start", {"action": action})
+    return resp
+
+
+# --------------------------------------------------------------------------- v5: archon SSO tiles/proxy
 
 @app.get("/api/archons", dependencies=[Depends(require_auth)])
 def api_archons():
@@ -456,7 +589,7 @@ async def _handle_browser_frame(frame: dict) -> None:
 async def ws_endpoint(websocket: WebSocket):
     """Fans daemon-relayed chat.event/status frames out to every connected browser tab, and accepts
     chat.send/status.get/control.restart back (see _handle_browser_frame). Gated by the same auth mode
-    every REST route uses (a real session cookie in `oidc` mode — deferred — or the dev stub) —
+    every REST route uses (v5: a real session cookie in `oidc` mode, the dev stub in `dev` mode) —
     `@app.middleware("http")` does not run for websocket connections (Starlette limitation), so this
     re-checks explicitly; the uvicorn 127.0.0.1 bind still covers exposure regardless of route type.
     SameSite=Strict means a cross-site page can't even get this cookie attached to its handshake
@@ -492,13 +625,12 @@ async def ws_endpoint(websocket: WebSocket):
 
 @app.get("/", include_in_schema=False)
 def root_page(request: Request):
-    """In `oidc` mode with no valid session, redirect the browser to `/auth/login` instead of serving
-    the SPA shell to someone who isn't logged in yet. (That route is part of the deferred auth
-    follow-up — in this build `oidc` mode is unsupported, so the branch is inert; it's kept so the
-    auth PR is a pure re-add.) Registered explicitly (ahead of the StaticFiles mount below, which only
-    ever handles paths this route doesn't) so this exact path gets the auth check; every OTHER static
-    asset (JS/CSS bundles) stays unauthenticated — they carry no data, only the API calls do, and
-    those are already gated."""
+    """v5: in `oidc` mode with no valid session, redirect the browser straight to `/auth/login`
+    ("login page/redirect for browser routes" per cockpit-spec.md's mode precedence) instead of
+    serving the SPA shell to someone who isn't logged in yet. Registered explicitly (ahead of the
+    StaticFiles mount below, which only ever handles paths this route doesn't) so this exact path gets
+    the auth check; every OTHER static asset (JS/CSS bundles) stays unauthenticated — they carry no
+    data, only the API calls do, and those are already gated."""
     if auth.auth_mode() == "oidc" and auth.current_session(request) is None:
         return RedirectResponse("/auth/login", status_code=302)
     index = WEB_DIST_DIR / "index.html"

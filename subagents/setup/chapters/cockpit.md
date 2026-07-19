@@ -47,10 +47,11 @@ Render `cockpit/server/cockpit.env` from its example via the manifest (id `cockp
 payload `{"manifest_id": "cockpit", "values": {}}` through the stdin-payload pattern from
 the env walker — an empty `values` renders the example's defaults, which is exactly right.
 
-State the OIDC warning from `cockpit/README.md` plainly: **this build is dev-no-auth only.**
-The real auth stack (OIDC login round trip, sessions, break-glass) is a deferred follow-up —
-**leave `COCKPIT_OIDC_CLIENT_ID` unset** (setting it flips auth mode to `oidc` with no login
-routes to serve it, and every gated route just 401s). The server only ever binds
+State the auth posture from `cockpit/README.md` plainly: **dev-no-auth is the default and is
+fine.** The real auth stack (OIDC login round trip, sessions, break-glass) ships in this repo,
+but it stays off until the owner provisions an OIDC app — **leave `COCKPIT_OIDC_CLIENT_ID`
+unset** for the dev-no-auth base (setting it flips auth mode to `oidc`, which then expects a
+real, reachable issuer). Enabling it is the optional §5 below. The server only ever binds
 `127.0.0.1` either way; the session-cookie secret is deliberately not an env var
 (auto-generated to `state/cockpit-session-secret`).
 
@@ -69,6 +70,27 @@ Then `http://127.0.0.1:8760` — the dashboard panels render immediately from
 pane and live status need the daemon running** (its cockpit pipe), which is the daemon
 chapter's territory (`/setup daemon`; `seneschal/scripts/SCHEDULING.md` is the by-hand
 path). `GET /api/health` answering `{"ok": true, ...}` is the smoke test.
+
+## 5 — OPTIONAL: real OIDC auth (+ the decoy and break-glass opt-ins)
+
+Only offer this if the owner asks for real auth, or wants the cockpit reachable by more than
+a dev shell — **dev-no-auth remains the default and is fine** (the doctor's cockpit row is
+unchanged either way). Each piece is a pointer, not an inline walkthrough — the canonical
+path is `cockpit/README.md` → "Auth" (and the files it links):
+
+- **Stand up Zitadel (the IdP):** `cockpit/zitadel/` — copy `.env.example` → `.env`
+  (generate real secrets), `docker compose -p seneschald-zitadel up -d`, then the one-time
+  app-registration walkthrough in `cockpit/zitadel/ZITADEL_SETUP.md`. Needs Docker; if
+  that's missing, hold this section (the dev-no-auth base above is already `done`).
+- **Wire the env vars:** re-render `env:cockpit` with real values this time —
+  `COCKPIT_OIDC_ISSUER`, `COCKPIT_OIDC_CLIENT_ID` (the flip that turns auth on),
+  `COCKPIT_OIDC_REDIRECT`, `COCKPIT_ALLOWED_USER`. Restart the backend afterwards.
+- **The decoy (opt-in):** the public, unauthenticated honeypot chat — a separate process,
+  zero tools/data (`cockpit/decoy/README.md`; needs a local Ollama with the decoy model
+  pulled).
+- **Break-glass (opt-in):** the emergency-recovery supervisor — a separate stdlib-only
+  process + the Break-glass page in the cockpit UI (`cockpit/README.md` → "Break-glass";
+  trust chain in `cockpit/breakglass/supervisor.py`'s docstring).
 
 ## Close
 

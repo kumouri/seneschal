@@ -17,6 +17,7 @@ import os
 import sys
 import tempfile
 import unittest
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -55,6 +56,9 @@ hc = _load_health_common()
 try:
     from fastapi.testclient import TestClient
 
+    from cockpit.breakglass import assertion as bg_assertion
+    from cockpit.server import oidc as oidc_module
+    from cockpit.server._fake_oidc_server import FakeOIDCServer
     from cockpit.server.app import app
 
     _FASTAPI_AVAILABLE = True
@@ -755,6 +759,20 @@ class CockpitAppTests(unittest.TestCase):
         finally:
             os.environ.pop("COCKPIT_OIDC_CLIENT_ID", None)
 
+    def test_login_503_when_oidc_not_configured(self):
+        resp = self.client.get("/auth/login", follow_redirects=False)
+        self.assertEqual(resp.status_code, 503)
+
+    def test_callback_503_when_oidc_not_configured(self):
+        resp = self.client.get("/auth/callback?code=x&state=y", follow_redirects=False)
+        self.assertEqual(resp.status_code, 503)
+
+    def test_logout_always_available(self):
+        # Logging out just clears a cookie that may not even be set — never gated, never errors.
+        resp = self.client.get("/auth/logout", follow_redirects=False)
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(resp.headers["location"], "/")
+
     def test_root_serves_or_404s_when_not_oidc_mode(self):
         # Outside "oidc" mode, "/" either serves the built frontend (when this checkout happens to
         # carry a cockpit/web/dist — e.g. a dev box that ran `npm run build`) or falls through to its
@@ -884,13 +902,225 @@ class CockpitAppTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
 
-    # --- /api/ws auth gate (unconfigured mode; oidc-mode gating lands with the deferred auth PR) ---
+    # --- v5: /api/ws auth gate (unconfigured mode; oidc mode is covered in CockpitOidcAuthTests) ---
 
     def test_ws_closes_when_auth_unconfigured(self):
         os.environ.pop("COCKPIT_DEV_NO_AUTH", None)
         with self.assertRaises(Exception):
             with self.client.websocket_connect("/api/ws") as ws:
                 ws.receive_json()
+
+
+@unittest.skipUnless(_FASTAPI_AVAILABLE, "fastapi/uvicorn not installed (uv sync --extra cockpit)")
+class CockpitOidcAuthTests(unittest.TestCase):
+    """v5's real OIDC auth end to end (cockpit-spec.md "Auth (Zitadel) & the archon SSO portal"),
+    against a REAL fake OIDC HTTP server (`_fake_oidc_server.py`) — exercises auth.py's + oidc.py's
+    actual `urllib.request` calls, not mocks. `CockpitAppTests` above covers everything that doesn't
+    need OIDC actually configured (mode precedence, CSRF no-op, archon routes, the unconfigured ws
+    gate)."""
+
+    ENV_KEYS = ("SENESCHAL_STATE_DIR", "COCKPIT_DEV_NO_AUTH", "COCKPIT_OIDC_ISSUER",
+                "COCKPIT_OIDC_CLIENT_ID", "COCKPIT_OIDC_REDIRECT", "COCKPIT_ALLOWED_USER")
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.state_dir = Path(self._tmp.name)
+        (self.state_dir / "sessions").mkdir(parents=True, exist_ok=True)
+
+        self._old_env = {k: os.environ.get(k) for k in self.ENV_KEYS}
+        os.environ.pop("COCKPIT_DEV_NO_AUTH", None)
+        os.environ["SENESCHAL_STATE_DIR"] = str(self.state_dir)
+
+        self.oidc_server = FakeOIDCServer()
+        issuer = self.oidc_server.start()
+        os.environ["COCKPIT_OIDC_ISSUER"] = issuer
+        os.environ["COCKPIT_OIDC_CLIENT_ID"] = "cockpit-test-client"
+        os.environ["COCKPIT_OIDC_REDIRECT"] = "http://127.0.0.1:8770/auth/callback"
+        os.environ["COCKPIT_ALLOWED_USER"] = "owner"
+        oidc_module.clear_discovery_cache()
+
+        self.client = TestClient(app)
+
+    def tearDown(self):
+        self.oidc_server.stop()
+        oidc_module.clear_discovery_cache()
+        self._tmp.cleanup()
+        for k, v in self._old_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def _audit_actions(self):
+        path = self.state_dir / "cockpit-audit.jsonl"
+        if not path.is_file():
+            return []
+        return [json.loads(line)["action"] for line in path.read_text(encoding="utf-8").strip().splitlines() if line]
+
+    def _start_login(self, path="/auth/login"):
+        resp = self.client.get(path, follow_redirects=False)
+        self.assertEqual(resp.status_code, 302)
+        location = resp.headers["location"]
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(location).query)
+        return location, qs
+
+    def _login(self):
+        """Full happy-path login via the same client — leaves it holding a valid session cookie."""
+        _location, qs = self._start_login()
+        state = qs["state"][0]
+        resp = self.client.get(f"/auth/callback?code=abc123&state={state}", follow_redirects=False)
+        self.assertEqual(resp.status_code, 302)
+        return resp
+
+    def test_login_redirects_to_authorize_url_with_pkce(self):
+        location, qs = self._start_login()
+        self.assertTrue(location.startswith(f"{os.environ['COCKPIT_OIDC_ISSUER']}/oauth/v2/authorize"))
+        self.assertEqual(qs["client_id"], ["cockpit-test-client"])
+        self.assertEqual(qs["code_challenge_method"], ["S256"])
+        self.assertEqual(qs["scope"], ["openid profile"])
+        self.assertIn("cockpit_login", self.client.cookies)
+
+    def test_gated_route_401_without_session(self):
+        resp = self.client.get("/api/sessions")
+        self.assertEqual(resp.status_code, 401)
+        self.assertEqual(resp.json()["detail"], "not authenticated")
+
+    def test_full_login_flow_sets_session_and_audits(self):
+        resp = self._login()
+        self.assertEqual(resp.headers["location"], "/")
+        self.assertIn("cockpit_session", self.client.cookies)
+
+        status = self.client.get("/api/auth/status").json()
+        self.assertTrue(status["authenticated"])
+        self.assertEqual(status["user"], "owner@seneschald.localhost")
+
+        self.assertEqual(self.client.get("/api/sessions").status_code, 200)
+        self.assertIn("auth.login", self._audit_actions())
+
+    def test_callback_rejects_state_mismatch(self):
+        self._start_login()
+        resp = self.client.get("/auth/callback?code=abc&state=WRONG-STATE", follow_redirects=False)
+        self.assertEqual(resp.status_code, 400)
+
+    def test_callback_rejects_missing_pending_cookie(self):
+        fresh = TestClient(app)  # never called /auth/login — no pending-login cookie at all
+        resp = fresh.get("/auth/callback?code=abc&state=xyz", follow_redirects=False)
+        self.assertEqual(resp.status_code, 400)
+
+    def test_callback_surfaces_provider_error(self):
+        self._start_login()
+        resp = self.client.get("/auth/callback?error=access_denied", follow_redirects=False)
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("access_denied", resp.json()["detail"])
+
+    def test_callback_token_exchange_failure_502(self):
+        self.oidc_server.token_status = 400
+        _location, qs = self._start_login()
+        state = qs["state"][0]
+        resp = self.client.get(f"/auth/callback?code=bad&state={state}", follow_redirects=False)
+        self.assertEqual(resp.status_code, 502)
+
+    def test_allowlist_rejects_wrong_user(self):
+        os.environ["COCKPIT_ALLOWED_USER"] = "someone-else"
+        _location, qs = self._start_login()
+        state = qs["state"][0]
+        resp = self.client.get(f"/auth/callback?code=abc&state={state}", follow_redirects=False)
+        self.assertEqual(resp.status_code, 403)
+        self.assertIn("auth.forbidden", self._audit_actions())
+        self.assertNotIn("cockpit_session", self.client.cookies)
+
+    def test_logout_clears_session(self):
+        self._login()
+        self.assertEqual(self.client.get("/api/sessions").status_code, 200)
+        self.client.get("/auth/logout", follow_redirects=False)
+        self.assertEqual(self.client.get("/api/sessions").status_code, 401)
+
+    def test_root_redirects_to_login_when_unauthenticated(self):
+        resp = self.client.get("/", follow_redirects=False)
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(resp.headers["location"], "/auth/login")
+
+    def test_root_no_redirect_once_authenticated(self):
+        self._login()
+        resp = self.client.get("/", follow_redirects=False)
+        # authenticated now, so the "redirect to login" branch is skipped — falls through to the
+        # (absent, in this test env) built frontend, hence the 404 rather than a 302.
+        self.assertNotEqual(resp.status_code, 302)
+
+    def test_csrf_header_required_for_mutations(self):
+        self._login()
+        resp = self.client.post("/api/control/restart")  # no X-Cockpit-Requested-With header
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp.json()["detail"], "missing CSRF header")
+
+    def test_csrf_header_present_allows_mutation(self):
+        self._login()
+        resp = self.client.post("/api/control/restart",
+                                headers={"X-Cockpit-Requested-With": "cockpit"})
+        self.assertEqual(resp.status_code, 200)
+
+    def test_ws_gate_closes_without_session(self):
+        with self.assertRaises(Exception):
+            with self.client.websocket_connect("/api/ws") as ws:
+                ws.receive_json()
+
+    def test_ws_gate_allows_with_valid_session(self):
+        self._login()
+        with self.client.websocket_connect("/api/ws") as ws:
+            ws.send_json({"type": "status.get"})
+            frame = ws.receive_json()
+        self.assertEqual(frame.get("pipe"), "down")  # honest — no real daemon pipe in this test
+
+    # --- break-glass ladder rungs 1-2 (the OIDC step-up that mints the assertion) -----------------
+
+    def test_breakglass_reauth_start_requires_auth(self):
+        resp = self.client.get("/api/breakglass/reauth/start?action=restart", follow_redirects=False)
+        self.assertEqual(resp.status_code, 401)
+
+    def test_breakglass_reauth_start_rejects_bad_action(self):
+        self._login()
+        resp = self.client.get("/api/breakglass/reauth/start?action=nuke-everything", follow_redirects=False)
+        self.assertEqual(resp.status_code, 400)
+
+    def test_breakglass_reauth_forces_fresh_login(self):
+        self._login()
+        resp = self.client.get("/api/breakglass/reauth/start?action=restart", follow_redirects=False)
+        self.assertEqual(resp.status_code, 302)
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(resp.headers["location"]).query)
+        self.assertEqual(qs["prompt"], ["login"])
+        self.assertEqual(qs["max_age"], ["0"])
+        self.assertIn("breakglass.reauth_start", self._audit_actions())
+
+    def test_breakglass_reauth_flow_mints_a_verifiable_assertion(self):
+        self._login()
+        start_resp = self.client.get("/api/breakglass/reauth/start?action=restart", follow_redirects=False)
+        state = urllib.parse.parse_qs(urllib.parse.urlparse(start_resp.headers["location"]).query)["state"][0]
+
+        cb = self.client.get(f"/auth/callback?code=xyz&state={state}", follow_redirects=False)
+        self.assertEqual(cb.status_code, 302)
+        location = cb.headers["location"]
+        self.assertTrue(location.startswith("/#breakglass-assertion="))
+        self.assertIn("breakglass-action=restart", location)
+        self.assertIn("breakglass.reauth_ok", self._audit_actions())
+
+        token = location.split("breakglass-assertion=", 1)[1].split("&", 1)[0]
+        secret = bg_assertion.get_or_create_secret(self.state_dir)
+        payload = bg_assertion.verify(secret, token, expected_action="restart")
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload["sub"], "owner@seneschald.localhost")
+
+    def test_breakglass_reauth_does_not_disturb_the_normal_session_cookie(self):
+        # A break-glass re-auth callback must NOT silently reset the normal session (it takes a
+        # different branch entirely — see app.py's auth_callback) — the existing session should
+        # still work afterward.
+        self._login()
+        session_cookie_before = self.client.cookies.get("cockpit_session")
+        start_resp = self.client.get("/api/breakglass/reauth/start?action=restart", follow_redirects=False)
+        state = urllib.parse.parse_qs(urllib.parse.urlparse(start_resp.headers["location"]).query)["state"][0]
+        self.client.get(f"/auth/callback?code=xyz&state={state}", follow_redirects=False)
+        self.assertEqual(self.client.cookies.get("cockpit_session"), session_cookie_before)
+        self.assertEqual(self.client.get("/api/sessions").status_code, 200)
+
 
 if __name__ == "__main__":
     unittest.main()

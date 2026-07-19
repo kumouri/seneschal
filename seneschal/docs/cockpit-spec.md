@@ -1,26 +1,28 @@
 # The Seneschal Cockpit — design spec
 
-**Status: the core is BUILT and dev-no-auth** — v1 (read-only monitor), v2 (daemon pipe + chat pane),
-v3 (model dials + Fable delegation), v3.5 (Oikonomos, the budget governor), and v4 (health/workout/meal
-panels + store-staged meals) have shipped; **v5 (the real OIDC auth stack, archon SSO login, and the
-break-glass recovery ladder) is a deferred follow-up PR**, and public exposure (a tunnel + DNS) is
-deferred until after it — everything binds `127.0.0.1` (see `cockpit/README.md` for the shipped
-surface, which is authoritative where this spec and the build differ).
+**Status: BUILT** — v1 (read-only monitor), v2 (daemon pipe + chat pane), v3 (model dials + Fable
+delegation), v3.5 (Oikonomos, the budget governor), v4 (health/workout/meal panels + store-staged
+meals), and **v5 (the real OIDC auth stack, the archon SSO proxy, the break-glass recovery ladder,
+and the decoy)** have shipped. Public exposure (a tunnel + DNS) remains deferred — everything binds
+`127.0.0.1`, and dev-no-auth remains the default until the owner provisions an OIDC app (see
+`cockpit/README.md` for the shipped surface, which is authoritative where this spec and the build
+differ).
 
 The cockpit is the web observatory for the assistant's whole local-first world: watch the live sessions
 and their **oneiroi** (the per-session distillates `mini_dream.py` writes — "mini-dreams" in older
 docs; script/file names are unchanged, *oneiroi* is the display name; **canonical pronunciation is the
 ancient Greek — "oh-NAY-roy"**, singular *oneiros*), talk to the warm session from a real agent-style
-chat pane, see health/workout/meal data, manage the model dials, and (once the auth follow-up lands)
-reach every archon UI through one login and recover a wedged daemon from behind a break-glass ladder.
+chat pane, see health/workout/meal data, manage the model dials, reach every archon UI through one
+login, and recover a wedged daemon from behind a break-glass ladder.
 
 ## Rulings
 
 1. **Public exposure is deferred.** The design anticipates a tunnel in front of the cockpit, but
-   nothing is exposed until the auth stack (ruling 2) lands — everything binds `127.0.0.1`.
-2. **An external IdP fronts the authed surface** (the design names Zitadel; see "Auth" below) — the
-   login round trip, session issuance, and the break-glass ladder are the **deferred follow-up PR**.
-   Until then the cockpit runs dev-no-auth (`COCKPIT_DEV_NO_AUTH=1`) or answers an honest 503.
+   nothing is exposed yet — everything binds `127.0.0.1`.
+2. **An external IdP fronts the authed surface** (Zitadel, self-hosted — see "Auth" below): the
+   login round trip, session issuance, and the break-glass ladder all ship. The OIDC app
+   registration is a documented human step (`cockpit/zitadel/ZITADEL_SETUP.md`); until the owner
+   runs it, the cockpit runs dev-no-auth (`COCKPIT_DEV_NO_AUTH=1`) or answers an honest 503.
 3. Dependency ruling **blessed**: the cockpit is its own dependency world (`cockpit/`),
    FastAPI/uvicorn backend + Vite/TypeScript frontend. The daemon's stdlib-first rule is untouched.
 4. **Two dials, flipped:** the owner picks the **warm model** and the **max routable model**
@@ -29,7 +31,7 @@ reach every archon UI through one login and recover a wedged daemon from behind 
    the router's verdict, the warm session's own judgment, or the `!fable` force-route (bypasses the
    classifier, never the gate). The max-routable dial is the hard ceiling on every delegation; when
    it doesn't admit Fable, **the fable arm doesn't even run**.
-5. Break-glass ladder (deferred with ruling 2): **password re-entry → TOTP → a one-time phrase over
+5. Break-glass ladder (shipped with ruling 2): **password re-entry → TOTP → a one-time phrase over
    an out-of-band channel** (Telegram).
 6. The phone app's health feed extends to export **exercise AND nutrition/meal** data via Health
    Connect. Meal-plan ideas live in the store today; a future health/nutrition archon (unminted)
@@ -81,18 +83,20 @@ conversation**.
   (authorization code + PKCE, signed HttpOnly session cookie, CSRF-protected) in front of everything
   but public liveness, and provider-side WAF/rate-limits in front of that.
 
-## Auth (Zitadel) & the archon SSO portal — deferred follow-up (v5)
+## Auth (Zitadel) & the archon SSO portal — v5, shipped
 
-**Not in this build.** The design is settled and the seams already ship (`auth.py`'s mode
-precedence, `session.py`'s signed-cookie primitives, `config.py`'s OIDC getters, the CSRF header) so
-the follow-up PR is a pure re-add — `cockpit/README.md` → "Auth modes" documents exactly how the
-current build degrades (dev stub with `COCKPIT_DEV_NO_AUTH=1`; honest 503 when nothing is
-configured; `COCKPIT_OIDC_CLIENT_ID` stays unset until the auth PR lands).
+The full stack ships: `auth.py`'s mode precedence, `oidc.py`'s stdlib OIDC client, `session.py`'s
+signed-cookie primitives, the `/auth/*` routes in `app.py`, the CSRF header, the break-glass
+supervisor (`cockpit/breakglass/`), and the IdP compose stack (`cockpit/zitadel/`).
+`cockpit/README.md` → "Auth" documents the enablement path and how the build degrades without it
+(dev stub with `COCKPIT_DEV_NO_AUTH=1`; honest 503 when nothing is configured;
+`COCKPIT_OIDC_CLIENT_ID` stays unset until the OIDC app is provisioned).
 
-The settled design, for when it lands:
+The design as built:
 
-- **An external IdP** (the design names **Zitadel**, self-hosted) is the identity source; the OIDC
-  app registration is a documented human step — no client id exists until the owner runs through it.
+- **An external IdP** (**Zitadel**, self-hosted — `cockpit/zitadel/docker-compose.yml`) is the
+  identity source; the OIDC app registration is a documented human step
+  (`cockpit/zitadel/ZITADEL_SETUP.md`) — no client id exists until the owner runs through it.
 - **Authorization code + PKCE, no local JWT/JWKS verification.** `GET /auth/login` builds the
   authorize URL (S256 challenge + a `state` nonce) and redirects; `GET /auth/callback` validates
   `state`, exchanges the code for tokens (stdlib `urllib.request`, server-to-server), then calls the
@@ -109,15 +113,17 @@ The settled design, for when it lands:
 - **Break-glass** (ruling 5): recover a wedged daemon remotely — the failure the auto-update task
   can't fix. A three-rung ladder (fresh IdP re-auth → TOTP in the same step-up → a one-time phrase
   delivered over an out-of-band channel and typed back), served by a **separate stdlib-only
-  supervisor process** so a broken daemon/venv/cockpit can't be asked to fix itself; every attempt
-  audit-logged and pushed. Restart-only is the lighter action; force-pull (destructive only to
-  uncommitted tracked changes — `state/` is gitignored and survives) sits behind an extra
-  confirmation.
+  supervisor process** (`cockpit/breakglass/supervisor.py`, default port 8499) so a broken
+  daemon/venv/cockpit can't be asked to fix itself; every attempt audit-logged
+  (`state/breakglass-audit.jsonl`) and pushed to Telegram. Restart-only is the lighter action;
+  force-pull (destructive only to uncommitted tracked changes — `state/` is gitignored and
+  survives) sits behind an extra confirmation.
 - All auth events audit-logged to `state/cockpit-audit.jsonl`.
 
 ## Archon SSO tiles + proxy
 
-Shipped now (minus the SSO — the proxy rides the same dev-no-auth gate as everything else): the
+Shipped (the proxy rides the same auth gate as everything else — the real OIDC session once
+configured, the dev stub until then): the
 cockpit is the intended **only** front door to archon UIs. `cockpit/server/archon-registry.json`
 (**per-install, gitignored** — seed from the tracked `archon-registry.example.json`) mirrors
 `seneschal/references/archons.md`'s port table; `GET /api/archons` reads it plus a tolerant
@@ -256,7 +262,7 @@ exposes (approval actions, ack buttons, and quiet controls are design targets, n
 | Router record | `state/router-log.jsonl` | verdict record over time, both arms |
 | Archon tiles | `archons.md` registry | proxied UIs; per-install registry |
 | Presence | `state/presence-context.json` | where/what/asleep(informational) |
-| Audit log | `state/cockpit-audit.jsonl` | every mutating action (+ auth events, once auth lands) |
+| Audit log | `state/cockpit-audit.jsonl` | every mutating action + auth events (login/logout/forbidden/break-glass) |
 
 Chat pane extra: **custom emoji** — the renderer supports `:shortcode:` packs from a user-supplied
 emote directory (`COCKPIT_EMOTE_DIR`; `GET /api/emotes`). Off — an empty list — when unset.
@@ -294,18 +300,35 @@ database ids — none exist yet) and overwrites `state/meals.json` (`{"staged_at
 the store unreachable → skips the write, leaving the prior `staged_at` standing so the UI shows
 staleness honestly. Seed: `seneschal/state/meals.example.json`.
 
+## The decoy — shipped
+
+- Separate process, public-by-design, **zero tools, zero data access, zero shared secrets** with
+  the authed backend; talks only to local Ollama (`gemma4:12b` by default — env-swappable via
+  `DECOY_MODEL`).
+- In character as **the steward at the reception desk**: dry, unhelpful-by-design about anything
+  real, stocked with easter eggs (`cockpit/decoy/eggs.md`, tracked — the fun is reviewable).
+- Hard per-IP and global rate limits, small context, no persistence of visitor chats beyond an
+  anonymized counter. Prompt-injection is *expected* and inert: there is nothing to steal and no
+  tool to fire — the page exists to demonstrate exactly that.
+- Ships as `cockpit/decoy/` — its own FastAPI app + uvicorn entry (default `127.0.0.1:8490`,
+  separate from the authed backend's `8760`), persona in `receptionist.md` + `eggs.md` (both
+  tracked), rate limiting + request-size guards in `ratelimit.py`, the Ollama call in
+  `ollama_client.py` (stdlib `urllib`, no new dependency). Still **local-only** (ruling 1) — no
+  tunnel yet. See `cockpit/decoy/README.md` for the full run/env story.
+
 ## Threat model
 
 - **Assets:** the daemon's control surface; the owner's personal data (health, transcripts,
   approvals, ledgers); the machine itself.
 - **Adversaries (once public):** internet-random scanners; a targeted attacker with the domain; a
-  browser-session thief; a compromised archon UI.
-- **Mitigations:** localhost-only binds until the auth stack lands (belt-and-braces: the uvicorn
-  host flag plus a middleware rejecting non-loopback clients); the deferred authed surface behind
-  OIDC + PKCE + TOTP; mutations CSRF-protected + audit-logged; the deferred break-glass = 3-factor
+  browser-session thief; a prompt-injector on the decoy; a compromised archon UI.
+- **Mitigations:** localhost-only binds until public exposure (belt-and-braces: the uvicorn
+  host flag plus a middleware rejecting non-loopback clients); the authed surface behind
+  OIDC + PKCE + TOTP; the decoy fully isolated (own process, no tools/data/secrets); mutations
+  CSRF-protected + audit-logged; break-glass = a 3-factor
   ladder incl. an out-of-band channel; daemon pipe localhost-only + token; archons never
   internet-facing (proxied under the session); all state gitignored/local; secrets never in the
-  repo; the future supervisor is the only process that can hard-reset, and it can't be reached
+  repo; the break-glass supervisor is the only process that can hard-reset, and it can't be reached
   without the ladder.
 
 ## Phases
@@ -318,7 +341,8 @@ staleness honestly. Seed: `seneschal/state/meals.example.json`.
 | **v3** ✅ shipped | Model dials (two-dial `model-config.json` + spawn wiring) + Fable delegation + force-route + router dashboard | v2 |
 | **v3.5** ✅ shipped | **Oikonomos**: the budget-governor advisor + `governor-config.json` + the cockpit Thresholds section | v3 |
 | **v4** ✅ shipped | Phone-app exercise+nutrition export; health/workout/meal cockpit panels; store meal staging (Dream) | v1 |
-| **v5** — deferred follow-up | Real OIDC auth (auth-code + PKCE, session cookie, CSRF); archon SSO login; break-glass supervisor + ladder; then public exposure (tunnel + DNS) | v0, v3 |
+| **v5** ✅ shipped | Real OIDC auth (auth-code + PKCE, session cookie, CSRF); archon SSO login; break-glass supervisor + ladder; the Zitadel compose stack; the decoy | v0, v3 |
+| **Public exposure** — deferred | A tunnel + DNS in front of the cockpit (the decoy as the public face) | v5 |
 
 Each phase lands as a normal PR (merge-commit, green CI only); daemon-side changes ride the Path A
 auto-reload. Docs updated in the same PRs (`asyncio-daemon-design.md` for the sixth task,
@@ -327,11 +351,10 @@ auto-reload. Docs updated in the same PRs (`asyncio-daemon-design.md` for the si
 
 ## Open items
 
-- **The v5 auth stack** — the OIDC login round trip, session issuance, allowlist, and the
-  break-glass supervisor + ladder. The seams (`auth.py` mode precedence, `session.py`, the CSRF
-  header, `config.py`'s OIDC getters) already ship, so the follow-up PR is a pure re-add; leave
-  `COCKPIT_OIDC_CLIENT_ID` unset until it lands.
-- **Public exposure** — a tunnel + DNS in front of the cockpit, only after the auth stack. (Tooling
+- **Public exposure** — a tunnel + DNS in front of the cockpit. When it happens: flip the session
+  cookie's `secure` flag (`auth.py`), move Zitadel's `EXTERNALDOMAIN`/`EXTERNALSECURE` to the real
+  domain + TLS, and turn the Zitadel app's dev-mode/allow-HTTP back off — all in the same change as
+  the tunnel. (Tooling
   note for that day: tunnels are `cloudflared tunnel create/route dns`, not wrangler — `route dns`
   mints the CNAME itself.)
 - **Ops note:** the cockpit backend runs from a **non-daemon checkout/venv** (with the state dir

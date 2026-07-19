@@ -80,7 +80,7 @@ path for the daemon.
 | **Orchestrator** ([`seneschal/SKILL.md`](seneschal/SKILL.md)) | The conductor: modes, execution rules, the Advisor Chain, the approval gate, memory. |
 | **Subagent skills** ([`subagents/`](subagents/)) | Morning briefing, end-of-day wrap, email/Slack triage, calendar steward, store Q&A, reminders, a generic daily-journal steward, a person-centric message archiver, and the Forge (mints persistent "Archon" staff agents). |
 | **Presence daemon** ([`seneschal/scripts/presence.py`](seneschal/scripts/presence.py)) | The always-on reactive core — warm chat, reminders, comms-peek. Stdlib-first asyncio. |
-| **Cockpit** ([`cockpit/`](cockpit/)) | A local-first web observatory over the daemon: live chat over the daemon pipe, model dials, budget thresholds, health panels, archon tiles. FastAPI backend + Vite/React frontend, `127.0.0.1`-only, dev-no-auth build (real auth is a deferred follow-up). |
+| **Cockpit** ([`cockpit/`](cockpit/)) | A local-first web observatory over the daemon: live chat over the daemon pipe, model dials, budget thresholds, health panels, archon tiles, plus the real OIDC auth stack (self-hosted Zitadel IdP, break-glass recovery ladder, and a public honeypot decoy chat). FastAPI backend + Vite/React frontend, `127.0.0.1`-only; dev-no-auth remains the default until an IdP is configured. |
 | **Persona + store layers** ([`persona/`](persona/), [`seneschal/store/`](seneschal/store/)) | The pluggable identity and backend layers, with tracked templates. The unified `/setup` wizard ([`subagents/setup/`](subagents/setup/)) walks them chapter by chapter. |
 | **Voice call-screener** ([`phone/`](phone/)) | A Cloudflare Workers + Twilio screener that fronts your phone line in the assistant's voice, plus a **Call Shield** Android app feeding presence/health signals. |
 | **Local RAG + salience** ([`seneschal/scripts/rag_*.py`](seneschal/scripts/)) | A free, local semantic index (Ollama + stdlib sqlite) over your journal/notes, and an observe-only "what's safe to forget" experiment. |
@@ -105,8 +105,8 @@ configured store is the durable system of record.
   gracefully without the venv.
 - **CI** byte-compiles every `.py`, runs the unittest suite, checks the uv lockfile, validates
   config, enforces that no real identifiers ship (all UUIDs must be `00000000-…`
-  placeholders), and gates the cockpit (backend unit tests incl. the duplicated-table parity
-  tripwire; frontend typecheck + build). Reproduce locally:
+  placeholders), and gates the cockpit (backend + decoy + break-glass unit tests incl. the
+  duplicated-table parity tripwire; frontend typecheck + build). Reproduce locally:
 
   ```bash
   git ls-files '*.py' | xargs python -m py_compile
