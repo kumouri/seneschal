@@ -45,6 +45,20 @@ jobs:
         # 00000000-… placeholders that setup fills into gitignored local copies.
         run: python seneschal/scripts/check_placeholders.py
 
+      - name: PowerShell syntax check
+        # AST-parse every tracked .ps1 (ubuntu pwsh — immune to Windows AMSI wedges that
+        # make local pwsh validation unreliable). Parse errors fail the job.
+        shell: pwsh
+        run: |
+          $failed = $false
+          foreach ($f in (git ls-files '*.ps1')) {
+            $errs = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $f), [ref]$null, [ref]$errs) | Out-Null
+            if ($errs) { $failed = $true; Write-Host "PARSE ERRORS in ${f}:"; $errs | ForEach-Object { Write-Host "  $($_.Extent.StartLineNumber): $($_.Message)" } }
+            else { Write-Host "OK $f" }
+          }
+          if ($failed) { exit 1 }
+
   references:
     name: Reference data check
     runs-on: ubuntu-latest
