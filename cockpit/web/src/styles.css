@@ -1,0 +1,923 @@
+/* Seneschal Cockpit — dark theme: electric purple #8e00ff (primary) + neon green #00ff0f
+   (accent). Clean and readable beats fancy (per the brief) — one column of cards on narrow
+   viewports, a responsive grid otherwise. */
+
+:root {
+  color-scheme: dark;
+  --bg: #0a0a12;
+  --bg-elevated: #121220;
+  --panel: #15151f;
+  --panel-border: #262638;
+  --text: #e9e8f2;
+  --text-dim: #9c9bb0;
+  --accent: #8e00ff;
+  --accent-soft: rgba(142, 0, 255, 0.16);
+  --accent2: #00ff0f;
+  --accent2-soft: rgba(0, 255, 15, 0.14);
+  --danger: #ff4d5e;
+  --danger-soft: rgba(255, 77, 94, 0.14);
+  --warn: #ffb020;
+  --warn-soft: rgba(255, 176, 32, 0.14);
+  font-family:
+    'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: radial-gradient(circle at top left, #17102b, var(--bg) 60%);
+  color: var(--text);
+  min-height: 100vh;
+}
+
+#root {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 24px clamp(16px, 4vw, 40px) 64px;
+}
+
+.header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 24px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.header h1 {
+  margin: 0;
+  font-size: 1.6rem;
+  letter-spacing: 0.01em;
+  background: linear-gradient(90deg, var(--accent), var(--accent2));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.header .subtitle {
+  color: var(--text-dim);
+  font-size: 0.85rem;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 16px;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.panel-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.panel-title .accent-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent);
+  flex-shrink: 0;
+}
+
+.panel-body {
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  overflow-x: auto;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.pill-live {
+  background: var(--accent2-soft);
+  color: var(--accent2);
+}
+
+.pill-idle {
+  background: rgba(156, 155, 176, 0.16);
+  color: var(--text-dim);
+}
+
+.pill-warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.pill-danger {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.pill-info {
+  background: var(--accent-soft);
+  color: #c79bff;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.row:last-child {
+  border-bottom: none;
+}
+
+.row-main {
+  color: var(--text);
+  font-size: 0.85rem;
+}
+
+.row-sub {
+  color: var(--text-dim);
+  font-size: 0.75rem;
+}
+
+.empty-state {
+  color: var(--text-dim);
+  font-size: 0.82rem;
+  font-style: italic;
+}
+
+.error-state {
+  color: var(--danger);
+  font-size: 0.82rem;
+}
+
+.stat-row {
+  display: flex;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+
+.stat {
+  display: flex;
+  flex-direction: column;
+}
+
+.stat .value {
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: var(--accent2);
+}
+
+.stat .label {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+button.restart-btn {
+  background: linear-gradient(135deg, var(--accent), #5e00b3);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 16px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter 0.15s ease;
+}
+
+button.restart-btn:hover {
+  filter: brightness(1.15);
+}
+
+button.restart-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(4, 4, 10, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+  padding: 16px;
+}
+
+.dialog {
+  background: var(--bg-elevated);
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  padding: 20px;
+  max-width: 420px;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.dialog h2 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.dialog p {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 0.85rem;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+button.btn-secondary {
+  background: transparent;
+  border: 1px solid var(--panel-border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 8px 16px;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+button.btn-secondary:hover {
+  border-color: var(--text-dim);
+}
+
+.mono {
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  font-size: 0.78rem;
+}
+
+.footer-note {
+  margin-top: 24px;
+  color: var(--text-dim);
+  font-size: 0.72rem;
+  text-align: center;
+}
+
+/* ---------------------------------------------------------------------------- v2: the chat pane */
+
+.layout {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.chat-panel {
+  min-height: 420px;
+  max-height: 70vh;
+}
+
+.chat-scroll {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-right: 4px;
+  min-height: 160px;
+}
+
+.chat-turn {
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: var(--bg-elevated);
+}
+
+.chat-turn-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+
+.pill-source-telegram {
+  background: rgba(0, 136, 204, 0.16);
+  color: #59c2ff;
+}
+
+.pill-source-discord {
+  background: rgba(88, 101, 242, 0.18);
+  color: #b3b8ff;
+}
+
+.pill-source-cockpit {
+  background: var(--accent-soft);
+  color: #c79bff;
+}
+
+.pill-source-unknown {
+  background: rgba(156, 155, 176, 0.16);
+  color: var(--text-dim);
+}
+
+.pill-model {
+  background: var(--accent2-soft);
+  color: var(--accent2);
+  font-family: 'SFMono-Regular', Consolas, monospace;
+}
+
+.chat-turn-prompt {
+  color: var(--text-dim);
+  font-size: 0.8rem;
+  font-style: italic;
+  margin: 0 0 6px;
+}
+
+.chat-turn-text {
+  color: var(--text);
+  font-size: 0.88rem;
+  white-space: pre-wrap;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.chat-tool-uses {
+  margin-top: 8px;
+  font-size: 0.78rem;
+  color: var(--text-dim);
+}
+
+.chat-tool-uses summary {
+  cursor: pointer;
+  color: var(--accent);
+}
+
+.chat-tool-uses ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+
+.chat-emote {
+  height: 1.4em;
+  vertical-align: middle;
+  display: inline-block;
+}
+
+.chat-composer {
+  border-top: 1px solid var(--panel-border);
+  padding-top: 12px;
+  margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.chat-banner {
+  margin: 0;
+  width: fit-content;
+}
+
+.chat-composer-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.chat-input {
+  flex: 1;
+  resize: vertical;
+  min-height: 44px;
+  background: var(--bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 8px 10px;
+  font-family: inherit;
+  font-size: 0.85rem;
+}
+
+.chat-input:focus {
+  outline: 1px solid var(--accent);
+}
+
+.chat-input:disabled {
+  opacity: 0.6;
+}
+
+.chat-send-btn {
+  align-self: stretch;
+}
+
+.chat-composer-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  flex-wrap: wrap;
+}
+
+.chat-fable-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+/* ---------------------------------------------------------- v3: model dials + router dashboard */
+
+.dial-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+
+.dial-label {
+  font-size: 0.8rem;
+  color: var(--text);
+}
+
+.dial-select {
+  background: var(--bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 6px 8px;
+  font-family: inherit;
+  font-size: 0.85rem;
+}
+
+.dial-select:focus {
+  outline: 1px solid var(--accent);
+}
+
+.dial-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.router-arm-block {
+  margin-bottom: 14px;
+}
+
+.router-arm-block:last-child {
+  margin-bottom: 0;
+}
+
+.router-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+}
+
+.router-bar-label {
+  flex: 0 0 90px;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  text-transform: capitalize;
+}
+
+.router-bar-track {
+  flex: 1;
+  height: 10px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.06);
+  overflow: hidden;
+  display: flex;
+}
+
+.router-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 5px;
+  transition: width 0.2s ease;
+}
+
+.router-bar-fable {
+  background: var(--accent2);
+}
+
+.router-bar-standard {
+  background: var(--accent);
+}
+
+/* -------------------------------------------------------------- v3.5: Oikonomos / Thresholds panel */
+
+.threshold-group {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--panel-border);
+}
+
+.threshold-group-title {
+  margin-bottom: 6px;
+  font-weight: 600;
+}
+
+.gov-input {
+  max-width: 140px;
+}
+
+/* --------------------------------------------------------- v4: health / workout / meal panels */
+
+.health-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+}
+
+.health-bar-label {
+  flex: 0 0 84px;
+  font-size: 0.72rem;
+  color: var(--text-dim);
+}
+
+.health-bar-track {
+  flex: 1;
+  height: 10px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.06);
+  overflow: hidden;
+}
+
+.health-bar-fill {
+  height: 100%;
+  background: var(--accent2);
+  border-radius: 5px;
+  transition: width 0.2s ease;
+}
+
+.health-bar-fill.workout {
+  background: var(--accent);
+}
+
+.health-tile-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+
+.health-tile {
+  flex: 1;
+  min-width: 90px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.health-tile .value {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--accent2);
+}
+
+.health-tile .label {
+  font-size: 0.68rem;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.meal-card {
+  display: block;
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  color: inherit;
+  text-decoration: none;
+  transition: border-color 0.15s ease;
+}
+
+.meal-card:last-child {
+  margin-bottom: 0;
+}
+
+.meal-card:hover {
+  border-color: var(--accent);
+}
+
+.meal-card-title {
+  color: var(--text);
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+
+.meal-card-summary {
+  color: var(--text-dim);
+  font-size: 0.78rem;
+  margin-top: 4px;
+}
+
+.meal-tags {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+
+.meal-tag {
+  background: var(--accent-soft);
+  color: #c79bff;
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 0.68rem;
+}
+
+/* --------------------------------------------------------------------------------- v5: auth + archons */
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+a.btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  background: transparent;
+  border: 1px solid var(--panel-border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 8px 16px;
+  font-size: 0.85rem;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+a.btn-secondary:hover {
+  border-color: var(--text-dim);
+}
+
+.login-screen {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  text-align: center;
+}
+
+.login-screen h1 {
+  background: linear-gradient(90deg, var(--accent), var(--accent2));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  font-size: 1.8rem;
+  margin: 0;
+}
+
+.login-screen p {
+  color: var(--text-dim);
+  margin: 0 0 12px;
+}
+
+.archon-tiles {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.archon-tile {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+
+.archon-tile-live {
+  border-color: rgba(0, 255, 15, 0.25);
+}
+
+.archon-tile-reserved {
+  opacity: 0.6;
+}
+
+.archon-tile-title {
+  color: var(--text);
+  font-size: 0.88rem;
+  font-weight: 600;
+  flex: 1;
+  min-width: 140px;
+}
+
+.archon-open-link {
+  color: var(--accent);
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.archon-open-link:hover {
+  text-decoration: underline;
+}
+
+/* ----------------------------------------------------------------------------- v5: break-glass page */
+
+.breakglass-page {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 32px clamp(16px, 4vw, 40px) 64px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.breakglass-banner {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  background: var(--danger-soft);
+  border: 1px solid rgba(255, 77, 94, 0.4);
+  border-radius: 12px;
+  padding: 18px 20px;
+}
+
+.breakglass-banner-icon {
+  font-size: 1.8rem;
+  color: var(--danger);
+  line-height: 1;
+}
+
+.breakglass-banner h1 {
+  margin: 0 0 6px;
+  font-size: 1.25rem;
+  color: var(--danger);
+}
+
+.breakglass-banner p {
+  margin: 0;
+  color: var(--text);
+  font-size: 0.85rem;
+}
+
+.breakglass-back {
+  align-self: flex-start;
+}
+
+.breakglass-stepper {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.bg-step {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  color: var(--text-dim);
+  font-size: 0.85rem;
+}
+
+.bg-step-active {
+  border-color: var(--danger);
+  color: var(--text);
+}
+
+.bg-step-num {
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  font-weight: 700;
+  color: var(--danger);
+  min-width: 28px;
+}
+
+.breakglass-panel {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.breakglass-panel h2 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.breakglass-radio {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+}
+
+.breakglass-radio input {
+  margin-top: 4px;
+}
+
+.breakglass-checkbox {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 0.82rem;
+  color: var(--text-dim);
+}
+
+button.breakglass-danger-btn {
+  background: linear-gradient(135deg, var(--danger), #a3172a);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  padding: 10px 18px;
+  font-size: 0.88rem;
+  font-weight: 700;
+  cursor: pointer;
+  align-self: flex-start;
+  transition: filter 0.15s ease;
+}
+
+button.breakglass-danger-btn:hover {
+  filter: brightness(1.1);
+}
+
+button.breakglass-danger-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.breakglass-phrase-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.breakglass-phrase-form label {
+  font-size: 0.82rem;
+  color: var(--text-dim);
+}
+
+.breakglass-phrase-input {
+  background: var(--bg-elevated);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: var(--text);
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  font-size: 0.95rem;
+}
+
+.breakglass-result {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.breakglass-result ol {
+  margin: 0;
+  padding-left: 20px;
+  color: var(--text-dim);
+  font-size: 0.82rem;
+}
