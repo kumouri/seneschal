@@ -34,8 +34,8 @@ repo is the character, the memory, the routing, and the plumbing.
   guidance).
 - **Bring your own everything.** The assistant's **persona** (name, voice, demeanor), your
   **identity/timezone** (a small config file), and your **data backend** are all pluggable. Out of
-  the box it's a nameless, default-Claude assistant on no store; tracked templates make it yours
-  today, and guided setup wizards land in the next release wave.
+  the box it's a nameless, default-Claude assistant on no store; the guided, resumable `/setup`
+  wizard makes it yours one skippable chapter at a time.
 - **Pluggable system of record.** Notion, an **Obsidian vault**, or a plain **Markdown folder** —
   behind one seam. Skills speak six backend-neutral verbs (`store-query/get/create/update/append/
   search`); each `store/<backend>/` pair maps those verbs to that backend's tools. A stated goal
@@ -62,11 +62,12 @@ Then, inside Claude Code in the repo:
 /assistant         # open a chat with your assistant  (or /assistant what's on today)
 ```
 
-Out of the box that's a working, nameless default-Claude assistant on no store. To make it yours
-today, copy the tracked templates ([`persona/README.md`](persona/README.md) and
-[`seneschal/store/README.md`](seneschal/store/README.md) walk through persona/identity and backend
-setup). The guided **setup wizards** (`/setup` — a persona interview + store onboarding) land in the
-**next release wave**.
+Out of the box that's a working, nameless default-Claude assistant on no store. To make it yours,
+run **`/setup`** — a guided, **resumable** wizard that walks persona, data store, owner profile,
+auth + model dials, channel env files (Telegram first), MCP servers, and the cockpit, one skippable
+chapter at a time; interrupt it anywhere and `/setup` resumes where it left off (`/setup <chapter>`
+jumps). The daemon and verify chapters are **landing next** — until then
+[`SCHEDULING.md`](seneschal/scripts/SCHEDULING.md) covers starting the daemon by hand.
 
 ## What's in the box
 
@@ -76,7 +77,7 @@ setup). The guided **setup wizards** (`/setup` — a persona interview + store o
 | **Subagent skills** ([`subagents/`](subagents/)) | Morning briefing, end-of-day wrap, email/Slack triage, calendar steward, store Q&A, reminders, a generic daily-journal steward, a person-centric message archiver, and the Forge (mints persistent "Archon" staff agents). |
 | **Presence daemon** ([`seneschal/scripts/presence.py`](seneschal/scripts/presence.py)) | The always-on reactive core — warm chat, reminders, comms-peek. Stdlib-first asyncio. |
 | **Cockpit** ([`cockpit/`](cockpit/)) | A local-first web observatory over the daemon: live chat over the daemon pipe, model dials, budget thresholds, health panels, archon tiles. FastAPI backend + Vite/React frontend, `127.0.0.1`-only, dev-no-auth build (real auth is a deferred follow-up). |
-| **Persona + store layers** ([`persona/`](persona/), [`seneschal/store/`](seneschal/store/)) | The pluggable identity and backend layers, with tracked templates. (The guided setup wizards land in the next release wave.) |
+| **Persona + store layers** ([`persona/`](persona/), [`seneschal/store/`](seneschal/store/)) | The pluggable identity and backend layers, with tracked templates. The unified `/setup` wizard ([`subagents/setup/`](subagents/setup/)) walks them chapter by chapter. |
 | **Voice call-screener** ([`phone/`](phone/)) | A Cloudflare Workers + Twilio screener that fronts your phone line in the assistant's voice, plus a **Call Shield** Android app feeding presence/health signals. |
 | **Local RAG + salience** ([`seneschal/scripts/rag_*.py`](seneschal/scripts/)) | A free, local semantic index (Ollama + stdlib sqlite) over your journal/notes, and an observe-only "what's safe to forget" experiment. |
 
