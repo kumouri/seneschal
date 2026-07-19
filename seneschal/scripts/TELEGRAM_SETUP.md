@@ -45,6 +45,67 @@ just need to create the bot and drop its token into `telegram.env`.
   full brain in **Chat mode** to reply (one persona across `/assistant`, Telegram, and scheduled runs).
 - **Offset** lives in `../state/telegram-offset` (gitignored). Delete it to replay the last ~24h.
 
+## Reactions
+
+React to one of the assistant's messages and it reads that as a lightweight intent — no typing needed.
+The vocabulary is yours, in `../state/telegram-reactions.json` (copy the `.example`; with no file the
+same defaults apply):
+
+| Reaction | Intent | Means |
+|---|---|---|
+| 👍 | `ack` | yes / confirm / accept — on a reminder nudge, that's a Done |
+| ❤ | `liked` | warmth about the reply itself; no action |
+| 👎 | `reject` | no / drop a held draft / don't accept |
+| 😴 · 🥱 · (⏰) | `snooze` | more time; bring it back later |
+| 🤝 · 🙏 · (🤚) | `hold` | wait ≥ 1 day, don't resurface unless I ask |
+| ✍ · 🤔 · (❔) | `elaborate` | explain / tell me more |
+
+Anything else is a `note` — threaded to the assistant as context, no action. The intent is a **hint**:
+the assistant acts on it in context, so a 👍 on a question reads as "yes" and a 👎 on a held draft drops
+it. The one thing the daemon does on its own is ack a same-day reminder nudge; everything with an
+outbound consequence still goes through the normal approval gate (a 👍 can't send an email).
+
+> ⚠️ **The parenthesised ones don't work — Telegram's fault, not ours.** You can only react with emoji
+> from Telegram's own allowed set (the Bot API's `ReactionTypeEmoji` list), and **⏰, 🤚 and ❔ are not in
+> it** (verified against the list), so the picker will never offer them. They're kept in the map because
+> they record what you meant, but the **in-set aliases are the ones that fire**: 😴/🥱 *snooze*, 🤝/🙏
+> *hold*, ✍/🤔 *elaborate*. Use those. If you'd rather have different ones, anything from Telegram's set
+> works — 👍 👎 ❤ 🔥 🥰 👏 😁 🤔 🤯 🎉 🙏 👌 💯 😢 🤩 ⚡ ✍ 🤝 🫡 😴 🥱 🤗 😎 🗿 🆒 🦄 💊 … — edit
+> `../state/telegram-reactions.json`; no restart needed (it's read per batch).
+
+Reactions arrive only because the poller explicitly asks for `message_reaction` updates — they're off by
+default in the Bot API. Spec: `../docs/telegram-inbound-spec.md` §3.
+
+**Telegram Premium?** No setup needed. Premium lets you react with ~any emoji via `custom_emoji_id`
+rather than a plain one, and the poller resolves those automatically via `getCustomEmojiStickers`,
+caching each id → base emoji in `../state/custom-emoji-cache.json` (gitignored) so a repeat costs no
+network. Anything it can't resolve (no token, a network hiccup, an unrecognized id) just falls back to
+`note` — same as any other emoji outside the map — never a dropped reaction. Spec: §3.6.
+
+## Swipe-replies
+
+Swipe-reply to one of the assistant's messages and it sees which one you meant — the quoted message is
+threaded in as `(replying to: "…")`, so you can answer a nudge from three hours ago with just "yes" and
+it will know what you're agreeing to. Quoting a file describes it rather than quoting empty text. Spec:
+`../docs/telegram-inbound-spec.md` §4.
+
+## Attachments
+
+**Just send the assistant the file.** A document / photo / voice / audio / video you send the bot is
+downloaded to `../state/inbox/` and handed over as a local path plus your caption, so the assistant can
+open it and answer in context. Spec: `../docs/telegram-inbound-spec.md` §2.
+
+- The daemon passes `--download-dir ../state/inbox`; a bare `telegram_poll.py` **describes** an attachment
+  without fetching it, so a manual peek stays read-only.
+- **Nothing auto-runs on a file** — the warm session decides what to do with it conversationally
+  (summarize it, import it, or just say "got it").
+- **~20 MB ceiling.** That's the Bot API's `getFile` limit, not ours. Bigger files (a full health-data
+  export, say) aren't downloaded — the assistant tells you so and asks you to drop the file on the
+  machine, where `health_import.py --jsons <zip>` takes it directly.
+- Filenames are sanitized before they're written (no traversal, no absolute paths), downloads only happen
+  for allowlisted chats, and a fetch that fails costs you the file but never the message.
+- Dream prunes `../state/inbox/` nightly (30 days).
+
 ## Notes
 
 - **Peek vs. commit:** run `telegram_poll.py` without `--commit` to inspect messages without consuming

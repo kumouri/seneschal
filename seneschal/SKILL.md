@@ -63,7 +63,7 @@ assistant's voice and tuned to the owner.
 | **Watch** | the sentinel woke the brain (cheap comms-peek gate; headless) | ✅ built — see below |
 | **Dream** | nightly consolidation after Wrap (condense the day, propose learnings) | ✅ built — see below |
 | **Daily Journal** | "run the journal", "process my journal", "DJS", scheduled early-morning run | ✅ built — delegate to `../subagents/journal-steward/daily-journal-steward/SKILL.md` |
-| **Reminders** | "remind me to…", "did I do X", "what's still open", scheduled intraday runs (4 slots) | ✅ built (`../subagents/reminders/`) |
+| **Reminders** | "remind me to…", "did I do X", "what's still open", the daily seed run (exact per-reminder times) | ✅ built (`../subagents/reminders/`) |
 | **Forge** | "mint/hire an archon", "commission a specialist", "delegate to <archon>", staff status/tenure/retire asks | ✅ built (`../subagents/archon-forge/`) |
 | **Archive** | "archive my chat with X", "save my conversation with X", "merge my message history with X", "re-run the archive" | ✅ built (`../subagents/message-archivist/`) |
 
@@ -186,7 +186,7 @@ This is the assistant's primary interactive surface — an ongoing conversation,
    *finished* with the item), `last_acknowledged: today`, `consecutive_misses: 0` (act-low; see
    `references/databases.md` + `references/reminders-policy.md`). Write those **fields** directly — do
    **not** just flip the one-tap `ack` affordance: reconciling runs consume + reset it, so it alone isn't
-   the durable record. This way the next reminder slot sees it acked and stops re-firing, and the EOD Wrap
+   the durable record. This way the next seeded nudge sees it acked and stops re-firing, and the EOD Wrap
    (which counts done-today off `last_acknowledged`) picks it up. On the **Notion backend**, resolve the
    reminder row **by its cached page id** (skip the throttled query path) and set the emoji-bearing option
    strings — the by-cached-id ack flow is worked end-to-end in `store/notion/mapping.md` → "the reminders
@@ -307,7 +307,7 @@ on you / tomorrow preview), write-enabled under the gate. Complements the mornin
 comes from **both** Tasks (`completed` = today) **and** Reminders (`last_acknowledged` = today,
 `status` in (done, finished) — both count as acked-done: `done` = done-for-today, `finished` = a retired
 item acked on its way out) — so acks made over Telegram/chat count; never judge completion by the one-tap
-`ack` affordance (it's consumed + reset by the reminder slots).
+`ack` affordance (it's consumed + reset by the reconciling seed runs).
 
 ## Reminders mode — nudges & accountability
 
@@ -315,11 +315,12 @@ item acked on its way out) — so acks made over Telegram/chat count; never judg
 
 Delegate to `../subagents/reminders/SKILL.md`. In short: the assistant tracks the things the owner wants
 reminding of — recurring habits, today's unconfirmed todos, and deadlines approaching — in the
-**Reminders** domain of the store, and runs on four daily slots (e.g. 08:00 / 12:30 / 18:30 / 21:30
-local) plus on demand. It **expects a response**: important items (`importance: critical` / `high`)
+**Reminders** domain of the store, and fires at **exact per-reminder times**: a once-per-owner-local-day
+**seed** run (`presence.maybe_seed_day`, date-rollover) queues each row's `times` (or its `time_window`
+default) and the daemon delivers by the minute — plus on demand. It **expects a response**: important items (`importance: critical` / `high`)
 re-fire until confirmed done; low-stakes ones stop re-nagging but accumulate misses, and a repeated
-low-stakes skip earns **one dry, factual rib** (never shaming). Behavior — slots, the state machine, the
-rib threshold, the tone ladder — lives in `references/reminders-policy.md`. The tracker writes are
+low-stakes skip earns **one dry, factual rib** (never shaming). Behavior — exact times + the seed, the
+state machine, the rib threshold, the tone ladder — lives in `references/reminders-policy.md`. The tracker writes are
 **act-low**; flipping a *linked* Task/Goal to Done is **ask-high** (propose it). v1 ack = the one-tap
 `ack` affordance or telling the assistant in chat — either way the run `store-update`s the row
 (`status: done` for every type — done *for today*, still active; `status: finished` is explicit-retire
@@ -415,10 +416,12 @@ On a Dream run:
    ~22:00 the night before, so it predates any overnight/early-morning change — the Brief still runs a
    light morning **delta** query (since-stamp completions + same-day-new + changed flags/projects) on top
    of it; the block is a warm base, not the final word.
-2. **Refresh reminders + prune presence.** Reconcile `../state/reminders.json` (drop fired/expired; note
-   anything due tomorrow in the digest), and prune stale presence history —
+2. **Refresh reminders + prune presence + sweep the Telegram inbox.** Reconcile `../state/reminders.json`
+   (drop fired/expired; note anything due tomorrow in the digest), prune stale presence history —
    `python scripts/presence_import.py --prune-days 30` (act-low, local; keeps `state/presence.db` bounded,
-   the current context snapshot unaffected).
+   the current context snapshot unaffected) — and sweep old inbound Telegram attachments —
+   `python scripts/telegram_poll.py --prune-days 30` (offline GC; `state/inbox/` is a landing pad, not an
+   archive).
 2b. **Refresh the semantic index (act-low, local — Retrieval advisor phase B).** Incrementally update the
    local RAG index so tomorrow's retrieval has today's history. Fetch journal/notes entries new-or-changed
    since the last index **from the store** (`store-query`/`store-search` the journal & notes domains),
@@ -549,7 +552,7 @@ it — is in `references/memory.md`.
 | `references/comms-mapping.md` | Email (Proton/Gmail), Slack, Twilio/SMS tool mapping + gotchas. |
 | `references/advisor-chain.md` | The Advisor Chain — the ordered per-turn interceptor pipeline (Spring-AI-style): the advisors, their in/out hooks, the shared turn-context, per-mode composition, and the deferred code-backed rails. |
 | `references/briefing.md` | What a morning Brief / EOD Wrap contains and how to source each part. |
-| `references/reminders-policy.md` | Reminders/nudges: slots, escalation state machine, rib threshold + tone ladder. |
+| `references/reminders-policy.md` | Reminders/nudges: exact times + the daily seed, escalation state machine, rib threshold + tone ladder. |
 | `references/notion-rate-limits.md` | Stub → the Notion backend's throughput rules now live in `store/notion/mapping.md` (why Notion 429s reads, not writes, + how to stay under). |
 | `references/autonomy-policy.md` | Act-low vs ask-high rules; the dial toward fuller autonomy. |
 | `references/autonomy-config.json` | Machine-readable companion to the policy — the autonomy dial. |

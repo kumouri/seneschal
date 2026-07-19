@@ -2,6 +2,12 @@
 REM ============================================================================
 REM Seneschal presence daemon launcher (for Windows Task Scheduler).
 REM
+REM TRACKED TEMPLATE — this file (and its POSIX sibling run-presence.sh) is the
+REM checked-in launcher template the setup wizard (subagents/persona-wizard)
+REM renders a per-machine local launcher from. Keep it machine-neutral: no real
+REM usernames, absolute per-host paths, or secrets — those belong in the local
+REM copy the wizard writes (or in your user environment), never here.
+REM
 REM Point the scheduled task's "Program/script" at THIS file (no Arguments needed):
 REM   Program/script:  %USERPROFILE%\workspace\repos\seneschal\seneschal\scripts\run-presence.cmd
 REM   Trigger:         At log on   (single instance; restart on failure)
@@ -34,8 +40,11 @@ REM    (stdio internal-integration variant only: also  set "NOTION_TOKEN=ntn_you
 REM  * Discord two-way channel (DISCORD_SETUP.md): AUTO-DETECTED — just create scripts\discord.env
 REM    (gateway push when the venv is live, REST fallback otherwise). To force OFF:  --no-discord ^
 REM  * Phone-call reminders (Call Me):  --call-env "%~dp0push-call.env" ^
-REM  * Internal scheduled runs (brief/wrap/dream/journal + the 4 reminder slots) are ON by default;
-REM    add  --no-slots  to disable, or  --slot-model <id>  to run them on a specific model.
+REM  * Internal scheduled runs (brief/wrap/dream/journal + the once-per-day exact-time reminder SEED)
+REM    are ON by default; add  --no-slots  to disable them all,  --no-seed-day  to disable only the
+REM    seed, or  --slot-model <id>  to run them on a specific model.
+REM  * Cockpit pipe (localhost websocket, seneschal/docs/cockpit-spec.md): ON by default when the venv's
+REM    websockets is importable; add  --no-cockpit ^  to force it off, or  --cockpit-port <n> ^  to move it.
 
 REM --- interpreter: prefer the uv-managed venv (has the daemon's one dependency, websockets),
 REM     fall back to system python (the daemon degrades gracefully without the venv — the Discord
@@ -44,6 +53,11 @@ set "PYEXE=%~dp0..\..\.venv\Scripts\python.exe"
 if not exist "%PYEXE%" set "PYEXE=python"
 
 REM --- knobs (edit these freely) ---
+REM  * --model below is the FALLBACK warm-session model only. The LIVE knob (v3, cockpit-spec.md
+REM    "Model dials & Fable delegation") is state\model-config.json (via the cockpit's Model dials
+REM    panel, or seneschal\scripts\model_config.py): its warm_model wins over --model at every
+REM    warm-session spawn, and max_routable_model is the live ceiling on Fable delegation. Edit --model
+REM    here only to change the fallback used when no model-config.json (or no warm_model in it) exists.
 "%PYEXE%" "%~dp0presence.py" ^
   --model claude-opus-4-8 ^
   --idle-min 20 ^

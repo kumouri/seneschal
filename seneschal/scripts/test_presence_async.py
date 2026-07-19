@@ -36,7 +36,7 @@ def _args(state_dir, **over):
                 no_reminders=True, no_peek=True, no_slots=True, max_iterations=0,
                 poll_timeout=1, discord_poll_sec=0.05, tick_sec=0.05, idle_min=0.0,
                 model=None, slot_model=None, slot_catchup_min=180, claude_bin="claude",
-                notion_mcp=None, permission_mode="bypassPermissions",
+                notion_mcp=None, slack_mcp=None, permission_mode="bypassPermissions",
                 peek_interval_min=0, watch_prompt=None, watch_cmd=None, watch_model=None)
     base.update(over)
     return argparse.Namespace(**base)
@@ -127,7 +127,7 @@ class DrainerLifecycle(unittest.IsolatedAsyncioTestCase):
         state.pending_event.set()
 
         class DeadSession(pr.StubWarmSession):
-            def send(self, text):
+            def send(self, text, on_event=None):
                 return None  # session died mid-turn
 
         args = self.args

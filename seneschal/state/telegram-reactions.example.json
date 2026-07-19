@@ -1,0 +1,21 @@
+{
+  "_comment": "Telegram reaction -> intent. Copy to telegram-reactions.json (gitignored) to change the vocabulary; with no file at all, these same defaults apply (presence.DEFAULT_REACTION_INTENTS). An emoji that isn't listed means 'note' — threaded to the assistant as context, no action. The intent is a HINT to the warm session, which acts in context; the only automated daemon-side path is 'ack' on a reminder nudge sent the same day. Variation selectors are ignored, so ❤ and ❤️ are the same key.",
+  "_emoji_note": "Several emoji map to one intent deliberately. Telegram only lets you react with emoji from its own allowed set (the Bot API's ReactionTypeEmoji list), and ⏰ / 🤚 / ❔ are verifiably NOT in it — the picker won't offer them, so those three can never fire. They're kept because they record the intended meaning; the in-set aliases next to each (😴 🥱 / 🤝 🙏 / ✍ 🤔) are the ones that actually work. Anything you add must be in Telegram's set to be reactable. Telegram Premium sidesteps that set entirely (react with ~any emoji via an opaque custom_emoji_id) — telegram_poll.py resolves those back to a plain emoji automatically (getCustomEmojiStickers + a local cache, state/custom-emoji-cache.json) before this map ever sees them, so a Premium pick maps to an intent exactly like a normal reaction; an unresolvable one just falls back to 'note'.",
+  "reactions": {
+    "👍": "ack",
+    "❤": "liked",
+    "👎": "reject",
+
+    "⏰": "snooze",
+    "😴": "snooze",
+    "🥱": "snooze",
+
+    "🤚": "hold",
+    "🤝": "hold",
+    "🙏": "hold",
+
+    "❔": "elaborate",
+    "✍": "elaborate",
+    "🤔": "elaborate"
+  }
+}

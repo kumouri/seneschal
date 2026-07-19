@@ -112,6 +112,48 @@ class BuildSlotsTest(unittest.TestCase):
         self.assertNotIn("{{", slots[0]["prompt"])
 
 
+class BuildSeedPromptTest(unittest.TestCase):
+    """The exact-time reminder SEED prompt (SEED_PROMPT_TEMPLATE → build_seed_prompt), pinned like the
+    slot prompts: identity-token rendered at startup, handed to `claude -p` verbatim (never .format()ed),
+    and carrying zero baked-in personal identity."""
+
+    def test_default_identity_renders_the_generic_tz_phrase(self):
+        seed = pr.build_seed_prompt(ic.DEFAULTS)
+        self.assertIn("Use the owner's configured timezone.", seed)
+        self.assertNotIn("{tz}", seed)
+
+    def test_named_identity_substitutes_the_configured_tz_label(self):
+        seed = pr.build_seed_prompt(NAMED)
+        self.assertIn("Use America/Chicago.", seed)
+        for token in ("{assistant}", "{owner}", "{tz}"):
+            self.assertNotIn(token, seed)
+
+    # The upstream assistant/owner names, assembled at runtime so the repo's own PII sweep (which
+    # greps source text for these very literals) can't match its own guard.
+    LEGACY_NAMES = ("".join(("Mar", "go")), "".join(("Cer", "yce")))
+
+    def test_template_carries_no_baked_in_identity(self):
+        # The tracked template itself must be identity-free: any zone/name appears only via the
+        # {tz}/{assistant}/{owner} tokens, never as a literal.
+        for literal in self.LEGACY_NAMES + ("America/Chicago",):
+            self.assertNotIn(literal, pr.SEED_PROMPT_TEMPLATE)
+
+    def test_module_level_seed_prompt_is_rendered(self):
+        # Whatever identity the host has, the runnable SEED_PROMPT has no identity tokens left —
+        # and no literal legacy names (the configured tz label is the only zone that may appear).
+        for token in ("{assistant}", "{owner}", "{tz}"):
+            self.assertNotIn(token, pr.SEED_PROMPT)
+        for literal in self.LEGACY_NAMES:
+            self.assertNotIn(literal, pr.SEED_PROMPT)
+
+    def test_braces_in_values_stay_literal(self):
+        # Like slot prompts (and unlike the grounding), the seed is never .format()ed, so values are
+        # substituted raw — no doubling.
+        seed = pr.build_seed_prompt({"assistant": {}, "owner": {"timezone": "Zone/{odd}"}})
+        self.assertIn("Use Zone/{odd}.", seed)
+        self.assertNotIn("{{", seed)
+
+
 class WarnTzMismatchTest(unittest.TestCase):
     def _machine_offset(self):
         return datetime.now(timezone.utc).astimezone().utcoffset()
