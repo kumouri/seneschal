@@ -15,6 +15,7 @@ import sys
 import tempfile
 import unittest
 from datetime import datetime
+from unittest import mock
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
@@ -264,6 +265,160 @@ class RouterShadow(unittest.TestCase):
         finally:
             router.classify = orig
         self.assertFalse(os.path.exists(pr.router_log_path(self.dir)))
+
+
+class SeedDayRollover(unittest.TestCase):
+    """maybe_seed_day — the once-per-local-day exact-time reminder seed that retired the four fixed
+    reminder slots. Fires on the first tick of each new owner-local date (slots.json[SEED_SLOT_NAME]
+    guard, via presence.local_now — owner tz), reusing the slot lifecycle; deferred while warm /
+    another headless run in flight; killable via --no-seed-day (and --no-slots)."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.today = pr.local_now().strftime("%Y-%m-%d")
+
+    def _args(self, **over):
+        base = dict(no_slots=False, no_seed_day=False, stub_brain=False, fake_inbox=None,
+                    claude_bin="claude", notion_mcp=None, slack_mcp=None,
+                    permission_mode="bypassPermissions", slot_model=None, model=None)
+        base.update(over)
+        return argparse.Namespace(**base)
+
+    def _stamp(self, name, date):
+        pr.save_json(os.path.join(self.dir, "slots.json"), {name: date})
+
+    def test_seeds_on_a_fresh_new_day(self):
+        slot_children = {}
+        with mock.patch.object(pr.subprocess, "Popen", return_value=_FakeProc()) as m:
+            pr.maybe_seed_day(self.dir, self._args(), lambda *_: None, [], False, slot_children)
+        self.assertEqual(m.call_count, 1)                    # launched
+        self.assertIn(pr.SEED_SLOT_NAME, slot_children)      # tracked so reap can stamp/retry it
+
+    def test_no_seed_when_already_stamped_today(self):
+        self._stamp(pr.SEED_SLOT_NAME, self.today)
+        with mock.patch.object(pr.subprocess, "Popen", return_value=_FakeProc()) as m:
+            pr.maybe_seed_day(self.dir, self._args(), lambda *_: None, [], False, {})
+        m.assert_not_called()
+
+    def test_seeds_after_rollover_from_a_stale_stamp(self):
+        self._stamp(pr.SEED_SLOT_NAME, "2020-01-01")         # a prior-day stamp → new local date
+        with mock.patch.object(pr.subprocess, "Popen", return_value=_FakeProc()) as m:
+            pr.maybe_seed_day(self.dir, self._args(), lambda *_: None, [], False, {})
+        self.assertEqual(m.call_count, 1)
+
+    def test_deferred_while_warm_busy(self):
+        with mock.patch.object(pr.subprocess, "Popen", return_value=_FakeProc()) as m:
+            pr.maybe_seed_day(self.dir, self._args(), lambda *_: None, [], True, {})   # warm_busy
+        m.assert_not_called()
+
+    def test_disabled_by_no_seed_day_flag(self):
+        with mock.patch.object(pr.subprocess, "Popen", return_value=_FakeProc()) as m:
+            pr.maybe_seed_day(self.dir, self._args(no_seed_day=True), lambda *_: None, [], False, {})
+        m.assert_not_called()
+
+    def test_disabled_by_no_slots_flag(self):
+        with mock.patch.object(pr.subprocess, "Popen", return_value=_FakeProc()) as m:
+            pr.maybe_seed_day(self.dir, self._args(no_slots=True), lambda *_: None, [], False, {})
+        m.assert_not_called()
+
+    def test_deferred_while_other_headless_in_flight(self):
+        with mock.patch.object(pr.subprocess, "Popen", return_value=_FakeProc()) as m:
+            pr.maybe_seed_day(self.dir, self._args(), lambda *_: None,
+                              [_FakeProc(running=True)], False, {})   # a slot/peek already running
+        m.assert_not_called()
+
+    def test_no_double_launch_when_already_running(self):
+        slot_children = {pr.SEED_SLOT_NAME: _FakeProc(running=True)}
+        with mock.patch.object(pr.subprocess, "Popen", return_value=_FakeProc()) as m:
+            pr.maybe_seed_day(self.dir, self._args(), lambda *_: None, [], False, slot_children)
+        m.assert_not_called()
+
+    def test_reaper_stamps_seed_under_its_name_on_clean_exit(self):
+        # The reused slot lifecycle: a clean seed exit stamps slots.json[SEED_SLOT_NAME], so the
+        # next-loop guard reads "already seeded today" — the once-per-day contract.
+        children = {pr.SEED_SLOT_NAME: _RcProc(rc=0)}
+        pr.reap_finished_slots(children, self.dir, lambda *_: None, {}, now_local=datetime.now())
+        stamped = pr.load_json(os.path.join(self.dir, "slots.json"), {})
+        self.assertEqual(stamped.get(pr.SEED_SLOT_NAME), datetime.now().strftime("%Y-%m-%d"))
+
+
+class StoreBackendActive(unittest.TestCase):
+    """store_backend_active — the backend gate for Notion-only machinery (chiefly the outbox leg of
+    the reaction-ack). Same sources + never-raises contract as resolve_store_mcp."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.config = os.path.join(self.dir, "config.json")
+        self.legacy = os.path.join(self.dir, "no-such-notion-mcp.json")  # absent unless created
+
+    def _write_config(self, obj):
+        with open(self.config, "w", encoding="utf-8") as fh:
+            json.dump(obj, fh)
+
+    def test_reads_active_backend_from_config(self):
+        for backend in ("notion", "obsidian", "markdown"):
+            self._write_config({"active": backend, "backends": {}})
+            self.assertEqual(pr.store_backend_active(self.config, self.legacy), backend)
+
+    def test_absent_config_and_legacy_is_none(self):
+        self.assertIsNone(pr.store_backend_active(self.config, self.legacy))
+
+    def test_legacy_notion_mcp_reads_as_notion(self):
+        legacy = os.path.join(self.dir, "notion-mcp.json")
+        with open(legacy, "w", encoding="utf-8") as fh:
+            fh.write("{}")
+        self.assertEqual(pr.store_backend_active(self.config, legacy), "notion")
+
+    def test_unparseable_config_falls_back_to_legacy_probe(self):
+        with open(self.config, "w", encoding="utf-8") as fh:
+            fh.write("{not json")
+        self.assertIsNone(pr.store_backend_active(self.config, self.legacy))
+
+
+class ReactionAckOutboxGate(unittest.TestCase):
+    """The Phase-B reaction-ack shells reminders_dequeue.py always, but the outbox leg only on the
+    notion backend — the outbox is Notion-only (store/notion/mapping.md, 'Outbox — durable act-low
+    writes'). Filesystem backends record the local ledger and return **False** so the reaction line
+    asks the warm session to perform the store-update itself (acks persist to the store, never just
+    to chat; the overlap is idempotent)."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.calls = []
+
+    def _run(self, rc=0, stderr=""):
+        def fake_run(cmd, **kw):
+            self.calls.append(cmd)
+            return type("P", (), {"returncode": rc, "stderr": stderr, "stdout": "{}"})()
+        return fake_run
+
+    def _ack(self, backend):
+        with mock.patch.object(pr, "store_backend_active", return_value=backend), \
+             mock.patch.object(pr.subprocess, "run", self._run()):
+            return pr.ack_reminder_by_reaction(self.dir, "row-1", lambda *_: None)
+
+    def test_notion_backend_runs_dequeue_and_outbox(self):
+        self.assertTrue(self._ack("notion"))
+        self.assertEqual(len(self.calls), 2)
+        self.assertTrue(any("reminders_dequeue.py" in c for c in self.calls[0]))
+        self.assertTrue(any("outbox.py" in c for c in self.calls[1]))
+        self.assertIn("ack", self.calls[1])
+
+    def test_filesystem_backend_skips_outbox_and_reports_store_write_pending(self):
+        for backend in ("markdown", "obsidian", None):
+            self.calls = []
+            # False = the store write is NOT journaled — the reaction line must ask the warm
+            # session to perform the store-update itself.
+            self.assertFalse(self._ack(backend))
+            self.assertEqual(len(self.calls), 1, backend)          # dequeue only
+            self.assertTrue(any("reminders_dequeue.py" in c for c in self.calls[0]))
+
+    def test_skip_is_logged(self):
+        logged = []
+        with mock.patch.object(pr, "store_backend_active", return_value="markdown"), \
+             mock.patch.object(pr.subprocess, "run", self._run()):
+            pr.ack_reminder_by_reaction(self.dir, "row-1", logged.append)
+        self.assertTrue(any("outbox skipped" in l for l in logged))
 
 
 if __name__ == "__main__":

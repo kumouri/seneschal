@@ -18,6 +18,14 @@ invariants each task must preserve live in seneschal/docs/asyncio-daemon-design.
     wait out the whole turn).
   * `control_task`  — watches the control queue (graceful restart/shutdown) and applies it only once the
     warm session is idle and the queue is empty.
+  * `cockpit_task`   — the seneschald cockpit pipe (seneschal/scripts/cockpit_pipe.py; seneschal/docs/cockpit-spec.md):
+    a localhost-only, token-authed WebSocket server. Exactly ONE client (the cockpit backend) at a time;
+    `chat.send` enqueues into the SAME action queue as Telegram/Discord (source="cockpit"); the warm
+    session's turns stream back out as `chat.event`s (also teed to state/warm-transcript.jsonl, a capped
+    ring buffer, so a reconnect can backfill); `status`/`status.get` report turn-in-flight/model/queue
+    depth; `control.restart` rides the same control-queue path as request_control.py. Degrades (no pipe)
+    rather than dying if disabled, `websockets` is unavailable, or in test/offline modes — never affects
+    chat or reminders. See asyncio-daemon-design.md for the fail-open/bounded-queue invariants.
 All blocking I/O (the subprocess-based sentinel helpers, the warm session's pipe reads) hops through
 asyncio.to_thread; shared state is mutated only on the event loop, so there are no locks to get wrong.
 
@@ -27,14 +35,28 @@ exit, and reloads it on startup — a restart (routine via `reseneschald` after 
 message it had already taken. The fire-and-forget headless runs (peek + scheduled slots) are serialized
 to one at a time so their store read-bursts don't overlap and (on a rate-limited backend like Notion)
 trip its limit; they are ALSO deferred while the warm chat session is actively processing a turn, so a
-chat turn's reads and a slot's read-burst never overlap either. Chat is priority and is never delayed — only the slot/peek waits (it
-retries on the next tick, reusing the same deferral path as an in-flight headless run).
+chat turn's reads and a slot's read-burst never overlap either. Chat is priority and is never delayed —
+only the slot/peek waits (it retries on the next tick, reusing the same deferral path as an in-flight
+headless run).
 
 **Subscription, not API.** The warm session is the `claude` **CLI** (`-p --input-format stream-json
 --output-format stream-json`), which bills against the logged-in Claude subscription. We deliberately
 scrub ANTHROPIC_API_KEY from the child env so a stray key can never switch the assistant to metered API billing.
 For an unattended service, authenticate once with `claude setup-token` and set CLAUDE_CODE_OAUTH_TOKEN
 (see SCHEDULING.md). The SDK runner stays frozen (it is API-billed only).
+
+**Model dials + Fable delegation (v3, cockpit-spec.md "Model dials & Fable delegation").** Two dials,
+set separately in the cockpit, live in `state/model-config.json` (`model_config.py`): `warm_model` — read
+at warm-session SPAWN time (see `resolve_warm_model`; it wins over the `--model` CLI flag below, which
+becomes the fallback) — and `max_routable_model` — the hard ceiling on every Fable delegation, re-read
+LIVE per inbound turn. The warm session always owns the conversation; when a turn needs more, it
+delegates up via `fable_delegate.py` (a subprocess one-shot, NOT a session handoff), triggered by the
+router's **fable arm** (`fable_arm_classify`, a hint line only), the warm session's own judgment, or a
+**force-route**: a leading `!fable` prefix on any inbound message, or `force_fable: true` on a cockpit
+`chat.send` (see `strip_force_fable` / `cockpit_task.on_chat_send`) — bypasses the classifier, never the
+approval gate. The ceiling binds every trigger: when it isn't Fable-tier, the fable arm doesn't even run
+(`model_config.admits_fable`), and `fable_delegate.py` itself refuses the call regardless of how it was
+triggered.
 
 USAGE (service — normally launched via run-presence.cmd, not by hand):
   python presence.py --model claude-opus-4-8 --idle-min 20 --poll-timeout 25 \
@@ -49,14 +71,21 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 
+import cockpit_pipe  # the cockpit pipe protocol — sixth supervised task (see cockpit_task below)
+import governor  # Oikonomos, the budget governor (v3.5, cockpit-spec.md) — turn-usage metering + alerts
+import model_config  # the two-dial model config (v3, cockpit-spec.md "Model dials & Fable delegation")
+import reminders_acks as ra  # local_today — the same owner-local-date rule the fire path gates on
 from reminders_roll import refill_rolls
+from request_control import enqueue_control  # cockpit control.restart -> the same control-queue path
 
 # Identity plumbing (persona/identity.json → the grounding/slot prompts). Guarded like the
 # other optional sibling imports (router, discord_gateway): a missing/broken identity_common
@@ -84,16 +113,22 @@ from sentinel import (  # shared helpers — sentinel is now a helper library
     DEFAULT_TELEGRAM_ENV,
     NO_WINDOW,  # Windows: console children spawn without a visible console (test_windowless_spawns)
     SCRIPT_DIR,
+    TELEGRAM_INBOX_DIR,
     check_reminders,
+    clear_session_heartbeat,
     load_json,
+    load_message_map,
     parse_iso,
     poll_discord,
     poll_telegram,
+    record_sent_message,
     save_json,
     send_discord,
     send_telegram,
     session_is_live,
+    write_session_heartbeat,
 )
+from telegram_poll import safe_filename  # shared scrub for sender-supplied filenames
 
 REPO_ROOT = os.path.normpath(os.path.join(SCRIPT_DIR, "..", ".."))
 THREAD_CAP = 20  # rolling turns kept for cross-session continuity
@@ -131,13 +166,31 @@ DEFAULT_NOTION_MCP = os.path.join(SCRIPT_DIR, "notion-mcp.json")
 # discord.env is auto-detected the same way (see DISCORD_SETUP.md): drop the file in scripts/ and the
 # two-way Discord channel (gateway push, REST fallback) turns on — no launcher edit. --no-discord opts out.
 DEFAULT_DISCORD_ENV = os.path.join(SCRIPT_DIR, "discord.env")
+# slack-mcp.json is auto-detected the same way (Q9 of the Slack draft-and-hold spec): drop the file in
+# scripts/ and the headless daemon gains Slack send/read hands, so a chat-approved `send a7` posts
+# immediately instead of parking as status=approved (the Slack-hands gap). It's threaded ALONGSIDE the
+# store's MCP (the CLI takes multiple space-separated configs after one --mcp-config), so the warm
+# session can both *understand* an approval and *post* it. --no-slack opts out. Sending stays ask-high.
+DEFAULT_SLACK_MCP = os.path.join(SCRIPT_DIR, "slack-mcp.json")
+
+def active_mcp_configs(args) -> list:
+    """Config paths for every active MCP server the daemon threads into a spawned `claude` — the
+    store's MCP first (read/write persistence, resolved by resolve_store_mcp onto args.notion_mcp;
+    filesystem backends carry none), then Slack (send hands). The claude CLI accepts multiple
+    space-separated configs after a single `--mcp-config`, so both servers load together. Defensive
+    getattr so a partial args namespace (e.g. tests) still works. Returns [] when nothing is wired."""
+    return [c for c in (getattr(args, "notion_mcp", None), getattr(args, "slack_mcp", None)) if c]
 
 # Heavyweight scheduled runs the daemon owns itself (replacing separate Task Scheduler entries).
 # Times are the MACHINE-LOCAL wall clock — assumed to match the owner's timezone (startup warns via
-# warn_tz_mismatch when identity.owner.timezone says otherwise). Each fires at
-# most once per local day; a run that's missed (machine asleep at its time) fires late on the next loop
-# IF still within the catch-up window, else it's skipped for the day. Reminder slots run the Reminders
-# subagent (which enqueues nudges the daemon then delivers); the rest run the orchestrator/journal.
+# warn_tz_mismatch when identity.owner.timezone says otherwise). Each fires at most once per local day;
+# a run that's missed (machine asleep at its time) fires late on the next loop IF still within the
+# catch-up window, else it's skipped for the day. These run the orchestrator/journal.
+# Reminders are NOT fixed slots anymore: the four Morning/Midday/Evening/Bedtime reminder slots were
+# retired for arbitrary per-reminder times — a once-per-local-day `maybe_seed_day` (date-rollover
+# triggered, below) seeds each ⏰ row's exact fire time(s) into the queue and the ~5s delivery tick fires
+# them. The journal-presence gate + linked-task refresh moved onto eod-wrap/dream (below). See
+# seneschal/docs/reminder-exact-time-scheduling-spec.md + references/reminders-policy.md.
 # Prompts carry the {tz} identity token; the runnable SLOTS below is rendered by build_slots().
 SLOTS_TEMPLATE = [
     {"name": "daily-journal", "at": "05:00",
@@ -146,31 +199,36 @@ SLOTS_TEMPLATE = [
     {"name": "morning-brief", "at": "06:30",
      "prompt": "Run the morning Brief (seneschal/SKILL.md): deliver in chat + push highlights to Telegram "
                "+ email via Proton + write the Run Log. Use {tz}. Run silently."},
-    {"name": "reminders-morning", "at": "08:00",
-     "prompt": "Run Reminders mode (subagents/reminders/SKILL.md) for the MORNING slot: run the daily "
-               "reset, reconcile acks, compute this slot's fires, enqueue nudges to state/reminders.json "
-               "(reminders_enqueue.py), update the tracker + Run Log. Use {tz}. Run silently."},
-    {"name": "reminders-midday", "at": "12:30",
-     "prompt": "Run Reminders mode (subagents/reminders/SKILL.md) for the MIDDAY slot: reconcile acks, "
-               "re-fire unacked important, re-surface snoozed, enqueue nudges to state/reminders.json, "
-               "update the tracker + Run Log. Use {tz}. Run silently."},
-    {"name": "reminders-evening", "at": "18:30",
-     "prompt": "Run Reminders mode (subagents/reminders/SKILL.md) for the EVENING slot: reconcile "
-               "acks, re-fire unacked important, enqueue nudges, update the tracker + Run Log. "
-               "Use {tz}. Run silently."},
     {"name": "eod-wrap", "at": "21:07",
      "prompt": "Run the Wrap (seneschal/SKILL.md -> subagents/eod-wrap/SKILL.md). Done-today includes "
                "Tasks completed today AND ⏰ Reminders rows with Last Acknowledged = today (never "
-               "judge by the Ack checkbox - the slots consume it). Use {tz}. Run silently."},
-    {"name": "reminders-bedtime", "at": "21:30",
-     "prompt": "Run Reminders mode (subagents/reminders/SKILL.md) for the BEDTIME slot: final re-fire "
-               "of unacked important, enqueue nudges, update the tracker + Run Log. Use {tz}. "
-               "Run silently."},
+               "judge by the Ack checkbox - it's consumed on read). Also run the journal-presence gate "
+               "(nudge-or-satisfy) and refresh linked-task status for active Deadline-Watches so their "
+               "re-fires stop once the linked record is Done. Use {tz}. Run silently."},
     {"name": "dream", "at": "22:00",
      "prompt": "Run the Dream consolidation (seneschal/SKILL.md): rebuild state/context-digest.md, "
-               "refresh reminders, propose learnings, then commit + open a PR (Dream step 5). "
-               "Use {tz}. Run silently."},
+               "refresh reminders, propose learnings, then commit + open a PR (Dream step 5). Also run "
+               "the journal-presence satisfy-only backstop (auto-tick if the owner journaled after the "
+               "Wrap check; no bedtime nudge). Use {tz}. Run silently."},
 ]
+
+# The exact-time reminder SEED (retired the four fixed slots). NOT a fixed-time SLOT: it fires on the
+# first tick of each new owner-local date, so a machine asleep through midnight still seeds on wake —
+# no classify_slots catch-up cliff that could silently skip the daily reset. It reuses the slot lifecycle
+# (registered in slot_children, stamped in slots.json under this name, retried on a crashed run) via
+# maybe_seed_day. The brain run does the store parts (reset, acks, which rows are due) then calls
+# reminders_seed.py per due row to queue that row's exact-time nudges for the whole day.
+# Like the slot prompts, the template carries identity tokens; the runnable SEED_PROMPT is rendered
+# at startup by build_seed_prompt() (raw replace — this prompt is never .format()ed).
+SEED_SLOT_NAME = "reminders-seed"
+SEED_PROMPT_TEMPLATE = (
+    "Run Reminders mode (subagents/reminders/SKILL.md) in SEED mode for the whole day: apply "
+    "pending acks, run the daily reset (Daily/Weekdays habits), then for EACH ⏰ row due today compute "
+    "its fire time(s) — the row's Times field, else its Time Window default — and enqueue exact-time "
+    "nudges for the full local day via reminders_seed.py (one call per row; include the 90-minute "
+    "re-fire schedule for importance >= High or Nag Until Done, and --pierce-quiet for Critical+). "
+    "Update the tracker + Run Log. Use {tz}. Run silently."
+)
 
 
 def child_env() -> dict:
@@ -258,6 +316,21 @@ def resolve_store_mcp(args, config_path: str | None = None,
                   "(chat still works; the store can't be read/written this run).")
 
 
+def store_backend_active(config_path: str | None = None, legacy_mcp: str | None = None) -> "str | None":
+    """The active store backend's name ('notion' / 'obsidian' / 'markdown' / …), or None when no store
+    is configured at all. Sibling of resolve_store_mcp (same sources, same never-raises contract):
+    a parsed store/config.json answers with its `active` key; with no config, a legacy
+    scripts/notion-mcp.json means a pre-/setup-store **notion** install. Used to gate backend-specific
+    machinery — chiefly the write-behind outbox, which is Notion-only (store/notion/mapping.md,
+    'Outbox — durable act-low writes'); filesystem backends write locally and never touch it."""
+    cfg, ok = _load_store_config(config_path or STORE_CONFIG)
+    if ok:
+        return cfg.get("active") or None
+    if os.path.exists(legacy_mcp or DEFAULT_NOTION_MCP):
+        return "notion"
+    return None
+
+
 def local_now() -> datetime:
     """The owner's current local time as an aware datetime, via tz_common: the configured
     identity.owner.timezone when it resolves (tzdata ships in the uv venv now), else the
@@ -277,6 +350,32 @@ def local_stamp() -> str:
     bug. Handed in explicitly so no run ever has to guess what 'now' is. Rendered in the owner's
     timezone via local_now() (machine-local when unconfigured/unresolvable)."""
     return local_now().strftime("%A %Y-%m-%d %H:%M %Z")
+
+
+# --------------------------------------------------------------------------- model dials (v3)
+
+def resolve_warm_model(state_dir: str, cli_model: str | None, log) -> str | None:
+    """Which model the warm session should spawn with — cockpit-spec.md "Model dials & Fable
+    delegation": `state/model-config.json`'s `warm_model` WINS over the `--model` CLI flag, which is
+    the fallback/default. Called fresh at every warm-session SPAWN (not just process start), so a dial
+    change takes effect the next time the session naturally winds down and respawns; the cockpit's
+    "apply now" (a graceful restart) forces it promptly for an already-warm session. Tolerant: a
+    missing/corrupt config file or an unrecognized `warm_model` falls back to the CLI flag, logging
+    which source won either way (observability, not silent drift)."""
+    cfg = model_config.load(state_dir)
+    warm = cfg.get("warm_model")
+    if warm:
+        canon = model_config.canonical(warm)
+        if canon:
+            log(f"• warm model: {canon} (source: state/model-config.json)")
+            return canon
+        log(f"! model-config.json warm_model {warm!r} not recognized — falling back to --model")
+    if cli_model:
+        log(f"• warm model: {cli_model} (source: --model CLI flag)")
+    else:
+        log("• warm model: CLI default (no --model flag, no state/model-config.json warm_model)")
+    return cli_model
+
 
 # The warm session's first-turn grounding. Two token vocabularies live here:
 #   * identity tokens {assistant}/{owner}/{tz} — substituted ONCE at startup by
@@ -300,9 +399,13 @@ reminder ("took'em", "done", "did it", "already ate"), immediately `store-update
 status: done (for EVERY type — a plain ack means done FOR TODAY, not retired; the item still re-fires on
 its next cycle. Only set status: finished if they EXPLICITLY say they're FINISHED with the item, e.g.
 done-for-good, no more reminders), last_acknowledged: today, consecutive_misses: 0 — resolving the write
-through the active store's mapping (store/<backend>/mapping.md) per reminders-policy.md. Set those FIELDS
-directly; do NOT just flip the one-tap ack affordance (reminder slots consume and reset it, so it is not
-the durable record; last_acknowledged is what the EOD wrap counts). Then the next reminder slot
+through the active store's mapping (store/<backend>/mapping.md) per reminders-policy.md. On the notion
+backend, ALSO make the ack durable the way that mapping's Outbox section specifies: journal it first via
+`python seneschal/scripts/outbox.py ack --reminder-id <ref>` (idempotent — the write-behind outbox flushes
+it to the store even if this session winds down mid-write); filesystem backends write locally and
+atomically, so they skip the outbox. Set those FIELDS
+directly; do NOT just flip the one-tap ack affordance (reminder seeds consume and reset it, so it is not
+the durable record; last_acknowledged is what the EOD wrap counts). Then the next seeded nudge
 sees it acked and stops re-firing. AFTER the store write, also run
 scripts/reminders_dequeue.py --reminder-id <that reminder's ref>: I fire queued nudges by due_at and
 cannot read store acks, so that one call does two things — it pulls any obsolete nudge already staggered
@@ -322,7 +425,25 @@ seneschald-control.ps1 or otherwise kill the daemon from here — you are runnin
 synchronous restart kills you mid-reply, your answer never sends, and the daemon replays the request on
 every boot (a self-kill loop). Instead, finish your reply normally, then run (act-low)
 `python seneschal/scripts/request_restart.py`. The resident daemon reloads itself gracefully AFTER your reply
-is delivered — same effect as reseneschald, no dropped message. {thread}
+is delivered — same effect as reseneschald, no dropped message.
+Delegating to Fable: you ALWAYS own this conversation — delegation is a subprocess call-out, never a
+handoff. `python seneschal/scripts/fable_delegate.py "<task>"` runs a Fable-5 one-shot (seeded with recent
+thread context) and prints its answer for you to read and use in your own reply, still fully in
+character and still under the act-low/ask-high gate (an outbound/destructive result STILL drafts-and-
+holds — delegating never bypasses the approval gate). Use it when ANY of: (1) you see a
+"[router hint: ... FABLE-LEVEL ...]" line above a message — a hint only, your judgment governs; (2) your
+own judgment mid-turn — deep multi-factor synthesis, long-horizon planning, or hard multi-step debugging
+you'd plausibly do worse on than Fable would; (3) a "[force-fable: ...]" directive line above a message —
+that one is a MUST-delegate ({owner} typed `!fable` or ticked "Send to Fable" in the cockpit), bypassing
+the router classifier but never the gate. The script itself enforces the max-routable-model ceiling
+(`state/model-config.json`) and REFUSES with a clear message when the ceiling isn't Fable-tier — accept
+that gracefully: say so plainly to {owner} and handle the turn yourself, don't treat the refusal as a bug
+to route around.
+Oikonomos, the budget governor (`state/governor-config.json` + `scripts/governor.py`), sits behind
+Fable delegation too: `fable_delegate.py` may ALSO refuse on a daily/per-conversation Fable quota,
+delegation concurrency, or Fable's own token budget, each with a clear reason and when it resets — relay
+that refusal to {owner} honestly, exactly like the ceiling refusal, and never try to route around it or
+retry the call yourself. {thread}
 The owner just said: {msg}"""
 
 
@@ -368,6 +489,16 @@ def build_slots(identity, template: list | None = None) -> list:
     return slots
 
 
+def build_seed_prompt(identity, template: str | None = None) -> str:
+    """SEED_PROMPT_TEMPLATE with the identity tokens substituted — the seed's sibling of
+    build_slots. Like a slot prompt (and unlike the grounding), the rendered seed is handed to
+    `claude -p` verbatim and never .format()ed, so values go in RAW — no brace doubling."""
+    out = SEED_PROMPT_TEMPLATE if template is None else template
+    for token, value in _identity_tokens(identity).items():
+        out = out.replace(token, value)
+    return out
+
+
 def warn_tz_mismatch(identity, log) -> None:
     """Best-effort startup check: if identity.owner.timezone is set AND resolvable on this
     machine, compare its current UTC offset to the machine-local one and log ONE warning when
@@ -391,11 +522,12 @@ def warn_tz_mismatch(identity, log) -> None:
 
 
 # Loaded once at startup (import time). persona/identity.json is optional — load_identity()
-# never raises and yields the generic defaults when it's absent, so GROUNDING/SLOTS render
-# byte-identical to the pre-identity hardcoded prose on an unconfigured install.
+# never raises and yields the generic defaults when it's absent, so GROUNDING/SLOTS/SEED_PROMPT
+# render byte-identical to the pre-identity hardcoded prose on an unconfigured install.
 IDENTITY = load_identity()
 GROUNDING = _render_grounding(GROUNDING_TEMPLATE, IDENTITY)
 SLOTS = build_slots(IDENTITY)
+SEED_PROMPT = build_seed_prompt(IDENTITY)
 
 
 # --------------------------------------------------------------------------- thread continuity
@@ -447,6 +579,7 @@ def shadow_classify(state_dir: str, channel: str, text: str, log) -> None:
             "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "channel": channel,
             "text_preview": text[:80],
+            "arm": "triage",  # distinguishes this row from the fable arm's below (both share the log)
             "verdict": verdict.get("verdict"),
             "category": verdict.get("category"),
             "confidence": verdict.get("confidence"),
@@ -458,6 +591,92 @@ def shadow_classify(state_dir: str, channel: str, text: str, log) -> None:
             f"conf={row['confidence']} — escalating as usual")
     except Exception as e:  # noqa: BLE001 — shadow must never break a turn
         log(f"! router shadow classify skipped: {e}")
+
+
+FABLE_HINT_LINE = (
+    "[router hint: this message looks FABLE-LEVEL — deep synthesis / long-horizon planning / hard "
+    "multi-step debugging — consider delegating to Fable via fable_delegate.py if it genuinely "
+    "warrants it; this is a hint, your own judgment still governs]"
+)
+
+
+def fable_arm_classify(state_dir: str, channel: str, text: str, log) -> str | None:
+    """The router's **fable arm** (v3, cockpit-spec.md "Model dials & Fable delegation"): once the live
+    `max_routable_model` ceiling admits Fable, classify this inbound escalation standard vs fable-level
+    and log the verdict to router-log.jsonl (`arm: "fable"`, alongside the triage arm's rows above).
+
+    Unlike the triage arm, a "fable" verdict here is NOT purely observational: this returns a short hint
+    LINE (never a command) for the caller to queue onto `DaemonState.fable_hints`, which `drainer_task`
+    best-effort-attaches to the next prompt it builds. **The ceiling gate means this never even calls
+    Ollama when `max_routable_model` isn't Fable-tier** — "the fable arm doesn't even run" (ruling 4).
+    Fail-open throughout: any exception here just skips the hint, exactly like the triage arm above."""
+    try:
+        cfg = model_config.load(state_dir)
+        if not model_config.admits_fable(cfg.get("max_routable_model")):
+            return None
+        import router  # local, stdlib-only; imported lazily, same as shadow_classify
+        verdict = router.classify_fable(text)
+        row = {
+            "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "channel": channel,
+            "text_preview": text[:80],
+            "arm": "fable",
+            "verdict": verdict.get("verdict"),
+            "confidence": verdict.get("confidence"),
+            "reason": verdict.get("reason"),
+            "model": verdict.get("model"),
+        }
+        with open(router_log_path(state_dir), "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        log(f"• router (fable arm): {row['verdict']} conf={row['confidence']} — {row['reason']}")
+        if row["verdict"] == "fable":
+            return FABLE_HINT_LINE
+    except Exception as e:  # noqa: BLE001 — the fable arm must never break a turn either
+        log(f"! router fable-arm classify skipped: {e}")
+    return None
+
+
+# --------------------------------------------------------------------------- force-route (!fable)
+
+# A leading "!fable" (any case, an optional ":"/"," and whitespace after) on ANY inbound channel —
+# Telegram/Discord typed literally, or synthesized by cockpit_task.on_chat_send when the browser's
+# "Send to Fable" toggle (force_fable) is set — force-routes this turn. Bypasses the router classifier
+# entirely; NEVER the approval gate (cockpit-spec.md ruling 4 / GROUNDING's delegation section).
+FORCE_FABLE_PREFIX_RE = re.compile(r"^\s*!fable\b[:,]?\s*", re.IGNORECASE)
+FORCE_FABLE_TRIGGER = "!fable"
+
+FORCE_FABLE_DIRECTIVE = (
+    "[force-fable: the owner force-routed this turn (!fable / the cockpit's \"Send to Fable\" toggle) — you "
+    "MUST attempt to delegate it to Fable via fable_delegate.py. If the max-routable-model ceiling "
+    "refuses the call, accept that gracefully: say so plainly and handle the turn yourself. Force-route "
+    "bypasses the router classifier, never the approval gate — any outbound/destructive result from "
+    "the delegate's answer still drafts-and-holds.]"
+)
+
+
+def strip_force_fable(text: str) -> tuple[bool, str]:
+    """Detect + strip a leading `!fable` force-route prefix. Returns (forced, remaining_text) — pure and
+    unit-testable. Matches only a LEADING token (after any reply-to/attachment synthesis already ran),
+    so `!fable draft the Q3 plan` triggers but a `!fable` buried mid-sentence does not — the
+    deliberately narrow, unambiguous case."""
+    m = FORCE_FABLE_PREFIX_RE.match(text or "")
+    if not m:
+        return False, text or ""
+    return True, text[m.end():].strip()
+
+
+def apply_force_route(channel: str, text: str, log) -> str:
+    """If `text` carries the force-route prefix, strip it and replace it with the explicit MUST-delegate
+    directive the warm session's grounding tells it to honor (GROUNDING's delegation section) — a pure
+    text transform applied once at enqueue time (see `_enqueue_inbound`), so it needs no persisted-queue
+    schema change and survives a restart exactly like any other inbound text. A bare `!fable` with
+    nothing after it still produces a valid (if task-less) directive; the warm session can ask the
+    owner what they meant."""
+    forced, clean = strip_force_fable(text)
+    if not forced:
+        return text
+    log(f"• force-route: '!fable' detected on a {channel} message — directive injected")
+    return f"{FORCE_FABLE_DIRECTIVE}\n\n{clean}" if clean else FORCE_FABLE_DIRECTIVE
 
 
 def deliver_reply(channel: str, reply: str, args, log, retries: int = 1) -> bool:
@@ -474,6 +693,15 @@ def deliver_reply(channel: str, reply: str, args, log, retries: int = 1) -> bool
         log(f"[stub-send:{channel}] {reply[:80]!r}")
         return True
 
+    if channel == "cockpit":
+        # Cockpit-origin turns are "delivered" via the live transcript stream (chat.events teed to
+        # BOTH the ring buffer and the connected pipe client, in drainer_task) rather than a separate
+        # outbound push — there's no third-party API to call for a browser tab. Always succeeds so
+        # continuity (append_thread) records the reply and the durable queue pops it; a reconnecting
+        # cockpit backfills from state/warm-transcript.jsonl regardless of whether a client happened
+        # to be attached mid-turn — never lossy, matching every other cockpit-pipe failure mode.
+        return True
+
     def send_once() -> dict:
         if channel == "discord":
             return send_discord(reply, args.discord_env) or {}
@@ -482,6 +710,10 @@ def deliver_reply(channel: str, reply: str, args, log, retries: int = 1) -> bool
     for attempt in range(retries + 1):
         res = send_once()
         if res.get("ok"):
+            # Remember what this message was, so a reaction to it later has something to point at — a
+            # 👍 on "want me to send it?" only reads as "yes" if we know what the owner 👍'd.
+            if channel == "telegram":
+                record_sent_message(args.state_dir, res, "reply", reply)
             return True
         log(f"! {channel} send failed (attempt {attempt + 1}/{retries + 1}): {res.get('error')}")
         if attempt < retries:
@@ -581,12 +813,12 @@ class WarmSession:
     """One resident `claude` process in stream-json mode = a warm in-RAM session across turns."""
 
     def __init__(self, claude_bin: str, model: str | None, permission_mode: str, log,
-                 mcp_config: str | None = None):
+                 mcp_configs: list | None = None):
         self.claude_bin = claude_bin
         self.model = model
         self.permission_mode = permission_mode
         self.log = log
-        self.mcp_config = mcp_config
+        self.mcp_configs = mcp_configs or []  # Notion + Slack configs threaded into this session
         self.proc: subprocess.Popen | None = None
         self.session_id: str | None = None
         self.api_key_source: str | None = None
@@ -598,8 +830,8 @@ class WarmSession:
                "--output-format", "stream-json",
                "--verbose",
                "--permission-mode", self.permission_mode]
-        if self.mcp_config:
-            cmd += ["--mcp-config", self.mcp_config]
+        if self.mcp_configs:
+            cmd += ["--mcp-config", *self.mcp_configs]
         if self.model:
             cmd += ["--model", self.model]
         self.proc = subprocess.Popen(
@@ -608,11 +840,15 @@ class WarmSession:
             # Force UTF-8 both ways — claude's stream-json output is UTF-8; without this the daemon
             # decodes it with the Windows ANSI codepage (cp1252) and mangles —, emoji, etc. (mojibake).
             text=True, encoding="utf-8", errors="replace", bufsize=1,
-            creationflags=NO_WINDOW,  # a console child of the console-less daemon must not pop a window
+            creationflags=NO_WINDOW,
         )
 
-    def send(self, text: str) -> str | None:
-        """Send one user turn; return the assistant's reply text (or None if the session died)."""
+    def send(self, text: str, on_event=None) -> str | None:
+        """Send one user turn; return the assistant's reply text (or None if the session died). If given,
+        `on_event(ev)` is invoked for every parsed stream-json line (including `system`/`result`) —
+        the cockpit pipe's transcript tee hooks in here (see presence.drainer_task's `_make_stream_tee`).
+        Runs on a worker thread (drainer_task calls this via asyncio.to_thread), so `on_event` must be
+        thread-safe; a raising callback is swallowed — the read loop must never die because a tee did."""
         if not self.proc or self.proc.poll() is not None:
             return None
         line = json.dumps({"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": text}]}})
@@ -621,9 +857,9 @@ class WarmSession:
             self.proc.stdin.flush()
         except (BrokenPipeError, ValueError):
             return None
-        return self._read_until_result()
+        return self._read_until_result(on_event)
 
-    def _read_until_result(self) -> str | None:
+    def _read_until_result(self, on_event=None) -> str | None:
         for raw in self.proc.stdout:  # blocks line-by-line until this turn's result event
             raw = raw.strip()
             if not raw:
@@ -632,6 +868,11 @@ class WarmSession:
                 ev = json.loads(raw)
             except json.JSONDecodeError:
                 continue
+            if on_event is not None:
+                try:
+                    on_event(ev)
+                except Exception:  # noqa: BLE001 — a tee failure must never break the turn
+                    pass
             t = ev.get("type")
             if t == "system" and ev.get("subtype") == "init":
                 self.session_id = ev.get("session_id")
@@ -667,6 +908,7 @@ class StubWarmSession:
     def __init__(self, *_, log=lambda *_: None, **__):
         self.session_id = "stub-session"
         self.api_key_source = "none"
+        self.model = None
         self.turns = 0
         self.closed = False
 
@@ -674,9 +916,15 @@ class StubWarmSession:
         self.closed = False
         self.turns = 0
 
-    def send(self, text: str) -> str:
+    def send(self, text: str, on_event=None) -> str:
         self.turns += 1
-        return f"[stub reply #{self.turns} to: {text.splitlines()[-1][:50]}]"
+        reply = f"[stub reply #{self.turns} to: {text.splitlines()[-1][:50]}]"
+        if on_event is not None:
+            try:  # exercise the tee path in offline/test runs too, harmlessly
+                on_event({"type": "result", "is_error": False, "result": reply})
+            except Exception:  # noqa: BLE001
+                pass
+        return reply
 
     def close(self) -> None:
         self.closed = True
@@ -774,7 +1022,7 @@ def maybe_peek(state_dir: str, args, log, children: list | None = None,
     (built into an argv list — no shell quoting); falls back to a raw --watch-cmd string.
 
     Deferred while another headless run is in flight (`children`) OR the warm chat session is mid-turn
-    (`warm_busy`) so a peek's Notion reads never stampede in parallel with a slot's or a chat turn's;
+    (`warm_busy`) so a peek's store reads never stampede in parallel with a slot's or a chat turn's;
     a skipped peek just runs on the next loop once the cadence is still due. Chat is never delayed —
     only the peek waits. Also skipped — without consuming the cadence — while an interactive
     /assistant session is live (`sentinel.session_is_live`): a human is already looking, so the
@@ -784,8 +1032,8 @@ def maybe_peek(state_dir: str, args, log, children: list | None = None,
     if warm_busy or (children is not None and heavy_run_in_flight(children)):
         return False  # a chat turn or another headless run is active — don't add a second concurrent reader
     if session_is_live(state_dir, datetime.now(timezone.utc)):
-        return False  # a human is engaged in a live /assistant session — the peek is redundant; skip this
-                      # cycle (it resumes on the next cadence once the session ages out of the TTL)
+        return False  # a human is actively engaged in a live /assistant session — the peek is redundant; skip
+                      # this cycle (it resumes on the next cadence once the session ages out of the TTL)
     peek_file = os.path.join(state_dir, "last-peek")
     last = load_json(peek_file, None)
     now = datetime.now(timezone.utc)
@@ -804,14 +1052,14 @@ def maybe_peek(state_dir: str, args, log, children: list | None = None,
             wp = (f"{args.watch_prompt} (Authoritative current local date/time: {local_stamp()}, "
                   f"the owner's configured timezone — base every date on this, not a UTC clock.)")
             cmd = [args.claude_bin, "-p", wp, "--permission-mode", args.permission_mode]
-            if args.notion_mcp:
-                cmd += ["--mcp-config", args.notion_mcp]
+            cfgs = active_mcp_configs(args)
+            if cfgs:
+                cmd += ["--mcp-config", *cfgs]
             if args.watch_model:
                 cmd += ["--model", args.watch_model]
             proc = subprocess.Popen(cmd, cwd=REPO_ROOT, env=child_env(), creationflags=NO_WINDOW)
         else:
-            proc = subprocess.Popen(args.watch_cmd, shell=True, cwd=REPO_ROOT, env=child_env(),
-                                    creationflags=NO_WINDOW)
+            proc = subprocess.Popen(args.watch_cmd, shell=True, cwd=REPO_ROOT, env=child_env(), creationflags=NO_WINDOW)
         if children is not None:
             children.append(proc)
         log("• comms peek launched")
@@ -874,7 +1122,7 @@ def maybe_run_slots(state_dir: str, args, log, children: list | None = None,
     fired = load_json(path, {})
     if not isinstance(fired, dict):
         fired = {}
-    now_local = datetime.now()  # machine-local wall clock (the owner's configured timezone)
+    now_local = datetime.now()  # machine-local wall clock (assumed to match the owner's timezone)
     to_run, too_late = classify_slots(SLOTS, now_local, fired, args.slot_catchup_min)
     if not to_run and not too_late:
         return
@@ -894,8 +1142,9 @@ def maybe_run_slots(state_dir: str, args, log, children: list | None = None,
         prompt = (f"{s['prompt']} (Authoritative current local date/time: {stamp}, the owner's "
                   f"configured timezone — base every date on this, not a UTC clock.)")
         cmd = [args.claude_bin, "-p", prompt, "--permission-mode", args.permission_mode]
-        if args.notion_mcp:
-            cmd += ["--mcp-config", args.notion_mcp]
+        cfgs = active_mcp_configs(args)
+        if cfgs:
+            cmd += ["--mcp-config", *cfgs]
         if model:
             cmd += ["--model", model]
         try:
@@ -959,6 +1208,60 @@ def reap_finished_slots(slot_children: dict, state_dir: str, log, slot_retries: 
             log(f"! slot '{name}' run failed (exit {rc}) — retry {slot_retries[name]}/{max_retries} next loop")
 
 
+def maybe_seed_day(state_dir: str, args, log, children: list | None = None,
+                   warm_busy: bool = False, slot_children: dict | None = None) -> None:
+    """Spawn the once-per-local-day Reminders SEED run — the date-rollover trigger that retired the four
+    fixed reminder slots. Fires on the first tick of each new owner-local date (guarded by
+    ``slots.json[SEED_SLOT_NAME]``), NOT at a fixed HH:MM — so a machine asleep through midnight still
+    seeds on wake, with no ``classify_slots`` catch-up cliff that could silently skip the daily reset.
+
+    The seed reads the ⏰ tracker, runs the daily reset, and queues every due row's exact-time nudges for
+    the day (``reminders_seed.py``); the ~5 s delivery tick then fires each at its due minute. Reuses the
+    slot lifecycle: the run is registered in ``slot_children`` under ``SEED_SLOT_NAME`` and
+    ``reap_finished_slots`` stamps it only on a clean exit (retrying a crashed seed, giving up after
+    ``SLOT_MAX_RETRIES``). Held while the warm chat session is mid-turn or another headless run is in
+    flight — its store read-burst must not overlap — exactly like ``maybe_run_slots``; a deferred seed
+    stays unstamped and retries next loop.
+
+    Unlike slot fire-TIMES (machine-local by design), the rollover is DATE logic, so it follows the
+    owner's calendar via ``local_now()`` (rule 5 — tz_common when configured, machine-local fallback)."""
+    if args.no_slots or getattr(args, "no_seed_day", False) or args.stub_brain or args.fake_inbox is not None:
+        return
+    if warm_busy:
+        return  # warm chat mid-turn — hold the seed so its reads don't overlap chat's; retry next loop
+    if slot_children is not None and SEED_SLOT_NAME in slot_children:
+        return  # already running
+    now_local = local_now()  # owner-tz date — the rollover trigger follows the owner's calendar (rule 5)
+    today = now_local.strftime("%Y-%m-%d")
+    fired = load_json(os.path.join(state_dir, "slots.json"), {})
+    if not isinstance(fired, dict):
+        fired = {}
+    if fired.get(SEED_SLOT_NAME) == today:
+        return  # already seeded this local day (reap_finished_slots stamped it on the seed's clean exit)
+    if children is not None and heavy_run_in_flight(children):
+        log(f"• seed '{SEED_SLOT_NAME}' deferred (another headless run in flight) — retries next loop")
+        return
+    model = args.slot_model or args.model
+    stamp = local_stamp()
+    prompt = (f"{SEED_PROMPT} (Authoritative current local date/time: {stamp}, the owner's configured "
+              f"timezone — base every date on this, not a UTC clock.)")
+    cmd = [args.claude_bin, "-p", prompt, "--permission-mode", args.permission_mode]
+    cfgs = active_mcp_configs(args)
+    if cfgs:
+        cmd += ["--mcp-config", *cfgs]
+    if model:
+        cmd += ["--model", model]
+    try:
+        proc = subprocess.Popen(cmd, cwd=REPO_ROOT, env=child_env(), creationflags=NO_WINDOW)
+        if children is not None:
+            children.append(proc)
+        if slot_children is not None:
+            slot_children[SEED_SLOT_NAME] = proc  # reaped on exit — stamped only if it finishes clean
+        log(f"• seed '{SEED_SLOT_NAME}' launched (day rollover → {today})")
+    except Exception as e:  # noqa: BLE001
+        log(f"! seed '{SEED_SLOT_NAME}' launch failed: {e}")
+
+
 def maybe_refill_rolls(state_dir: str, log, now_local: datetime | None = None) -> None:
     """Regenerate standing every-N-hours reminder rolls (reminders_roll.py) at most once per local
     day, stamped in ``rolls.json``. Pure-local queue math (no Notion, no spawn), so it runs regardless
@@ -987,7 +1290,201 @@ def next_messages(args, fake_queue: list) -> dict:
     if args.fake_inbox is not None:
         batch = fake_queue.pop(0) if fake_queue else []
         return {"ok": True, "messages": batch}
-    return poll_telegram(args.telegram_env, args.state_dir, commit=True, timeout=args.poll_timeout)
+    return poll_telegram(args.telegram_env, args.state_dir, commit=True, timeout=args.poll_timeout,
+                         download_dir=os.path.join(args.state_dir, TELEGRAM_INBOX_DIR))
+
+
+# The owner's default reaction vocabulary. Overridable per-machine via state/telegram-reactions.json
+# (seed: the .example); these are the fallback so the feature works with no config at all.
+#
+# Several emoji per intent on purpose. Telegram only lets you react with emoji from its own allowed set
+# (the Bot API's ReactionTypeEmoji list), and the natural picks for snooze/hold/elaborate — ⏰ 🤚 ❔ — are
+# verifiably NOT in it, so the picker will never offer them. They're kept (harmless, and they record the
+# intended meaning); the in-set aliases beside each are the ones that can actually fire.
+DEFAULT_REACTION_INTENTS = {
+    "👍": "ack",                                             # yes / confirm / accept
+    "❤": "liked",                                            # warmth about the reply itself — no action
+    "👎": "reject",                                           # no / drop a held draft / don't accept
+    "⏰": "snooze", "😴": "snooze", "🥱": "snooze",             # more time; on a nudge, snooze it
+    "🤚": "hold", "🤝": "hold", "🙏": "hold",                   # wait >= 1 day, don't resurface unless asked
+    "❔": "elaborate", "✍": "elaborate", "🤔": "elaborate",     # explain / tell me more
+}
+REACTION_DEFAULT_INTENT = "note"  # anything unmapped: thread as context, take no action
+REACTIONS_CONFIG = "telegram-reactions.json"
+QUOTE_CHARS = 300  # how much of a reacted-to message we quote back
+
+
+def _norm_emoji(e: str) -> str:
+    """Drop the variation selector so ❤ and ❤️ are the same key — Telegram is inconsistent about it, and
+    a mapping that silently missed on an invisible codepoint would be a miserable thing to debug."""
+    return (e or "").replace("️", "").replace("︎", "")
+
+
+def load_reaction_intents(state_dir: str) -> dict:
+    """The emoji → intent map, the owner's to edit. Fail-open to the defaults on absent/broken config."""
+    data = load_json(os.path.join(state_dir, REACTIONS_CONFIG), None)
+    table = (data or {}).get("reactions") if isinstance(data, dict) else None
+    if not isinstance(table, dict) or not table:
+        return {_norm_emoji(k): v for k, v in DEFAULT_REACTION_INTENTS.items()}
+    return {_norm_emoji(k): v for k, v in table.items() if isinstance(v, str)}
+
+
+def reaction_context(state_dir: str) -> dict:
+    """Loaded once per poll batch (only when a reaction is actually in it), not once per message."""
+    return {"intents": load_reaction_intents(state_dir), "sent": load_message_map(state_dir)}
+
+
+def _truncate(s: str, cap: int = QUOTE_CHARS) -> str:
+    s = (s or "").strip()
+    return s if len(s) <= cap else s[:cap].rstrip() + "…"
+
+
+def reaction_intent(m: dict, ctx: dict | None) -> str:
+    intents = (ctx or {}).get("intents") or {_norm_emoji(k): v for k, v in DEFAULT_REACTION_INTENTS.items()}
+    return intents.get(_norm_emoji(m.get("emoji") or ""), REACTION_DEFAULT_INTENT)
+
+
+def ackable_nudge(m: dict, ctx: dict | None, now: datetime | None = None) -> str | None:
+    """The ⏰ row id a reaction should ack on its own, or None to leave it to the warm session.
+
+    Phase B's whole safety story is in this predicate, so it is deliberately narrow. ALL of:
+      * the intent maps to `ack`;
+      * the reacted-to message is a **tracked nudge** carrying a `reminder_id` (not a chat reply — a 👍
+        on a question is a judgment call and belongs to the LLM tier, per §3.4B);
+      * that nudge went out **today, local**.
+
+    The day gate is the one that matters. Reminder rows reset daily and an ack stamps *today's* date, so
+    a 👍 on yesterday's nudge would mark today Done — for meds, that is exactly the failure that must not
+    happen. Anything that doesn't clear all three is observe-only: the warm session reads it and decides.
+    Failing to auto-ack costs a little manual work; auto-acking wrongly costs the owner a dose."""
+    if reaction_intent(m, ctx) != "ack":
+        return None
+    sent = ((ctx or {}).get("sent") or {}).get(str(m.get("message_id"))) or {}
+    if sent.get("kind") != "nudge" or not sent.get("reminder_id"):
+        return None
+    try:
+        if ra.local_today(parse_iso(sent["sent_at"])) != ra.local_today(now):
+            return None
+    except Exception:  # noqa: BLE001 — anything unreadable here means we can't PROVE it's today's
+        return None    # nudge, and "don't act" is the safe side of that doubt
+    return sent["reminder_id"]
+
+
+def ack_reminder_by_reaction(state_dir: str, reminder_id: str, log) -> bool:
+    """Run the normal ack path for a 👍'd nudge: drop the obsolete re-nudges (+ record the durable local
+    ack) and — on the **notion** backend only — journal the store `done` write to the write-behind
+    outbox for the next LLM turn to flush.
+
+    Exactly what the chat ack path does — deliberately the same calls rather than a private shortcut,
+    so this can't drift from it. Act-low: it's the owner's own reminder, their own content. All calls
+    are idempotent, so a warm session that acks again on top of this is harmless.
+
+    The outbox leg is gated on ``store_backend_active() == "notion"`` because the outbox is a
+    Notion-only mechanism (store/notion/mapping.md, 'Outbox — durable act-low writes'): filesystem
+    backends (obsidian/markdown) write locally/atomically and never touch it. On those backends the
+    dequeue leg still records the ack to the durable local ledger (state/acks.json) — the fire path's
+    gate — and this returns **False** so the reaction line asks the warm session to perform the
+    `store-update` itself (acks persist to the store, never just to chat; the calls are idempotent,
+    so the belt-and-suspenders overlap is harmless)."""
+    cmds = [
+        ([sys.executable, os.path.join(SCRIPT_DIR, "reminders_dequeue.py"),
+          "--reminder-id", reminder_id, "--state-dir", state_dir], "dequeue"),
+    ]
+    backend = store_backend_active()
+    store_write_journaled = backend == "notion"
+    if store_write_journaled:
+        cmds.append(([sys.executable, os.path.join(SCRIPT_DIR, "outbox.py"), "--state-dir", state_dir,
+                      "ack", "--reminder-id", reminder_id], "outbox"))
+    else:
+        log(f"• reaction-ack: outbox skipped (store backend {backend!r}) — local ledger recorded; "
+            "the warm session performs the store-update")
+    ok = True
+    for cmd, label in cmds:
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30, creationflags=NO_WINDOW)
+            if proc.returncode != 0:
+                ok = False
+                log(f"! reaction-ack {label} failed ({proc.returncode}): {proc.stderr.strip()[:160]}")
+        except Exception as e:  # noqa: BLE001 — a failed ack must not take the daemon down
+            ok = False
+            log(f"! reaction-ack {label} errored: {e}")
+    return ok and store_write_journaled
+
+
+def _reaction_line(m: dict, ctx: dict | None, acked: bool = False) -> str:
+    """What the warm session reads when the owner reacts to one of the assistant's messages.
+
+    Observe-first: this NAMES the intent and quotes what they reacted to, then lets the warm session
+    act in context. The daemon interprets nothing here — the single automated path (Phase B) is the
+    reminder ack, and when it has already run, the line says so, so the assistant acknowledges the
+    owner instead of re-acking."""
+    emoji = m.get("emoji") or "?"
+    intent = reaction_intent(m, ctx)
+    sent = ((ctx or {}).get("sent") or {}).get(str(m.get("message_id"))) or {}
+    quoted = _truncate(sent.get("text", ""))
+    # Beyond the map's window, or sent before this feature existed.
+    target = f'to: "{quoted}"' if quoted else "to an earlier message"
+    line = f"[the owner reacted {emoji} (= {intent}) {target}"
+    if acked:
+        line += " — I've already run the ack for you (⏰ row marked Done, re-nudges dropped); no need to repeat it"
+    return line + "]"
+
+
+def _human_size(n) -> str:
+    """Bytes as a short human string for an attachment descriptor."""
+    if not isinstance(n, (int, float)) or n <= 0:
+        return "unknown size"
+    for unit in ("B", "KB", "MB"):
+        if n < 1024:
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024.0
+    return f"{n:.1f} GB"
+
+
+def telegram_inbound_text(m: dict, ctx: dict | None = None, acked: bool = False) -> str:
+    """The line the warm session sees for one inbound message.
+
+    Plain text passes through untouched. An attachment becomes a synthesized descriptor — where the file
+    landed, or why it didn't — plus any caption, so a file the owner sends is something the assistant can
+    actually open and answer. Before this, a message with no `text` reached the warm session as an empty
+    string and was dropped on the floor: that's how an inbound export zip once looked ignored. A
+    swipe-reply carries what the owner is replying to, so they never have to restate it. A reaction names
+    its intent and quotes what they reacted to (`ctx` = reaction_context(), loaded once per batch).
+
+    The daemon describes; it never decides. It runs no tool on an inbound file and writes no canned
+    apology — the warm session reads the descriptor and responds in the assistant's own voice."""
+    if m.get("kind") == "reaction":
+        return _reaction_line(m, ctx, acked)
+    line = _attachment_or_text(m)
+    reply_to = (m.get("reply_to") or "").strip()
+    # An empty line is dropped by telegram_task, so don't let a bare reply-prefix stand in for a message.
+    if reply_to and line:
+        return f'(replying to: "{reply_to}") {line}'
+    return line
+
+
+def _attachment_or_text(m: dict) -> str:
+    """The message body itself — the owner's text, or a descriptor of the file they sent."""
+    text = (m.get("text") or "").strip()
+    att = m.get("attachment")
+    if att is None:  # `is None`, not falsy: an empty record still means a file was there to describe
+        return text
+    kind = att.get("kind") or "file"
+    # The name is the sender's string and it's about to be read by an LLM, so it goes through the same
+    # scrub as the write path (drops brackets/newlines that could dress themselves up as instructions).
+    # A photo carries no name at all — say "photo", not `photo "photo"`.
+    name = safe_filename(att.get("file_name"), "")
+    desc = f'{kind} "{name}"' if name else kind
+    if att.get("too_large"):
+        body = (f"[attachment: {desc} ({_human_size(att.get('file_size'))}) NOT downloaded — over "
+                f"Telegram's ~20 MB bot-API limit; they'd need to drop it on the machine instead]")
+    elif att.get("local_path"):
+        body = f"[attachment: {desc} saved to {att['local_path']}]"
+    else:
+        body = f"[attachment: {desc} — download failed ({att.get('error') or 'unknown error'})]"
+    # A caption rides with the file; `text` is empty on a media message, but keep it if both ever appear.
+    trailer = " ".join(p for p in ((m.get("caption") or "").strip(), text) if p)
+    return f"{body} {trailer}".strip()
 
 
 # --------------------------------------------------------------------------- reactive core (asyncio)
@@ -1009,9 +1506,18 @@ class DaemonState:
         self.slot_retries: dict = {}         # name -> failed-exit count today
         self.control_pending = False         # a defer-until-idle control is waiting to apply
         self.pending_action: str | None = None  # 'restart' | 'shutdown' once a control is applied
+        self.just_started = True             # cleared by the first non-empty poll — gates the backlog ack
         self.crashed = False                 # a task died unexpectedly — exit non-zero so the task
                                              # scheduler's restart-on-failure brings us back
         self.iterations = 0                  # telegram poll cycles (bounds test runs)
+        self.cockpit_hub = None               # cockpit_pipe.PipeHub — the sole pipe client, set by
+                                              # cockpit_task; None whenever the pipe is disabled/down
+        self.loop = None                      # the running event loop, set once in main_async — lets a
+                                              # worker-thread tee (the warm session's stdout reader)
+                                              # hand a broadcast back onto the loop via call_soon_threadsafe
+        self.fable_hints: list = []            # v3: router fable-arm hint LINES awaiting a prompt to ride
+                                              # into (FIFO, best-effort — see fable_arm_classify /
+                                              # drainer_task; never persisted, purely advisory)
 
     def warm_busy(self) -> bool:
         """Mid-conversation, for the peek/slot gates: a send in flight OR anything queued. Queued with
@@ -1025,6 +1531,129 @@ class DaemonState:
         """True when a defer-until-idle control may apply: session wound down, nothing queued,
         nothing mid-turn."""
         return self.session is None and not self.pending and not self.session_busy
+
+
+# --------------------------------------------------------------------------- cockpit pipe wiring
+#
+# Small glue between the reactive core's DaemonState and cockpit_pipe.py's transport-agnostic
+# PipeHub/ring-buffer/inbox helpers (see cockpit_task, below, and seneschal/docs/cockpit-spec.md). Every
+# function here is fail-open: a cockpit push/tee failure is logged and swallowed, never raised into
+# the chat loop or reminder firing (asyncio-daemon-design.md's non-negotiable invariant for this task).
+
+def _status_snapshot(state: DaemonState, args) -> dict:
+    """The daemon's own view of itself for the cockpit pipe's status frames / status.get replies —
+    turn-in-flight, warm-session up/down, current model, inbound queue depth. Cheap and side-effect
+    free; called both on push (state-change points below) and on-demand (a fresh cockpit connection's
+    status.get, handled inside PipeHub).
+
+    `model` prefers the LIVE session's own model (set at spawn by `resolve_warm_model`); when no session
+    is up (idle), it falls back to a fresh (tolerant, cheap) read of `state/model-config.json`'s
+    `warm_model` — so the cockpit's dial badge stays honest even while idle — and only then to the
+    `--model` CLI flag, matching `resolve_warm_model`'s own precedence (cockpit-spec.md v3: "the status
+    frame ... carr[ies] the active warm model")."""
+    model = getattr(state.session, "model", None)
+    if not model:
+        model = model_config.canonical(model_config.load(args.state_dir).get("warm_model") or "") or args.model
+    return {
+        "session_up": state.session is not None,
+        "turn_in_flight": state.session_busy,
+        "model": model,
+        "queue_depth": len(state.pending),
+    }
+
+
+def _push_cockpit_status(state: DaemonState, args) -> None:
+    """Best-effort push of a status frame to the connected cockpit client (a silent no-op if none is
+    connected — see PipeHub.broadcast). EVENT-LOOP callers only — a worker thread must not touch
+    state.cockpit_hub's asyncio.Queue directly; there is no thread-safe status push because every
+    status-change call site in this module already runs on the loop."""
+    hub = state.cockpit_hub
+    if hub is None:
+        return
+    try:
+        hub.broadcast(cockpit_pipe.status_frame(**_status_snapshot(state, args)))
+    except Exception:  # noqa: BLE001 — a cockpit push must never affect the chat loop
+        pass
+
+
+def _tee_chat_event(state: DaemonState, args, log, event: dict) -> None:
+    """Fan a digestible chat.event out to BOTH the ring buffer (always — so a reconnecting cockpit can
+    backfill) and the live pipe client (best-effort). EVENT-LOOP callers only; see
+    `_tee_chat_event_threadsafe` for the worker-thread sibling used inside the warm session's blocking
+    stdout reader."""
+    try:
+        cockpit_pipe.append_transcript_event(args.state_dir, event)
+    except Exception as e:  # noqa: BLE001 — fail-open: a tee failure must never break a chat turn
+        log(f"! cockpit transcript tee failed: {e}")
+    hub = state.cockpit_hub
+    if hub is not None:
+        try:
+            hub.broadcast(event)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _tee_chat_event_threadsafe(state: DaemonState, args, log, event: dict) -> None:
+    """Thread-safe sibling of `_tee_chat_event` — safe to call from inside asyncio.to_thread (the warm
+    session's blocking stdout reader lives on a worker thread). The ring-buffer append is plain,
+    lock-guarded file I/O (fine from any thread); the live broadcast hops back onto the event loop via
+    PipeHub.broadcast_threadsafe."""
+    try:
+        cockpit_pipe.append_transcript_event(args.state_dir, event)
+    except Exception as e:  # noqa: BLE001
+        log(f"! cockpit transcript tee failed: {e}")
+    hub = state.cockpit_hub
+    if hub is not None:
+        hub.broadcast_threadsafe(event, state.loop)
+
+
+def _governor_meter_turn_usage(args, log, model: str | None, usage) -> None:
+    """Oikonomos (order 15, advisor-chain.md): meter one turn's token spend into the governed ledger and
+    self-push at most one Telegram line per knob per ALERT_REALERT_HOURS when a rail's alert-at-%
+    crosses. `usage` is whatever the claude-CLI's terminal `result` event supplied (cockpit_pipe.
+    build_chat_event_from_stream forwards it verbatim, optional) — summed across every token-count field
+    it carries so a cache-heavy turn still meters its real cost. Fail-open throughout: a governor hiccup
+    must never break a chat turn, so every step here is best-effort (same posture as the cockpit
+    transcript tee just above)."""
+    if not isinstance(usage, dict):
+        return
+    tokens = 0
+    for key in ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"):
+        val = usage.get(key)
+        if isinstance(val, (int, float)) and not isinstance(val, bool):
+            tokens += val
+    if tokens <= 0:
+        return
+    model_key = model or "unknown"
+    try:
+        governor.append_spend(args.state_dir, "tokens", model=model_key, tokens=int(tokens))
+        for alert in governor.due_alerts(args.state_dir, model_key):
+            res = send_telegram(alert["text"], args.telegram_env)
+            if res and res.get("ok"):
+                governor.record_alert_sent(args.state_dir, alert["knob"])
+    except Exception as e:  # noqa: BLE001 — fail-open: metering must never break a chat turn
+        log(f"! governor turn-usage metering failed: {e}")
+
+
+def _make_stream_tee(state: DaemonState, args, log, channel: str, turn_id: str):
+    """Build the `on_event` callback handed to WarmSession.send() for one turn: converts each raw
+    claude-CLI stream-json line into a digestible chat.event (dropping the uninteresting ones — see
+    cockpit_pipe.build_chat_event_from_stream), stamps it with `turn_id` (the SAME id the turn_started
+    event carries — see drainer_task), and tees it. Since the protocol itself carries no turn
+    correlator, `turn_id` is what lets the cockpit chat pane group turn_started/assistant_output/
+    tool_use/turn_done events into one turn without relying on the (also-true, but implicit) fact that
+    chat turns are strictly serialized. Runs on the worker thread reading the session's stdout, so it
+    uses the thread-safe tee sibling throughout — including the governor metering below, which does its
+    own (blocking-but-off-the-event-loop) Telegram send on an alert."""
+    def _on_event(ev: dict) -> None:
+        model = getattr(state.session, "model", None) or args.model
+        chat_ev = cockpit_pipe.build_chat_event_from_stream(ev, source=channel, model=model)
+        if chat_ev is not None:
+            chat_ev["turn_id"] = turn_id
+            _tee_chat_event_threadsafe(state, args, log, chat_ev)
+            if chat_ev.get("kind") == "turn_done":
+                _governor_meter_turn_usage(args, log, model, chat_ev.get("usage"))
+    return _on_event
 
 
 async def _sleep_or_stop(state: DaemonState, seconds: float) -> None:
@@ -1054,10 +1683,17 @@ async def _wait_pending_or_stop(state: DaemonState, seconds: float) -> None:
 
 async def _enqueue_inbound(state: DaemonState, args, log, new_inbound: list) -> None:
     """Take messages that are already consumed off the wire (offset committed) into the durable action
-    queue. Thread-append + Router shadow happen here, once per message — NOT in the drainer's retry
-    path, or a message that fails delivery would be re-appended/re-classified on every retry."""
+    queue. Force-route (!fable) detection, thread-append, + Router shadow all happen here, once per
+    message — NOT in the drainer's retry path, or a message that fails delivery would be re-appended/
+    re-classified/re-force-routed on every retry."""
     if not new_inbound:
         return
+    # Force-route is a pure, synchronous text transform (a regex match) — cheap enough to run inline,
+    # before persisting, so the directive is baked into the SAME text that gets threaded/queued/retried
+    # (no persisted-queue schema change, survives a restart for free). Unlike the classifiers below, this
+    # never touches Ollama, so it can't reintroduce the "persist first" latency concern that motivates
+    # deferring classification until after the save.
+    new_inbound = [(ch, apply_force_route(ch, t, log), a) for ch, t, a in new_inbound]
     # Persist + wake the drainer FIRST: the wire offset is already committed, so until this save lands
     # a hard kill silently loses the batch. The (slow — seconds on a cold Ollama) shadow classification
     # happens after, and the drainer can already be mid-turn while it runs.
@@ -1066,29 +1702,84 @@ async def _enqueue_inbound(state: DaemonState, args, log, new_inbound: list) -> 
     state.pending.extend(new_inbound)
     save_daemon_state(args.state_dir, state.pending, getattr(state.session, "session_id", None))
     state.pending_event.set()
+    _push_cockpit_status(state, args)  # queue depth changed — cheap, best-effort, event-loop call site
     if args.router_mode != "off":
         for ch, t, _ in new_inbound:
             # Shadow only (phase 1): classify + log, zero behavior change. In a thread because a cold
             # Ollama can take seconds, and inbound intake must never stall the loop.
             await asyncio.to_thread(shadow_classify, args.state_dir, ch, t, log)
+            # The fable arm (v3): gated on the LIVE ceiling inside fable_arm_classify itself (never
+            # calls Ollama when max_routable_model isn't Fable-tier). A "fable" verdict queues a hint
+            # LINE that drainer_task best-effort-attaches to the next prompt it builds — FIFO, advisory
+            # only, never persisted (losing the race just means no hint, never a broken turn).
+            hint = await asyncio.to_thread(fable_arm_classify, args.state_dir, ch, t, log)
+            if hint:
+                state.fable_hints.append(hint)
+
+
+async def _inbound_lines(args, log, msgs: list) -> list:
+    """Turn a fetched batch into the lines the warm session will read, running Phase B's nudge-ack on
+    the way through.
+
+    The reaction config + sent-message map are read only when a reaction is actually in the batch, so
+    the overwhelmingly common text-only poll touches no extra files. The ack itself is two short
+    subprocesses, so it goes to a thread — inbound intake must never stall the loop."""
+    if not any(m.get("kind") == "reaction" for m in msgs):
+        return [telegram_inbound_text(m) for m in msgs]
+    ctx = reaction_context(args.state_dir)
+    lines = []
+    for m in msgs:
+        acked = False
+        reminder_id = ackable_nudge(m, ctx)
+        if reminder_id:
+            acked = await asyncio.to_thread(ack_reminder_by_reaction, args.state_dir, reminder_id, log)
+            log(f"reaction-ack {'ok' if acked else 'FAILED'} for ⏰ {reminder_id}")
+        lines.append(telegram_inbound_text(m, ctx, acked))
+    return lines
+
+
+async def _maybe_backlog_ack(state: DaemonState, args, log, messages: list) -> None:
+    """On the FIRST non-empty poll after (re)start, if a burst is waiting, say so before answering it.
+
+    Seen for real: after a `reseneschald` the daemon drains a backlog serially and quietly, so from the
+    owner's side only the first reply appears and the rest look lost — they re-forward everything. One
+    line up front costs a send and buys the knowledge that the batch landed. Then it's answered in order.
+
+    Deliberately narrow: only right after a cold start, only on a burst (N >= 2), never on the
+    steady-state single-message path — no chatter in normal use. Act-low (the owner's own content, their
+    own chat) and best-effort: a failed ack must not cost us the backlog it was announcing."""
+    if not state.just_started or not messages:
+        return
+    state.just_started = False  # first non-empty poll is the only shot, ack or not
+    if len(messages) < 2:
+        return
+    line = f"Back up — got your {len(messages)} messages, working through them now."
+    if not await asyncio.to_thread(deliver_reply, "telegram", line, args, log):
+        log("! backlog ack send failed — answering the backlog anyway")
+        return
+    append_thread(args.state_dir, "assistant", line)
 
 
 async def telegram_task(state: DaemonState, args, fake_queue: list, log) -> None:
     """Inbound Telegram: long-poll (blocking, in a worker thread), enqueue, repeat. The long-poll is
     the reason this is its own task — it no longer paces anything else. While a control is waiting to
     apply, the poll window drops to 2 s so a graceful reload lands promptly after the owner stops typing."""
+    inbox = os.path.join(args.state_dir, TELEGRAM_INBOX_DIR)
     while not state.stop.is_set():
         if args.fake_inbox is not None:
             res = next_messages(args, fake_queue)
         else:
             timeout = 2 if state.control_pending else args.poll_timeout
-            res = await asyncio.to_thread(poll_telegram, args.telegram_env, args.state_dir, True, timeout)
+            res = await asyncio.to_thread(poll_telegram, args.telegram_env, args.state_dir, True,
+                                          timeout, inbox)
         # Even if stop was set while we were parked on the wire, PROCESS the result first — the poll
         # already committed the offset for anything it fetched, so skipping here would lose messages.
         # Enqueued-but-unanswered items are persisted and the successor picks them up (invariant 1).
         if res.get("ok"):
-            new_inbound = [("telegram", (m.get("text") or "").strip(), 0)
-                           for m in res.get("messages", []) if (m.get("text") or "").strip()]
+            msgs = res.get("messages", [])
+            await _maybe_backlog_ack(state, args, log, msgs)
+            new_inbound = [("telegram", t, 0)
+                           for t in await _inbound_lines(args, log, msgs) if t]
             await _enqueue_inbound(state, args, log, new_inbound)
         else:
             log(f"! telegram poll: {res.get('error')}")
@@ -1166,6 +1857,8 @@ async def drainer_task(state: DaemonState, args, log, make_session, idle_sec: fl
                     log("• winding down idle warm session")
                     await asyncio.to_thread(state.session.close)
                     state.session = None
+                    clear_session_heartbeat(args.state_dir)  # session no longer live — reminders resume
+                    _push_cockpit_status(state, args)  # session_up flipped false — tell the cockpit
                     continue
                 await _wait_pending_or_stop(state, min(5.0, max(0.1, limit - quiet)))
             else:
@@ -1191,23 +1884,48 @@ async def drainer_task(state: DaemonState, args, log, make_session, idle_sec: fl
         attempts += 1
         state.pending[0] = (channel, text, attempts)
         save_daemon_state(args.state_dir, state.pending, getattr(state.session, "session_id", None))
+        # v3: best-effort attach one pending router fable-arm hint (if any arrived in time — see
+        # fable_arm_classify / _enqueue_inbound) to THIS turn's prompt only. Deliberately a LOCAL var,
+        # not written back to state.pending[0] — the persisted/retry text (and the delivery-failure
+        # requeue comparison below) must stay the hint-free original, so a retry doesn't duplicate or
+        # go stale on a hint meant for the first attempt.
+        prompt_text = f"{state.fable_hints.pop(0)}\n\n{text}" if state.fable_hints else text
         if state.session is None:
             state.session = make_session()
             await asyncio.to_thread(state.session.start)
             prompt = GROUNDING.format(channel=channel.capitalize(), now=local_stamp(),
-                                      thread=thread_tail(args.state_dir), msg=text)
+                                      thread=thread_tail(args.state_dir), msg=prompt_text)
         else:
             # Refresh the clock every turn — a warm session only saw the date once, at grounding,
             # so a long-lived one would drift across midnight.
             prompt = (f"(For reference, the authoritative current local time is {local_stamp()} "
-                      f"— the owner's configured timezone.)\n\n{text}")
+                      f"— the owner's configured timezone.)\n\n{prompt_text}")
+        # Register this warm session in the session registry as a LIVE interactive session so the
+        # scheduler's reminder-fire and Watch-peek gates defer noise into it (defer, never drop — see
+        # sentinel.session_is_live). Refreshed every turn (entry `state/sessions/daemon.json`); cleared
+        # on idle wind-down and otherwise aged out by SESSION_TTL_SEC.
+        write_session_heartbeat(args.state_dir, "daemon", phase="active",
+                                working_on="warm chat with the owner (Telegram/Discord)")
+        # Cockpit transcript tee (seneschal/docs/cockpit-spec.md "The daemon pipe"): a turn_started marker
+        # now, then a per-event tee for the duration of the turn (via on_event, below), then turn_done
+        # falls out of the `result` stream event itself — one code path covers Telegram/Discord/cockpit
+        # turns alike, since the cockpit is just a third `channel`. Fail-open throughout; a tee/push
+        # failure here must never affect the turn itself.
+        model_name = getattr(state.session, "model", None) or args.model
+        turn_id = uuid.uuid4().hex[:12]  # correlates turn_started/assistant_output/tool_use/turn_done
+                                        # for the cockpit chat pane — the protocol carries no other link
+        _tee_chat_event(state, args, log, cockpit_pipe.chat_event(
+            "turn_started", source=channel, model=model_name, text_preview=text[:200], turn_id=turn_id))
         state.session_busy = True
+        _push_cockpit_status(state, args)  # push AFTER flipping busy, so this snapshot says in-flight
         try:
             # The send blocks a worker thread on the child's stdout until this turn's result event —
             # the event loop stays free, so reminders/polls/controls keep running underneath.
-            reply = await asyncio.to_thread(state.session.send, prompt)
+            on_event = _make_stream_tee(state, args, log, channel, turn_id)
+            reply = await asyncio.to_thread(state.session.send, prompt, on_event=on_event)
         finally:
             state.session_busy = False
+        _push_cockpit_status(state, args)
         if reply is None:  # session died/errored — reset and apologize
             try:
                 await asyncio.to_thread(state.session.close)
@@ -1271,7 +1989,45 @@ async def scheduler_task(state: DaemonState, args, log) -> None:
         if not args.no_slots:
             maybe_run_slots(args.state_dir, args, log, state.headless_children, warm_busy,
                             slot_children=state.slot_children)
+            # The once-per-local-day exact-time reminder seed (retired the four fixed reminder slots).
+            # Called after maybe_run_slots so, in a contended tick, a just-launched slot's in-flight
+            # marker defers the seed (and vice-versa) — the two never spawn overlapping Notion bursts.
+            maybe_seed_day(args.state_dir, args, log, state.headless_children, warm_busy,
+                           slot_children=state.slot_children)
+        await _drain_cockpit_inbox(state, args, log)
         await _sleep_or_stop(state, args.tick_sec)
+
+
+def _cockpit_inbox_text(it: dict) -> str:
+    """One fallback-inbox item -> the text `_enqueue_inbound` should see, honoring `force_fable` (v3)
+    exactly like the live-pipe path (`cockpit_task.on_chat_send`) — the SAME `!fable` synthesis so
+    `apply_force_route`'s single detection point covers both the live pipe and this degraded fallback."""
+    text = (it.get("text") or "").strip()
+    if not text:
+        return ""
+    if it.get("force_fable") and not strip_force_fable(text)[0]:
+        text = f"{FORCE_FABLE_TRIGGER} {text}".strip()
+    return text
+
+
+async def _drain_cockpit_inbox(state: DaemonState, args, log) -> None:
+    """Fallback path for when the cockpit pipe is down (or the backend hasn't reconnected yet): the
+    backend appends {"id","text","ts","force_fable"?} lines to state/cockpit-inbox.jsonl
+    (cockpit_pipe.append_inbox); this drains them into the SAME chat queue Telegram/Discord use, deduped
+    by id, every scheduler tick — degraded to ~tick_sec latency, never lossy (cockpit-spec.md "The
+    daemon pipe")."""
+    if args.no_cockpit:
+        return
+    try:
+        items = await asyncio.to_thread(cockpit_pipe.drain_inbox, args.state_dir)
+    except Exception as e:  # noqa: BLE001 — a broken inbox file must never break the scheduler tick
+        log(f"! cockpit inbox drain failed: {e}")
+        return
+    if not items:
+        return
+    new_inbound = [("cockpit", t, 0) for t in (_cockpit_inbox_text(it) for it in items) if t]
+    if new_inbound:
+        await _enqueue_inbound(state, args, log, new_inbound)
 
 
 async def control_task(state: DaemonState, args, log) -> None:
@@ -1302,6 +2058,52 @@ async def control_task(state: DaemonState, args, log) -> None:
             state.stop.set()
             return
         await _sleep_or_stop(state, 2.0)
+
+
+async def cockpit_task(state: DaemonState, args, log) -> None:
+    """The SIXTH supervised task: a localhost-only, token-authed WebSocket pipe
+    (seneschal/scripts/cockpit_pipe.py; seneschal/docs/cockpit-spec.md "The daemon pipe") that lets the cockpit
+    backend send chat into the SAME action queue Telegram/Discord use (source="cockpit") and stream the
+    warm session's turns back out live. Serves exactly ONE client at a time (PipeHub handles the
+    replace-on-reconnect discipline) — this task itself stays trivially small.
+
+    Degrades — no pipe this run, never a crash — when: disabled (`--no-cockpit`), `websockets` isn't
+    importable (a stale venv predating `uv sync`), or in test/offline modes (`--stub-brain`/
+    `--fake-inbox`, matching control_task's gating so tests never open a real socket)."""
+    if args.no_cockpit or args.stub_brain or args.fake_inbox is not None:
+        return
+    if not cockpit_pipe.pipe_available():
+        log("! cockpit: websockets unavailable — pipe disabled (uv sync needed)")
+        return
+    token = cockpit_pipe.ensure_pipe_token(args.state_dir)
+
+    async def on_chat_send(msg_id, text, frame) -> None:
+        # The cockpit is the third mouth of one brain: enqueue exactly like a Telegram/Discord message.
+        # v3: `force_fable` (the composer's "Send to Fable" toggle) now ACTUALLY forces — synthesized as
+        # the SAME `!fable` prefix Telegram/Discord force-route on, so `_enqueue_inbound`'s single
+        # detection path (`apply_force_route`) handles all three channels uniformly. A guard avoids a
+        # double prefix if the owner also typed `!fable` themselves with the toggle on.
+        if frame.get("force_fable") and not strip_force_fable(text)[0]:
+            text = f"{FORCE_FABLE_TRIGGER} {text}".strip()
+        await _enqueue_inbound(state, args, log, [("cockpit", text, 0)])
+
+    async def on_control_restart() -> None:
+        # Same control-queue path request_control.py / the cockpit backend's REST route use — a
+        # graceful restart, applied once the warm session goes idle.
+        await asyncio.to_thread(enqueue_control, args.state_dir, "restart",
+                                "cockpit pipe control.restart", True)
+
+    def on_status_get() -> dict:
+        return _status_snapshot(state, args)
+
+    hub = cockpit_pipe.PipeHub(token=token, on_chat_send=on_chat_send,
+                               on_control_restart=on_control_restart,
+                               on_status_get=on_status_get, log=log)
+    state.cockpit_hub = hub
+    try:
+        await cockpit_pipe.run_pipe_server(hub, "127.0.0.1", args.cockpit_port, state.stop, log)
+    finally:
+        state.cockpit_hub = None
 
 
 async def _supervise(name: str, coro, state: DaemonState, log) -> None:
@@ -1338,6 +2140,8 @@ async def main_async(args, log, make_session, fake_queue: list) -> DaemonState:
     idle_sec = idle_min * 60
 
     loop = asyncio.get_running_loop()
+    state.loop = loop  # lets a worker-thread tee (the warm session's stdout reader) hand a cockpit
+                       # broadcast back onto this loop via PipeHub.broadcast_threadsafe
     hooked_signals = []
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -1355,6 +2159,7 @@ async def main_async(args, log, make_session, fake_queue: list) -> DaemonState:
             _supervise("drainer", drainer_task(state, args, log, make_session, idle_sec), state, log),
             _supervise("scheduler", scheduler_task(state, args, log), state, log),
             _supervise("control", control_task(state, args, log), state, log),
+            _supervise("cockpit", cockpit_task(state, args, log), state, log),
         )
     finally:
         # Snapshot whatever's still unanswered so the next start resumes it (see load_daemon_state).
@@ -1367,6 +2172,7 @@ async def main_async(args, log, make_session, fake_queue: list) -> DaemonState:
             except Exception:  # noqa: BLE001
                 pass
             state.session = None
+        clear_session_heartbeat(args.state_dir)  # daemon down → no live session; reminders fire normally
         if state.pending_action:  # deliberate reload/shutdown — don't orphan in-flight peek/slot procs
             for child in state.headless_children:
                 try:
@@ -1437,7 +2243,24 @@ def build_parser() -> argparse.ArgumentParser:
                    help="DEPRECATED alias for --store-mcp (same effect). Prefer --store-mcp / store/config.json.")
     p.add_argument("--no-notion", action="store_true",
                    help="don't wire any store MCP even if one is configured (chat can't read/write the store)")
-    p.add_argument("--model", default=None, help="model id for the warm chat session (default: CLI default)")
+    p.add_argument("--slack-mcp", default=None,
+                   help="path to an MCP config JSON (e.g. slack-mcp.json) giving the headless daemon Slack "
+                        "send/read hands, so a chat-approved `send a7` posts immediately; threaded as "
+                        "--mcp-config alongside the store's MCP into every spawned claude. If omitted, "
+                        "auto-detects scripts/slack-mcp.json when present. (Sending stays ask-high.)")
+    p.add_argument("--no-slack", action="store_true",
+                   help="don't wire Slack even if scripts/slack-mcp.json exists (Slack approvals record "
+                        "status=approved and drain on the next Slack-capable turn — the Slack-hands gap)")
+    p.add_argument("--cockpit-port", type=int, default=cockpit_pipe.DEFAULT_PORT,
+                   help="localhost port for the seneschald cockpit pipe (sixth supervised task; "
+                        f"default {cockpit_pipe.DEFAULT_PORT} — see seneschal/docs/cockpit-spec.md)")
+    p.add_argument("--no-cockpit", action="store_true",
+                   help="disable the cockpit pipe entirely (no daemon-side websocket server; the "
+                        "cockpit backend falls back to the read-only state/* files + inbox file queue)")
+    p.add_argument("--model", default=None,
+                   help="FALLBACK model id for the warm chat session (default: CLI default) — "
+                        "state/model-config.json's warm_model, if set, wins over this at every "
+                        "warm-session spawn (cockpit-spec.md v3 'Model dials'; see resolve_warm_model)")
     p.add_argument("--permission-mode", default="bypassPermissions",
                    help="claude --permission-mode (the assistant's act-low/ask-high gate is the real safety)")
     p.add_argument("--idle-min", type=float, default=20.0,
@@ -1457,7 +2280,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-reminders", action="store_true", help="don't fire reminders (e.g. tests)")
     p.add_argument("--no-peek", action="store_true", help="disable the comms peek")
     p.add_argument("--no-slots", action="store_true",
-                   help="disable the internal scheduled runs (brief/wrap/dream/journal + reminder slots)")
+                   help="disable ALL internal scheduled runs (brief/wrap/dream/journal + the daily "
+                        "reminder seed)")
+    p.add_argument("--no-seed-day", action="store_true",
+                   help="disable ONLY the once-per-day exact-time reminder seed (the date-rollover run "
+                        "that replaced the four fixed reminder slots); leaves brief/wrap/dream/journal on")
     p.add_argument("--slot-model", default=None, help="model for scheduled slot runs (default: --model)")
     p.add_argument("--slot-catchup-min", type=int, default=180,
                    help="how many minutes past a slot's time it may still fire late (else skip for the day)")
@@ -1518,13 +2345,25 @@ def main() -> int:
     # see resolve_store_mcp(): explicit --store-mcp / --notion-mcp → store/config.json's active backend →
     # legacy scripts/notion-mcp.json → None. Filesystem backends (obsidian/markdown) resolve to None, and
     # that's HEALTHY. --no-notion forces it off entirely. The resolved path is kept on args.notion_mcp —
-    # the attribute the warm session / slots / peek spawns forward as --mcp-config.
+    # the attribute the warm session / slots / peek spawns forward as --mcp-config (via active_mcp_configs).
     if args.no_notion:
         args.notion_mcp = None
         log("! Store MCP disabled (--no-notion) — headless chat/slots can't read or write the store.")
     else:
         args.notion_mcp, store_log = resolve_store_mcp(args)
         log(store_log)
+
+    # Wire Slack (send/read) into every spawned claude, threaded alongside the store's MCP (Q9 of the
+    # Slack draft-and-hold spec). Explicit --slack-mcp wins; otherwise auto-detect scripts/slack-mcp.json
+    # so a chat-approved `send a7` posts immediately. --no-slack forces it off. Absence is graceful — Slack
+    # approvals just record status=approved and drain on the next Slack-capable turn (the Slack-hands gap),
+    # so (unlike Notion) there's no warning when it's missing.
+    if args.no_slack:
+        args.slack_mcp = None
+    elif not args.slack_mcp and os.path.exists(DEFAULT_SLACK_MCP):
+        args.slack_mcp = DEFAULT_SLACK_MCP
+    if args.slack_mcp:
+        log(f"Slack wired for headless runs (send/read): {args.slack_mcp}")
 
     # Auto-detect discord.env like notion-mcp.json: drop the file in scripts/ and Discord turns on.
     if args.no_discord:
@@ -1533,6 +2372,14 @@ def main() -> int:
         args.discord_env = DEFAULT_DISCORD_ENV
     if args.discord_env:
         log(f"Discord wired (gateway push, REST fallback): {args.discord_env}")
+
+    if args.no_cockpit:
+        log("Cockpit pipe disabled (--no-cockpit)")
+    elif not cockpit_pipe.pipe_available():
+        log("! Cockpit pipe unavailable — websockets not importable (uv sync needed)")
+    else:
+        log(f"Cockpit pipe wired: 127.0.0.1:{args.cockpit_port} "
+            f"(token: {cockpit_pipe.pipe_token_path(args.state_dir)})")
 
     # One-line heads-up when the configured owner timezone and the machine clock disagree
     # (slot times + reminder math fire machine-local; date/label math follows the owner zone
@@ -1553,8 +2400,11 @@ def main() -> int:
         fake_queue = loaded if loaded and isinstance(loaded[0], list) else [[m] for m in loaded]
 
     def make_session() -> "WarmSession | StubWarmSession":
+        # Resolved FRESH at every spawn (not just process start): state/model-config.json's warm_model
+        # wins over the --model CLI flag, which is the fallback — cockpit-spec.md v3 "Model dials".
+        model = resolve_warm_model(args.state_dir, args.model, log)
         return StubWarmSession(log=log) if args.stub_brain else WarmSession(
-            args.claude_bin, args.model, args.permission_mode, log, mcp_config=args.notion_mcp)
+            args.claude_bin, model, args.permission_mode, log, mcp_configs=active_mcp_configs(args))
 
     try:
         state = asyncio.run(main_async(args, log, make_session, fake_queue))

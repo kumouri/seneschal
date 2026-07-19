@@ -40,7 +40,10 @@ seneschal/
   scripts/         presence.py (resident asyncio daemon), sentinel.py (helper/one-shot),
                    identity_common.py (persona/identity.json reader — never raises, defaults
                    when absent; presence.py renders its grounding/slot prompts from it),
-                   telegram/discord/proton/google comms bridges, reminders_* queue+ack ledger,
+                   telegram/discord/proton/google comms bridges, reminders_* queue+ack ledger
+                   (incl. reminders_seed.py — the whole-day exact-time seeder),
+                   cockpit_pipe.py + model_config.py + governor.py + fable_delegate.py (the
+                   cockpit pipe, model dials, budget governor, and Fable delegation one-shot),
                    outbox.py + outbox_common.py (durable write-behind journal for act-low
                    Notion writes — Notion backend only; filesystem backends write direct),
                    session_stamp.py + session_heartbeat.py + mini_dream.py (multi-session
@@ -72,12 +75,23 @@ runs on the shipped defaults (default-Claude persona, no store) until they're ru
 
 `seneschal/scripts/presence.py` is the always-on nerve center: a reactive asyncio core holding a
 warm `claude` CLI chat session (subscription-billed; it scrubs `ANTHROPIC_API_KEY`), firing
-reminders from the local queue, and running a cheap Watch comms-peek on cadence. It forwards the
+reminders from the local queue, and running a cheap Watch comms-peek on cadence. Reminder compute is a
+**once-per-owner-local-day seed** (`maybe_seed_day`, a date-rollover trigger — the four fixed reminder
+slots are retired): the seed run queues each ⏰ row's exact-time nudges via `reminders_seed.py` and the
+~5 s tick delivers them (`docs/reminder-exact-time-scheduling-spec.md`, `references/reminders-policy.md`).
+Telegram inbound is full-featured — attachments download to `state/inbox/`, swipe-replies carry their
+quoted context, reactions map to intents (a same-day 👍 on a nudge auto-acks; on the notion backend the
+ack also journals through the outbox), and a post-restart burst gets one backlog ack
+(`docs/telegram-inbound-spec.md`). A **cockpit pipe** (`cockpit_pipe.py`, localhost websocket,
+`--no-cockpit` to disable) streams warm-session turns and accepts chat as a third channel; **model
+dials** (`state/model-config.json`) pick the warm model + the Fable-delegation ceiling (`!fable`
+force-routes; the Oikonomos governor meters token spend). It forwards the
 **store's MCP** (if any) into every spawned headless `claude` — resolved store-config-driven
 (`--store-mcp` override → `store/config.json`'s active backend → legacy `scripts/notion-mcp.json` →
-None; filesystem backends need none, `resolve_store_mcp`). It runs off `main` and reloads itself when a
-PR merges (`seneschald-update` scheduled task → ff-pull → graceful restart). Runtime state lives in
-gitignored `seneschal/state/`.
+None; filesystem backends need none, `resolve_store_mcp`) — alongside an auto-detected
+`scripts/slack-mcp.json` (Slack send hands, `--no-slack` to disable). It runs off `main` and reloads
+itself when a PR merges (`seneschald-update` scheduled task → ff-pull → graceful restart). Runtime state
+lives in gitignored `seneschal/state/`.
 
 **Multi-session awareness:** a session registry (`state/sessions/`) tracks every live Claude Code
 session on the box — the daemon defers non-piercing nudges into a live interactive `/assistant` chat

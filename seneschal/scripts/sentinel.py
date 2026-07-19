@@ -55,6 +55,9 @@ NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 TELEGRAM_MESSAGE_MAP = "telegram-message-map.json"  # message_id -> what the assistant sent (reaction context)
 MESSAGE_MAP_CAP = 200  # newest N kept; a reaction to anything older reads as "an earlier message"
+# Where inbound Telegram attachments land, relative to the state dir (state/inbox/). The daemon passes
+# it as poll_telegram(download_dir=...); telegram_poll.py --prune-days sweeps it nightly (Dream).
+TELEGRAM_INBOX_DIR = "inbox"
 
 # Catch-up stagger. When a defer-release (the owner wakes / gets home / stops driving) or a plain backlog lets
 # several nudges come due in one pass, firing them all at once is the "wall of N nudges at 2:12" we
@@ -517,15 +520,20 @@ def record_sent_message(state_dir: str, result: dict, kind: str, text: str,
         pass
 
 
-def poll_telegram(telegram_env: str, state_dir: str, commit: bool = True, timeout: int = 0) -> dict:
+def poll_telegram(telegram_env: str, state_dir: str, commit: bool = True, timeout: int = 0,
+                  download_dir: str | None = None) -> dict:
     """Fetch new inbound messages via telegram_poll.py. With commit=True, advance the offset
-    (acknowledge them). timeout = long-poll seconds (0 = single fast call). Used by presence.py."""
+    (acknowledge them). timeout = long-poll seconds (0 = single fast call). With download_dir, inbound
+    attachments are fetched there (--download-dir) and each message carries an `attachment` record;
+    without it they are described but not downloaded. Used by presence.py."""
     cmd = [sys.executable, os.path.join(SCRIPT_DIR, "telegram_poll.py"),
            "--env-file", telegram_env,
            "--offset-file", os.path.join(state_dir, "telegram-offset"),
            "--timeout", str(timeout)]
     if commit:
         cmd.append("--commit")
+    if download_dir:
+        cmd += ["--download-dir", download_dir]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 30,
                               creationflags=NO_WINDOW)

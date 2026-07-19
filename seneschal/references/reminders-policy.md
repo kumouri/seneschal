@@ -1,4 +1,4 @@
-# Reminders & Nudges — policy (escalation, tone, slots)
+# Reminders & Nudges — policy (escalation, tone, exact times)
 
 The single source of truth for **how** the assistant nudges the owner. The `reminders` subagent owns the
 *mechanics* (read state, fire, write); this file owns the *behavior* — what fires when, how it escalates,
@@ -28,37 +28,52 @@ Three `Type`s, one durable row each (never one row per day):
 Today-Todo and Deadline-Watch **never copy content** — they carry a relation + `Due / Target`; the linked
 record's `Status` is the source of truth for whether it's actually done.
 
-## The four daily slots (owner-local time)
+## Exact per-reminder times + the daily seed (owner-local)
 
-Four scheduled tasks — `seneschal-reminders-morning` / `-midday` / `-evening` / `-bedtime` — fire the four
-slots (one cron each; the scheduler adds a little jitter, so real times land within ~a few minutes). Each
-slot serves the matching `Time Window`, re-fires unacked important items, and re-surfaces snoozed ones.
-`Anytime` items fire in whichever slot they're still `Pending`. **Only the Morning task runs the daily
-reset.**
+Reminders fire at **arbitrary per-reminder times**, not four fixed slots (the slots were retired
+2026-07-14 — see `../docs/reminder-exact-time-scheduling-spec.md`). Each ⏰ row carries a **`Times`**
+field — a comma-list of `HH:MM` owner-local times (e.g. `08:00` or `08:00, 20:00`). When `Times` is empty
+the row falls back to its **`Time Window`** default (kept as coarse sugar):
 
-| Slot | Time (local) | `Time Window` served | Also does |
-|------|--------------|----------------------|-----------|
-| **Morning** | 08:00 | `Morning` | **daily reset** (see below); fires Today-Todos + Deadline-Watch |
-| **Midday** | 12:30 | `Midday` (meals) | re-fire unacked important; re-surface snoozed |
-| **Evening** | 18:30 | `Evening` | re-fire unacked important; last call before EOD |
-| **Bedtime** | 21:30 | `Bedtime` (wind-down) | final re-fire of important |
+| `Time Window` (fallback) | Default time (owner-local) |
+|--------------------------|----------------------------|
+| `Morning` | 08:00 |
+| `Midday` | 12:30 |
+| `Evening` | 18:30 |
+| `Bedtime` | 21:30 |
+| `Anytime` | 09:00 |
 
-Slot times are the contract; change them here and in the four scheduled tasks together.
+These defaults are the **migration anchors** (each is an old fixed slot's time), so an un-migrated row
+fires at exactly the minute it used to. File a habit at the time the owner actually *acts on it*, not a
+default — e.g. **evening-only habits** (an evening stretch, a wind-down routine) belong at a bedtime
+hour, not the morning; filing them in the morning just accrues phantom mid-day "overdue". (An
+evening-only habit's morning → bedtime move graduated via an approved Dream learning — see
+`autonomy-policy.md`.)
 
-**A habit fires in the slot matching its `Time Window`** (Notion field, `databases.md`). File a habit in
-the window the owner actually *acts on it*, not a default — e.g. **evening-only habits** (an evening
-stretch, a wind-down routine) belong to **Bedtime**, not Morning; filing them in Morning just accrues
-phantom mid-day "overdue" until they're deferred each night. (An evening-only habit's Morning → Bedtime
-move graduated via an approved Dream learning — see `autonomy-policy.md`.)
+**How firing works — seed once, deliver by the minute.** The presence daemon runs a **once-per-local-day
+seed pass** (`presence.maybe_seed_day`, spawned on the first tick of each new owner-local date — a
+*date-rollover* trigger, **not** a fixed clock time, so a machine asleep through midnight still seeds on
+wake, with no catch-up cliff that could skip the reset). The seed applies pending acks, runs the **daily
+reset**, and — for every ⏰ row due today — queues that row's exact-time nudges into `state/reminders.json`
+via `reminders_seed.py` (primary time(s) + the re-fire ladder below). The daemon's ~5 s delivery tick
+(`sentinel.check_reminders`) then fires each entry at its due minute, through the usual quiet / ack /
+presence / catch-up-stagger gates. The seed decides *what* and *when*; the tick owns delivery — the same
+enqueue/deliver split the four slots used, with compute collapsed from four fixed wakes to one rollover wake.
+
+**Exact times are the earliest fire, not a guarantee of isolation.** The catch-up stagger (below) still
+holds non-piercing nudges to ≥15 min apart, so several rows set close together drip out rather than
+buzzing at once; piercing items (`Call Me` / `🚨`+ / `pierce_quiet` rows) fire exactly on time. Set the
+minute you want, and know closely-spaced *non*-piercing nudges may be pushed later by that 15-min floor.
 
 ## States & transitions
 
 `Status` ∈ `Pending`, `Reminded`, `Done`, `Skipped`, `Snoozed`, `Paused`. A **miss** is not a status — it's
 `Consecutive Misses += 1` when a `Reminded`/`Pending` item rolls to the next cycle un-acknowledged.
 
-Per slot:
+Per reconcile pass:
 
-1. **Daily reset** — *Morning slot only, once per local day; **Daily** and **Weekdays** cadences only.*
+1. **Daily reset** — *the daily **seed** pass, once per owner-local day (first tick after local
+   midnight); **Daily** and **Weekdays** cadences only.*
    **Apply any pending acks first** (step 3 — a tick made since the last run credits **yesterday**); an
    acked row is not a miss. Then, for each such habit whose `Cadence` applies today:
    - If yesterday's `Status` was `Reminded` or `Pending` (never acked) → `Consecutive Misses += 1` **first**.
@@ -66,10 +81,10 @@ Per slot:
      durable done-record the Wrap reads).
    - **Never zero `Consecutive Misses` here** — only an actual `Done` resets it. This is what powers
      "0 for 5 days."
-2. **Fire** — a `Pending` item whose `Time Window`/`Due` matches this slot → include in the nudge; set
-   `Status = Reminded`, `Last Reminded = today`, `Reminded Today = true`. When enqueuing the nudge, stamp
-   it with the ⏰ row's page id (`reminders_enqueue.py --reminder-id <page id>`) so a later ack can cancel
-   any still-pending nudge for this row (step 3 / Delivery).
+2. **Seed/fire** — for each `Pending` row due today the seed enqueues its exact-time nudge(s) via
+   `reminders_seed.py` (which stamps each with the ⏰ row's ref, so a later ack can cancel any
+   still-pending nudge for this row — step 3 / Delivery) and sets `Status = Reminded`, `Last Reminded =
+   today`, `Reminded Today = true`. The ~5 s delivery tick then fires each at its due minute.
 3. **Ack done** — three equivalent sources: the owner ticks `Ack` in Notion; they tell the assistant in
    chat (Chat writes it through immediately — the same fields below, not just the checkbox); or the linked
    Task/Goal is now `Done`. Apply — **`Status = Done` for *every* `Type`** (Recurring Habit, Today Todo,
@@ -86,7 +101,7 @@ Per slot:
    08:15, but its staggered 08:45 nudge still buzzes). Immediately run
    `scripts/reminders_dequeue.py --reminder-id <this row's page id>` to drop every **un-fired**
    `state/reminders.json` entry for the row (fired history is left alone). For this to work the enqueue
-   must have stamped the entry with `--reminder-id <page id>` (see the slot **Fire** step and
+   must have stamped the entry with `--reminder-id <page id>` (see the **Seed/fire** step and
    `../state/README.md`). **That same call also records the ack** to `state/acks.json` (the durable ack
    ledger), which is what stops a nudge the dequeue *can't* reach — a **soft-digest** covering this row —
    from buzzing: the fire path (`check_reminders`) suppresses any un-fired entry whose row (or every member
@@ -97,7 +112,8 @@ Per slot:
    Durable proof-of-done for a day is `Last Acknowledged = that day` (+ `Status = Done` until the next
    reset); **the EOD Wrap counts "done today" from `Last Acknowledged`, never from `Ack`.** For a **Today
    Todo**, also *propose* flipping the `Related Task → Done` (**ask-high** — see below).
-4. **Snooze / "later"** → `Status = Snoozed`; re-fires next slot today. Becomes a miss only if still
+4. **Snooze / "later"** → `Status = Snoozed` and enqueue one fresh nudge **+30 min** out (an ad-hoc
+   `reminders_enqueue.py` at `now+30m` carrying the row's `reminder_id`). Becomes a miss only if still
    `Snoozed` at the next daily reset.
 5. **Skip / "not today"** → `Status = Skipped`, `Last Acknowledged = today`. An honest skip is **not** a
    miss and does **not** reset the streak (they answered; they just chose no).
@@ -113,9 +129,11 @@ Two fields drive escalation, and they're **independent**:
   owner wants chased even though they're low-stakes (e.g. water the plants).
 
 **An item RE-FIRES until `Done` when** `Importance` ∈ (`🛑 Super-Critical`, `🚨 Critical`, `⭐ High`) **OR**
-`Nag Until Done = true`. It re-appears at **every** slot, day after day, until the owner confirms — guarded
-to fire **at most once per slot** (`Reminded Today` + slot). **Persistence is in frequency, not sharpness:**
-the tone stays the same calm "still open" line, never escalating into nagging-as-pressure.
+`Nag Until Done = true`. The seed queues it at its primary time **plus every 90 minutes** through the end
+of the local day; the **fire-time ack gate** cancels the day's remaining re-fires the moment the owner
+acks (one ack → the rest go silent), and it re-seeds the next day until confirmed. **Persistence is in
+frequency, not sharpness:** the tone stays the same calm "still open" line, never escalating into
+nagging-as-pressure.
 
 **Everything else** — `✨ Notable` / `📌 Low` **with `Nag Until Done = false`** — **fires once per cycle,
 then stops.** No same-day re-nagging; misses accumulate silently in `Consecutive Misses`, which feeds the rib.
@@ -132,7 +150,7 @@ short, calm line (persona register: *"It's your assistant. Quick reminder: …"*
   nudge at due time, **plus** a `channel: call` entry due a few minutes later (`reminders_enqueue.py
   --channel call`, `--id <id>-call`). Because the local daemon can't yet read acks, this is a
   belt-and-suspenders ring, not an ack-gated one — acceptable because `Call Me` is opt-in and rare. The
-  `-call` id makes it fire **at most once per slot** (idempotent). A `call` entry's `text` is **spoken**,
+  `-call` id makes it fire **at most once per seeded instant** (idempotent). A `call` entry's `text` is **spoken**,
   so phrase it for the ear (no ⏰ prefix — TTS would read the emoji aloud).
 - **v2 (designed-for).** Once the ack read-back path exists (see "Acknowledgment channel" below), the call
   becomes **ack-gated**: place it only if the Telegram nudge went unacked for N minutes. Same fields, no
@@ -169,18 +187,19 @@ pick up"* — a hard alarm), enqueue an **escalating** call rather than a single
 - **Weekly** — if `Notes` names a weekday (e.g. "Fridays"), due that weekday; otherwise due when
   `today ≥ Last Acknowledged + 7` (empty ⇒ due now).
 - **One-off / Deadline Watch** — due while not `Finished` and `Due / Target` is today, overdue, or within
-  ~3 days. (A plain ack writes `Done` = *done-for-today* only, so the row re-fires next slot/day while
+  ~3 days. (A plain ack writes `Done` = *done-for-today* only, so the row re-fires the next day while
   still in-window — it goes silent for good only once the owner says they're `Finished`.)
-- **Multiple/day** — fires in each slot its `Time Window` covers.
+- **Multiple/day** — fires at each `HH:MM` in its `Times` (or a **standing roll** for every-N-hours; see
+  below).
 
-The **daily reset** (morning) only re-`Pending`s **Daily** and **Weekdays** habits. Interval / Weekly /
-One-off rows aren't reset daily — they flip to `Pending` when their date rule above says due.
+The **daily reset** (in the seed pass) only re-`Pending`s **Daily** and **Weekdays** habits. Interval /
+Weekly / One-off rows aren't reset daily — they flip to `Pending` when their date rule above says due.
 
 ### Days off — hold work Deadline-Watches to the digest
 
 On a **day off**, a **work** Deadline-Watch does **not** fire as a push nudge — it appears **only in the
 Brief / EOD-Wrap digest** as an FYI, and resumes normal push nudging on the next work day. (Graduated at
-the owner's request — see `autonomy-policy.md`. Prior to this it was decided ad hoc each slot; the arc
+the owner's request — see `autonomy-policy.md`. Prior to this it was decided ad hoc each pass; the arc
 played out cleanly across several holiday/weekend spans — e.g. work deliverable Deadline-Watches held to
 the digest over a holiday weekend — before being codified.)
 
@@ -204,8 +223,9 @@ journal**. An owner who journals throughout the day makes a blind daily "did you
 noise. Instead this row is **journal-presence-gated**: flagged in its `Notes` with
 `[gate: journal-presence]` (plus an optional `quiet_days: N`, default `1`).
 
-Before firing a journal-presence-gated habit, the slot run **checks for today's journal activity** rather
-than nudging cold:
+The seed does **not** queue journal-presence-gated habits (their fire is conditional on a late-day
+evidence check the dawn seed can't do). Instead the **Wrap** run **checks for today's journal activity**
+rather than nudging cold:
 
 1. **Fetch the Interstitial Journal page** (`00000000-0000-0000-0000-000000000010`, baked in
    `databases.md`) and look for a **top-level date toggle** whose `<mention-date start="…"/>` equals
@@ -218,12 +238,12 @@ than nudging cold:
    already done today. (No `Ack` checkbox to untick — the evidence is the journal page.)
 3. **No journal activity today → nudge, but only past the grace window.** Nudge only once they've gone
    **`quiet_days` consecutive days** with no journal entry (default `1` ⇒ nudge this evening if nothing
-   landed today). The nudge is one gentle line at the **Evening** slot (its `Time Window`); it fires once
-   per day (`✨ Notable`, `Nag Until Done = false` ⇒ no same-day re-nag).
+   landed today). The nudge is one gentle evening line; it fires once per day (`✨ Notable`,
+   `Nag Until Done = false` ⇒ no same-day re-nag).
 
-Run the check at the **Evening** slot (nudge-or-satisfy) and again at **Bedtime** as a **satisfy-only
-backstop** (auto-tick if they journaled after the evening check; no bedtime nudge). That's one page fetch
-per those two slots — within the read budget (`notion-rate-limits.md`); **don't** fan it out to every slot.
+Run the check in the **Wrap** run (nudge-or-satisfy) and again in **Dream** as a **satisfy-only
+backstop** (auto-tick if they journaled after the Wrap check; no bedtime nudge). That's one page fetch in
+each of those two runs — within the read budget (`notion-rate-limits.md`); **don't** fan it out further.
 
 This generalizes: any habit whose "done" is provable from a durable source (a page edit, a linked record)
 can carry a `[gate: …]` marker and be auto-satisfied the same way instead of nagged. (Graduated at the
@@ -269,9 +289,10 @@ See the graduation-log entry in `autonomy-policy.md`.
 
 ## Delivery — via the presence daemon over Telegram
 
-Reminders never send SMS directly. Each slot run **enqueues one nudge per reminder** — never a
-combined message (see "One reminder per nudge" below) — into
-`seneschal/state/reminders.json` (via `scripts/reminders_enqueue.py`); the always-on **presence daemon**
+Reminders never send SMS directly. The seed (and any ad-hoc enqueue) **queues one nudge per reminder** —
+never a combined message (see "One reminder per nudge" below) — into
+`seneschal/state/reminders.json` (via `reminders_seed.py` / `scripts/reminders_enqueue.py`); the always-on
+**presence daemon**
 (`scripts/presence.py`) fires due entries over **Telegram** within a poll cycle and stamps `fired_at`;
 **Dream** prunes fired entries nightly (`comms-mapping.md`). The brain (this state machine) decides *what*
 and *when*; the daemon owns delivery. If the daemon is down, entries wait in the queue and fire when it's
@@ -284,10 +305,12 @@ several things either overwhelms (no clear one thing to start on) or gets half-f
 done and the rest falls off). So a **queued nudge always carries exactly one reminder** — there is no
 combined/digest nudge anymore, and there are **no "may combine" exceptions** (no bundling of a status
 list, no bundling of "tightly coupled steps"; if two steps truly belong together, that's one reminder row,
-not two rows merged at fire time). When a slot has more than one item, enqueue them as **separate**
-entries with **`due_at` spaced 15–30 minutes apart**, each with its own stable `--id` so re-runs stay
-idempotent, ordered by `Importance` (most important fires first). This matters most at the **Morning**
-slot, where Today-Todos, Deadline-Watch, and habits all land together.
+not two rows merged at fire time). When more than one item lands together, enqueue them as **separate**
+entries, each with its own stable `--id` so re-runs stay idempotent. Under exact times the seed queues
+each at the row's own minute; where several genuinely share a minute, the delivery **catch-up stagger**
+spreads them ≥15 min apart (oldest-due first) so they drip rather than wall — the seed need not
+hand-stagger `due_at`. This clustering is heaviest first thing in the morning, where Today-Todos,
+Deadline-Watch, and habits all land together.
 
 This governs the **push** path (queued nudges the assistant initiates). It does **not** restrict a **pull**
 answer: when the owner themselves asks "what's still open?", replying with a ranked list in chat is
@@ -325,7 +348,7 @@ ledger at fire time:
 
 When the owner asks to hush the nudges for a while ("quiet till morning", "no nudges tonight"), that
 request must be **durable and honored no matter what rebuilds the queue** — the old failure was a chat
-"quiet tonight" that the next slot silently undid by re-deriving the same nudges from the open ⏰ rows (and
+"quiet tonight" that the next reconcile silently undid by re-deriving the same nudges from the open ⏰ rows (and
 a standing roll re-seeding itself), so buzzes kept landing all night.
 
 - **One state file, one gate.** Chat mode writes `state/quiet.json` (`scripts/quiet_set.py`); the presence
@@ -339,7 +362,7 @@ a standing roll re-seeding itself), so buzzes kept landing all night.
   Notion-dumb: it reads a per-entry `pierce_quiet` flag, which the **brain sets at enqueue** (`--pierce-quiet`)
   for Critical-and-above, where it can see the ⏰ row's `Importance`. A call entry pierces on its own.
 - **Setting it is act-low** (the assistant suppressing its own pushes to the owner; reversible, bounded).
-  `quiet_set.py --until-morning` = next 08:00 local (the Morning slot); `--minutes N` / `--until-local
+  `quiet_set.py --until-morning` = next 08:00 local (the morning anchor); `--minutes N` / `--until-local
   HH:MM` for other spans; `--clear` lifts it ("you can nudge me again"). Chat mode rule 7
   (`seneschal/SKILL.md`) wires it up.
 
@@ -380,18 +403,19 @@ delivered them all the instant it lifted). That's the exact bunching the stagger
 - **Piercing items skip the gate entirely.** `Call Me` / `🚨 Critical` (`pierce_quiet`) fire the
   moment they're due — a released backlog never delays a can't-slide item, and piercing fires neither
   consume nor reset the drip clock (separate lane).
-- **Normal days are untouched.** Slots already stagger fresh nudges 15–30 min apart at *creation*, so they
-  clear the gate trivially; this only reshapes a *bunched release*. Fail-open: a missing/broken
+- **Normal days are mostly untouched.** The seed queues each row at its own exact minute, so nudges set
+  ≥15 min apart clear the gate trivially; this reshapes a *bunched release* and also auto-spreads any rows
+  that happen to share a minute (they drip 15 min apart, oldest-due first). Fail-open: a missing/broken
   `nudge-stagger.json` fires immediately. Mechanics live in `sentinel._check_reminders_locked`.
 
 ## Standing rolls — custom every-N-hours cadences
 
-The four slots can't express *"every 2 hours, 9am–11pm"* — an intraday cadence some reminders want (the
-canonical case: a check-messages poll on a service whose notifications are unreliable). Rather than have
-the assistant hand-enqueue that roll each day, it's a **standing roll**: a config entry in
-`scripts/reminders_roll.py` (`ROLLS`, keyed to the ⏰ row's `reminder_id`) that the presence daemon
-**regenerates once per local day** on its own — pure local queue math, no Notion read and no `claude`
-spawn.
+Neither a `Times` list nor the seed cleanly expresses *"every 2 hours, 9am–11pm"* — an intraday cadence
+some reminders want (the canonical case: a check-messages poll on a service whose notifications are
+unreliable). Rather than have the assistant hand-enqueue that roll each day, it's a **standing roll**: a
+config entry in `scripts/reminders_roll.py` (`ROLLS`, keyed to the ⏰ row's `reminder_id`) that the
+presence daemon **regenerates once per local day** on its own — pure local queue math, no store read and
+no `claude` spawn.
 
 - **Future-only, idempotent, rolling.** Each refill seeds today's still-upcoming slots **and** all of
   tomorrow's (so a late-waking machine is still covered), skipping any slot whose instant has passed and
@@ -427,10 +451,10 @@ This governs how `reminders_enqueue` computes `due_at` and how the Reminders mod
 ## Acknowledgment channel (v1 → v2)
 
 - **v1 (now):** the owner acks by the one-tap `ack` affordance in the store **or** telling the assistant
-  in a chat session (terminal `/assistant` or Telegram). Each slot reads that state first, so any ack
-  before the next run is honored. The nudge ends with *"tick Ack or tell me."* **A chat ack is only
+  in a chat session (terminal `/assistant` or Telegram). The seed + each reconcile run reads that state
+  first, so any ack before the next run is honored. The nudge ends with *"tick Ack or tell me."* **A chat ack is only
   honored if the Chat session writes it through to the store** — the Reminders row is the durable record;
-  an ack that stays in the (volatile, reboot-clearing) warm session is lost and the next slot re-fires it.
+  an ack that stays in the (volatile, reboot-clearing) warm session is lost and the next reconcile re-fires it.
   Telegram Chat runs headless, so the presence daemon must be wired with the store's read/write MCP for
   this to land — resolved store-config-driven (`store/config.json`; a legacy auto-detect of
   `scripts/notion-mcp.json` on the Notion backend), see `scripts/NOTION_MCP_SETUP.md`. Filesystem backends
@@ -440,6 +464,19 @@ This governs how `reminders_enqueue` computes `due_at` and how the Reminders mod
   answered by `last_acknowledged: today` + `status`, never by scanning for set flags — seeing all `ack`
   flags cleared in the evening is the system working, not evidence nothing got done. Chat write-through
   likewise sets the fields directly and leaves `ack` alone (it's the owner's affordance, not the agents').
+- **A 👍 on a nudge is an ack (2026-07-16).** Reacting 👍 to a Telegram nudge runs the **same** path a
+  typed ack does — `reminders_dequeue.py` (cancel the obsolete re-nudges + record the durable local ack)
+  and, **on the notion backend only** (the write-behind outbox is Notion-specific —
+  `store/notion/mapping.md`, Outbox section), an `outbox.py ack` journaling the `status: done` /
+  `last_acknowledged: today` write for the next LLM turn to flush; filesystem backends leave the store row
+  to the warm session's `store-update`. No typing, no session needed: the daemon does it directly
+  (act-low, the owner's own content), and tells the warm session it's already done so it doesn't re-ack.
+  **Narrow on purpose — it only fires for a 👍 (or whatever the owner maps to `ack` in
+  `state/telegram-reactions.json`) on a *tracked nudge* that went out *today, local*.** A reminder row
+  resets daily and an ack stamps today's date, so honoring a 👍 on yesterday's nudge would mark **today**
+  Done — for meds, exactly the wrong outcome. Anything outside that (a 👍 on a chat reply, an older
+  nudge, an untracked message) is handed to the warm session as context instead, and it decides.
+  Mechanics: `../docs/telegram-inbound-spec.md` §3.4c; the emoji vocabulary is the owner's to edit.
 - **v2 (later, designed-for):** the warm Telegram session already parses a reply like `done` / `skip` /
   `later <which>` and writes it back to the **same** Reminders fields (v1 already does the write-through
   above); v2 layers on richer reply grammar and ack-gated `Call Me` escalation — no schema or
@@ -447,7 +484,7 @@ This governs how `reminders_enqueue` computes `due_at` and how the Reminders mod
 
 ## Guardrails
 
-- **Signal over noise.** A slot's nudge is short — the few things that actually need the owner, never a
+- **Signal over noise.** A nudge is short — the few things that actually need the owner, never a
   wall. Prefer three real items to ten.
 - **One reminder per nudge; stagger 15–30 min apart.** Never enqueue more than one item in a single nudge
   (see Delivery — bundling is retired, no exceptions) — it overwhelms or gets half-done. A ranked list is
@@ -455,4 +492,4 @@ This governs how `reminders_enqueue` computes `due_at` and how the Reminders mod
 - **Reversible writes only** without asking; never touch a linked Task/Goal status unprompted.
 - **One rib max per reminder per day**, low-importance non-nag only, factual.
 - Times and date logic in **the owner's configured timezone**; after-midnight counts as the prior day.
-- Every substantive slot run leaves a trace (Run Log `Mode = Reminders` + carry-over).
+- Every substantive seed/reconcile run leaves a trace (Run Log `Mode = Reminders` + carry-over).
