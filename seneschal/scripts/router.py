@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""The assistant's front-door model router — the **Router advisor**, phase 1 (shadow mode). Stdlib only.
+"""The assistant's front-door model router — the **Router advisor**, phase 1 (shadow mode) + the
+**fable arm** (v3, cockpit-spec.md "Model dials & Fable delegation"). Stdlib only.
 
 A tiny **local Ollama** classifier (`qwen3.5:4b`) that reads each inbound chat message and decides
 *trivial-and-safe* vs *escalate*, BEFORE the warm Opus session spins — the same daemon-cheap-model shape
@@ -11,12 +12,24 @@ behavior change. Every message still escalates to the warm session exactly as to
 accuracy evidence to review before phase 2 flips on local handling (the same gated pattern as the
 autonomy dial — see `../references/advisor-chain.md`).
 
+**The fable arm (v3)** is a second, independent classifier (`classify_fable`) that decides, among
+escalations, **standard vs Fable-level** — whether the warm model would plausibly struggle, or Fable
+would clearly do substantially better (deep synthesis, long-horizon planning, hard multi-step
+debugging). Unlike the trivial/escalate arm, its "fable" verdict is NOT purely observational — it rides
+into the warm session's prompt as a hint line (never a command; see `presence.py`'s `fable_arm_classify`
++ `DaemonState.fable_hints`). The caller (`presence.py`) gates whether this arm runs AT ALL on the live
+`max_routable_model` ceiling (`model_config.admits_fable`) — when the ceiling isn't Fable-tier, this
+classifier is never invoked, "the fable arm doesn't even run" (cockpit-spec.md ruling 4). Safe fallback
+direction is the mirror image of the trivial/escalate arm: **standard** (no delegation), since Fable
+calls are the rare/expensive path here, not the safe default.
+
 Design, mirroring `rag_common.py`:
   * Python **standard library only** (`urllib`/`json`) — no pip, no third-party client.
   * Same `load_env()` config pattern (`router.env`, all optional; defaults baked here).
-  * Ollama over `urllib`, **graceful failure**: `classify()` NEVER raises to the caller. Any problem —
-    Ollama unreachable, bad JSON, unknown category, or low confidence — returns the **safe fallback**
-    verdict (`escalate`/`other`). Abstain ⇒ escalate. Escalate is always the safe default.
+  * Ollama over `urllib`, **graceful failure**: `classify()`/`classify_fable()` NEVER raise to the
+    caller. Any problem — Ollama unreachable, bad JSON, unknown verdict, or low confidence — returns the
+    **safe fallback** verdict (`escalate`/`other` for `classify`; `standard` for `classify_fable`).
+    Abstain ⇒ the safe default for that arm.
 
 CLI (smoke test): ``python router.py "did I take my meds"`` → prints the verdict JSON.
 """
@@ -116,15 +129,17 @@ def _fallback(reason: str, cfg: dict) -> dict:
     }
 
 
-def _ollama_chat(message: str, cfg: dict, timeout: int) -> dict:
+def _ollama_chat(message: str, cfg: dict, timeout: int, system_prompt: str = SYSTEM_PROMPT) -> dict:
     """One /api/chat call requesting strict JSON. Raises on any transport/parse trouble — the caller
-    (`classify`) catches everything and falls back to escalate. Kept separate so the failure surface is
-    one try/except in `classify`, matching rag_common's OllamaError-then-fallback shape."""
+    (`classify`/`classify_fable`) catches everything and falls back to the safe default for that arm.
+    Kept separate so the failure surface is one try/except per caller, matching rag_common's
+    OllamaError-then-fallback shape. `system_prompt` is swappable so `classify_fable` reuses this
+    exact transport with its own instructions instead of duplicating the HTTP plumbing."""
     url = cfg["OLLAMA_URL"].rstrip("/") + "/api/chat"
     payload = {
         "model": cfg["ROUTER_MODEL"],
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": message},
         ],
         "format": "json",   # Ollama constrains the output to valid JSON
@@ -213,12 +228,129 @@ def classify(message: str, cfg: dict | None = None, timeout: int = 20) -> dict:
     }
 
 
+# --------------------------------------------------------------------------- the fable arm (v3)
+
+FABLE_DEFAULT_VERDICT = "standard"  # the safe/no-delegate direction — the mirror of "escalate" above
+
+FABLE_SYSTEM_PROMPT = """\
+You are the assistant's front-door FABLE-DELEGATION router. The assistant is the owner's chief of
+staff, running on a capable "warm" model. The owner has ALSO enabled delegation to Fable, an even more
+capable model reserved for the hardest turns. You do NOT reply to the owner and you do NOT do the task
+— you only decide whether THIS inbound message is a candidate for delegating up to Fable.
+
+Return STRICT JSON, exactly these keys and nothing else:
+  {"verdict": "standard" | "fable",
+   "confidence": <number 0.0-1.0>,
+   "reason": "<one short clause>"}
+
+Bias HARD toward "standard". The warm model handles the overwhelming majority of turns well; only flag
+"fable" when the warm model would plausibly struggle, or Fable would clearly do substantially better:
+  - deep, multi-source synthesis (weighing many considerations against each other)
+  - long-horizon planning (multi-week/month plans, dependency chains)
+  - hard, multi-step debugging or architecture/design reasoning
+  - genuinely novel or ambiguous problems with no obvious playbook
+
+NOT fable-level (verdict "standard") — the DEFAULT: ordinary chat, status questions, drafting,
+scheduling, simple triage, anything routine even if it's "escalate"-tier for the trivial/escalate arm.
+Being hard to do QUICKLY is not the same as being hard to do WELL — favor "standard" when unsure.
+
+Examples:
+  "what's on today?"
+    -> {"verdict":"standard","confidence":0.95,"reason":"routine status"}
+  "draft a reply to Dana declining Thursday"
+    -> {"verdict":"standard","confidence":0.9,"reason":"routine drafting"}
+  "help me think through whether to take the new job offer, weighing comp, growth, and the team"
+    -> {"verdict":"fable","confidence":0.85,"reason":"deep multi-factor synthesis"}
+  "map out a 6-month plan to migrate the whole stack off the legacy queue, in phases"
+    -> {"verdict":"fable","confidence":0.88,"reason":"long-horizon planning"}
+  "my daemon keeps dying at 3am and I can't figure out why — walk the whole failure chain with me"
+    -> {"verdict":"fable","confidence":0.82,"reason":"hard multi-step debugging"}
+"""
+
+
+def _fable_fallback(reason: str, cfg: dict) -> dict:
+    """The safe default verdict for the fable arm — always standard (no delegation)."""
+    return {
+        "verdict": FABLE_DEFAULT_VERDICT,
+        "confidence": 0.0,
+        "reason": reason,
+        "model": cfg.get("ROUTER_MODEL", DEFAULTS["ROUTER_MODEL"]),
+    }
+
+
+def classify_fable(message: str, cfg: dict | None = None, timeout: int = 20) -> dict:
+    """The **fable arm** (v3): classify one inbound ESCALATION → standard vs Fable-level.
+
+    Returns::
+
+        {"verdict": "standard"|"fable", "confidence": float, "reason": str, "model": str}
+
+    **Never raises.** Callers are expected to gate whether this runs at all on
+    ``model_config.admits_fable(max_routable_model)`` — this function itself doesn't know about the
+    ceiling; it's a pure text classifier, same shape as `classify`. Safe fallback (Ollama unreachable,
+    bad JSON, unknown verdict, or confidence below ``ROUTER_CONF_THRESHOLD``) is **"standard"** — the
+    mirror of `classify`'s "escalate": here the expensive/rare path is "fable", so uncertainty defaults
+    to NOT delegating.
+    """
+    cfg = cfg or load_env()
+    text = (message or "").strip()
+    if not text:
+        return _fable_fallback("empty message", cfg)
+
+    try:
+        threshold = float(cfg.get("ROUTER_CONF_THRESHOLD", DEFAULTS["ROUTER_CONF_THRESHOLD"]))
+    except (TypeError, ValueError):
+        threshold = float(DEFAULTS["ROUTER_CONF_THRESHOLD"])
+
+    try:
+        raw = _ollama_chat(text, cfg, timeout, system_prompt=FABLE_SYSTEM_PROMPT)
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError,
+            ValueError, json.JSONDecodeError) as exc:
+        return _fable_fallback(f"classifier unavailable ({type(exc).__name__})", cfg)
+
+    if not isinstance(raw, dict):
+        return _fable_fallback("non-object classifier response", cfg)
+
+    verdict = raw.get("verdict")
+    reason = str(raw.get("reason", ""))[:200] or "no reason given"
+    try:
+        confidence = float(raw.get("confidence", 0.0))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    confidence = max(0.0, min(1.0, confidence))
+    model = cfg.get("ROUTER_MODEL", DEFAULTS["ROUTER_MODEL"])
+
+    if verdict == "fable":
+        if confidence < threshold:
+            return {
+                "verdict": FABLE_DEFAULT_VERDICT, "confidence": confidence,
+                "reason": f"low confidence ({confidence:.2f} < {threshold:.2f}); {reason}",
+                "model": model,
+            }
+        return {"verdict": "fable", "confidence": confidence, "reason": reason, "model": model}
+
+    # Anything else — explicit "standard", an unknown verdict, or a malformed one — all standard.
+    return {
+        "verdict": FABLE_DEFAULT_VERDICT, "confidence": confidence,
+        "reason": reason if verdict == "standard" else f"abstain⇒standard; {reason}",
+        "model": model,
+    }
+
+
 def _main(argv: list[str]) -> int:
     if len(argv) < 2 or argv[1] in ("-h", "--help"):
-        print('usage: python router.py "<inbound chat message>"', file=sys.stderr)
+        print('usage: python router.py ["--fable"] "<inbound chat message>"', file=sys.stderr)
         return 2
-    message = " ".join(argv[1:])
-    print(json.dumps(classify(message), ensure_ascii=False, indent=2))
+    args = argv[1:]
+    fable = args and args[0] == "--fable"
+    if fable:
+        args = args[1:]
+    if not args:
+        print('usage: python router.py ["--fable"] "<inbound chat message>"', file=sys.stderr)
+        return 2
+    message = " ".join(args)
+    verdict = classify_fable(message) if fable else classify(message)
+    print(json.dumps(verdict, ensure_ascii=False, indent=2))
     return 0
 
 
