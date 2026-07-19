@@ -50,10 +50,11 @@ def _load_health_common():
 
 hc = _load_health_common()
 
-# The live-feed `workouts` / `nutrition` tables are NOT part of health_common.SCHEMA in this repo
-# (the feed importer that writes them hasn't been ported; the cockpit reader tolerates their absence
-# in production — `available: false`). These fixtures declare the exact column shapes the reader
-# queries so the grouping/rollup logic is still exercised end-to-end.
+# The live-feed `workouts` / `nutrition` tables are part of health_common.SCHEMA now (the health-wave
+# merge ported the feed importer), so this DDL is a no-op against a freshly connected db — but it stays,
+# both as an executable statement of the exact column shapes the reader queries (a mismatch with the
+# real schema would surface here as an insert/select failure) and so these fixtures keep working
+# against a db that predates the wave (the reader still tolerates absence: `available: false`).
 _LIVE_FEED_DDL = """
 CREATE TABLE IF NOT EXISTS workouts (
     uuid TEXT PRIMARY KEY,

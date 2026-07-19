@@ -347,6 +347,16 @@ def import_jsons(conn, json_path: str, csv_path: str | None = None, verbose: boo
 #   {"t":"hr",   "uuid":..,"start_ms":..,"offset_min":-300,"bpm":..}
 #   {"t":"spo2", "uuid":..,"start_ms":..,"offset_min":-300,"pct":..}
 #   {"t":"steps","date":"YYYY-MM-DD","count":..,"distance_m":..,"calorie":..}
+#   {"t":"workout","uuid":..,"start_ms":..,"end_ms":..,"offset_min":-300,"exercise_type":"running",
+#    "title":"Morning run","notes":..,"energy_kcal":412.5,"distance_m":5230.0}
+#     -- ExerciseSessionRecord (Call Shield v4). title/notes/energy_kcal/distance_m are omitted
+#        (not just null) when Health Connect has nothing for them -- neither is a field on the
+#        session itself, so the phone folds in whatever TotalCaloriesBurnedRecord/DistanceRecord
+#        entries overlap the session's own [start, end) before it ever hits the wire.
+#   {"t":"nutrition","uuid":..,"start_ms":..,"end_ms":..,"offset_min":-300,"meal_type":"lunch",
+#    "name":"Chicken salad","energy_kcal":540,"protein_g":42,"carbs_g":30,"fat_g":18}
+#     -- NutritionRecord (Call Shield v4). name/energy_kcal/protein_g/carbs_g/fat_g are omitted when
+#        they weren't logged.
 # Unknown types are skipped, not fatal, so the wire format can grow without breaking older importers.
 # --------------------------------------------------------------------------------------------------
 
@@ -401,7 +411,39 @@ def _live_steps(conn, rec) -> int:
     return 1
 
 
-_LIVE = {"sleep_session": _live_sleep, "hr": _live_hr, "spo2": _live_spo2, "steps": _live_steps}
+def _live_workout(conn, rec) -> int:
+    off = int(rec["offset_min"])
+    start = epoch_ms_to_utc(rec["start_ms"])
+    end = epoch_ms_to_utc(rec["end_ms"])
+    local_start = to_local(start, off)
+    local_end = to_local(end, off)
+    duration = (end - start).total_seconds() / 60.0
+    conn.execute(
+        "INSERT OR REPLACE INTO workouts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (rec["uuid"], _iso(start), _iso(end), off, _iso(local_start), _iso(local_end),
+         local_start.date().isoformat(), duration, rec.get("exercise_type"),
+         rec.get("title"), rec.get("notes"), num(rec.get("energy_kcal")), num(rec.get("distance_m"))))
+    return 1
+
+
+def _live_nutrition(conn, rec) -> int:
+    off = int(rec["offset_min"])
+    start = epoch_ms_to_utc(rec["start_ms"])
+    end_ms = rec.get("end_ms")
+    end = epoch_ms_to_utc(end_ms) if end_ms is not None else None
+    local = to_local(start, off)
+    conn.execute(
+        "INSERT OR REPLACE INTO nutrition VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (rec["uuid"], _iso(start), _iso(end) if end else None, off, local.date().isoformat(),
+         rec.get("meal_type"), rec.get("name"), num(rec.get("energy_kcal")),
+         num(rec.get("protein_g")), num(rec.get("carbs_g")), num(rec.get("fat_g"))))
+    return 1
+
+
+_LIVE = {
+    "sleep_session": _live_sleep, "hr": _live_hr, "spo2": _live_spo2, "steps": _live_steps,
+    "workout": _live_workout, "nutrition": _live_nutrition,
+}
 
 
 def import_ndjson(conn, lines, commit: bool = True) -> dict:
@@ -481,6 +523,8 @@ def status(conn) -> dict:
         "step_days": one("SELECT COUNT(*) FROM steps_daily"),
         "movement_minutes": one("SELECT COUNT(*) FROM movement"),
         "hr_minutes": one("SELECT COUNT(*) FROM hr_minute"),
+        "workouts": one("SELECT COUNT(*) FROM workouts"),
+        "nutrition_entries": one("SELECT COUNT(*) FROM nutrition"),
     }
 
 
