@@ -34,7 +34,8 @@ values), see `notion-mcp-mapping.md`.
 
 | Page | ID | Role |
 |------|----|------|
-| Interstitial Journal | `00000000-0000-0000-0000-000000000010` | The working journal page. Read the active date toggle; clear it; write the carry-over callout at top. |
+| Interstitial Journal | `00000000-0000-0000-0000-000000000010` | The working journal page. Read the active date toggle; clear it; write the carry-over callout at top. The tracking databases live one level down, under **IJData**. |
+| IJData | `00000000-0000-0000-0000-000000000022` | Container page — the top child of the Interstitial Journal. **Parent of the tracking databases** (Tasks Created, Mood, Achievements, Agent Run Log, Important Flags, Goals, Goal Measurements, ⏰ Reminders). |
 | Achievements Log | `00000000-0000-0000-0000-000000000014` | Append-only page: a running chronological list under `## <date>` headers. |
 | Personal Home | `00000000-0000-0000-0000-000000000009` | Top-level hub. Parent of People, Tasks, Projects. |
 
@@ -47,8 +48,8 @@ values), see `notion-mcp-mapping.md`.
 > (`../../../../seneschal/references/reminders-policy.md`) consumes this signal, so the steward must
 > preserve the date-toggle shape when it clears and resets the page.
 
-Tracker databases are typically **inline databases on the Interstitial Journal page**, so they're easy to
-find via search if an id ever changes.
+Most tracker databases are **full-page databases under the IJData page** (a child of the Interstitial
+Journal), so they're easy to find via search if an id ever changes.
 
 ---
 
@@ -138,7 +139,8 @@ Tier guide: 🥉 minor wins/chores/quick tasks · 🥈 notable progress/multi-st
 - `Importance Level` (select: `🚨 Critical`, `⭐ High`, `✨ Notable`, `📌 Reference`)
 - `Status` (status: `Active`, `Carrying Over`, `Resolved`, `Archived`)
 - `Context` (text) · `Why It Matters` (text) · `Resolution / Outcome` (text)
-- `Related Task` (rel → Tasks) · `Related Project` (rel → Projects)
+- `Related Task` (rel → Tasks) · `Related Project` (rel → Projects) ·
+  `People Involved` (rel → People `…0004`, the assistant's map)
 - `Journal Digest Link` (url — provenance) · `Tags` (multi: empty — add as needed)
 
 ### 🎯 Goals — `collection://00000000-0000-0000-0000-000000000005`

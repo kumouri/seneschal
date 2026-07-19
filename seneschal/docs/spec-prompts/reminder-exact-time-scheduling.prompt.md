@@ -49,11 +49,11 @@ fire at **any exact time**. I want the 4-slot model **retired** in favor of real
 - **Spec first.** Write `seneschal/docs/reminder-exact-time-scheduling-spec.md` (Markdown is canonical), tone
   like `seneschal/docs/asyncio-daemon-design.md`. **Stop for my sign-off before implementation** — this touches
   the nerve center, so I want to read the design before any code lands.
-- Conventional Commits (`docs(reminders):`, `feat(reminders):`). Branch off `develop` (Git Flow; `develop` deploys, `master` is the release point).
+- Conventional Commits (`docs(reminders):`, `feat(reminders):`). Branch off `develop` (Git Flow; `develop` integrates, `main` releases — and the daemon deploys from `main`).
 - The **stdlib unittest suite** must stay green (`python -m unittest discover -s seneschal/scripts -p "test_*.py"`);
   add tests for the new scheduling. CI green before any merge; **never merge red/pending**; **merge commit** only.
 - `git -c core.fsmonitor=false …` on every git command.
-- Remember the daemon **runs off `develop` and reloads on merge** — design the cutover so a mid-flight reload
+- Remember the daemon **runs off `main` and reloads on merge** — design the cutover so a mid-flight reload
   doesn't drop or double-fire reminders.
 
 Start by reading the files above (the reminder machinery especially), then draft the spec and walk me

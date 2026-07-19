@@ -21,18 +21,21 @@ repo is the character, the memory, the routing, and the plumbing.
 
 - **One character, one gate, many channels.** A single orchestrator picks a *mode* (briefing,
   triage, reminders, journal, …), runs every turn through an ordered **Advisor Chain**
-  (Spring-AI-style interceptors: trace → prioritize → orient → retrieve → dispatch → critique →
-  safeguard), and enforces one **act-low / ask-high** approval gate. Low-stakes things it just
-  does; anything outbound or destructive it drafts and holds for you.
+  (Spring-AI-style interceptors: trace → prioritize → orient → govern (budget) → retrieve →
+  dispatch → critique → safeguard), and enforces one **act-low / ask-high** approval gate.
+  Low-stakes things it just does; anything outbound or destructive it drafts and holds for you.
 - **Local-first proactive loop, no server.** A resident asyncio **presence daemon** holds a warm
-  chat session over Telegram/Discord, fires reminders on time, and runs a cheap comms-peek on a
-  cadence — event-driven, so idle ≈ free. It's **subscription-billed** through the `claude` CLI
-  (it scrubs `ANTHROPIC_API_KEY` to stay off the metered API), and it reloads itself when a PR
-  merges.
-- **Bring your own everything.** The assistant's **persona** (a wizard builds it — name, voice,
-  demeanor), your **identity/timezone** (a small config file), and your **data backend** are all
-  pluggable. Out of the box it's a nameless, default-Claude assistant on no store; two setup
-  interviews make it yours.
+  chat session over Telegram/Discord, fires each reminder at its **exact configured time**, and
+  runs a cheap comms-peek on a cadence — event-driven, so idle ≈ free. It's
+  **subscription-billed** through the `claude` CLI (it scrubs `ANTHROPIC_API_KEY` to stay off the
+  metered API), and it reloads itself when a PR merges. Two **model dials** pick the warm model
+  and a delegation ceiling — a hard turn can be **delegated up** to a bigger model as a one-shot,
+  quota-gated by a budget **governor** (rails metered in code, advisory knobs honest about being
+  guidance).
+- **Bring your own everything.** The assistant's **persona** (name, voice, demeanor), your
+  **identity/timezone** (a small config file), and your **data backend** are all pluggable. Out of
+  the box it's a nameless, default-Claude assistant on no store; tracked templates make it yours
+  today, and guided setup wizards land in the next release wave.
 - **Pluggable system of record.** Notion, an **Obsidian vault**, or a plain **Markdown folder** —
   behind one seam. Skills speak six backend-neutral verbs (`store-query/get/create/update/append/
   search`); each `store/<backend>/` pair maps those verbs to that backend's tools. A stated goal
@@ -56,15 +59,14 @@ uv sync            # optional venv for the daemon deps (websockets, tzdata); eve
 Then, inside Claude Code in the repo:
 
 ```
-/setup             # build your assistant's persona, pick + connect a data backend, and (optionally)
-                   #   let it interview you to build your owner profile
 /assistant         # open a chat with your assistant  (or /assistant what's on today)
 ```
 
-`/setup` is two chapters you can also run alone: **`/setup-persona`** (name, voice, demeanor →
-`persona/persona.md` + `identity.json`) and **`/setup-store`** (pick + provision Notion / Obsidian
-/ Markdown, read what's already there, interview → `owner-profile.md`). Skip everything and you
-still get a working, nameless default-Claude assistant.
+Out of the box that's a working, nameless default-Claude assistant on no store. To make it yours
+today, copy the tracked templates ([`persona/README.md`](persona/README.md) and
+[`seneschal/store/README.md`](seneschal/store/README.md) walk through persona/identity and backend
+setup). The guided **setup wizards** (`/setup` — a persona interview + store onboarding) land in the
+**next release wave**.
 
 ## What's in the box
 
@@ -74,7 +76,7 @@ still get a working, nameless default-Claude assistant.
 | **Subagent skills** ([`subagents/`](subagents/)) | Morning briefing, end-of-day wrap, email/Slack triage, calendar steward, store Q&A, reminders, a generic daily-journal steward, a person-centric message archiver, and the Forge (mints persistent "Archon" staff agents). |
 | **Presence daemon** ([`seneschal/scripts/presence.py`](seneschal/scripts/presence.py)) | The always-on reactive core — warm chat, reminders, comms-peek. Stdlib-first asyncio. |
 | **Cockpit** ([`cockpit/`](cockpit/)) | A local-first web observatory over the daemon: live chat over the daemon pipe, model dials, budget thresholds, health panels, archon tiles. FastAPI backend + Vite/React frontend, `127.0.0.1`-only, dev-no-auth build (real auth is a deferred follow-up). |
-| **Persona + store setup** ([`persona/`](persona/), [`seneschal/store/`](seneschal/store/)) | The wizards + the pluggable identity and backend layers. |
+| **Persona + store layers** ([`persona/`](persona/), [`seneschal/store/`](seneschal/store/)) | The pluggable identity and backend layers, with tracked templates. (The guided setup wizards land in the next release wave.) |
 | **Voice call-screener** ([`phone/`](phone/)) | A Cloudflare Workers + Twilio screener that fronts your phone line in the assistant's voice, plus a **Call Shield** Android app feeding presence/health signals. |
 | **Local RAG + salience** ([`seneschal/scripts/rag_*.py`](seneschal/scripts/)) | A free, local semantic index (Ollama + stdlib sqlite) over your journal/notes, and an observe-only "what's safe to forget" experiment. |
 

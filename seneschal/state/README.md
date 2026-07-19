@@ -37,7 +37,7 @@ carry-over); this directory is the cheap local cache the no-LLM sentinel and the
 | `cockpit-pipe-token` | `cockpit_pipe.py` (`ensure_pipe_token`, first run) | Auto-generated auth token for the localhost **cockpit pipe** (the daemon's sixth supervised task). Plain text; delete to rotate. |
 | `warm-transcript.jsonl` | `presence.py` (the chat-event tee) via `cockpit_pipe.py` | Capped **ring buffer** of digestible warm-session `chat.event`s (turn_started / assistant_output / tool_use / turn_done, correlated by `turn_id`) so a (re)connecting cockpit client can backfill. Regenerable; trimmed in place (~2000 events). |
 | `cockpit-inbox.jsonl` + `cockpit-inbox-seen.json` | cockpit backend (append) / `presence.py` (drain, each scheduler tick) | **Fallback chat inbox** for when the cockpit pipe is down: appended `{id, text, ts, force_fable?}` lines drain into the same action queue Telegram uses (deduped via the seen ledger) — degraded to ~tick latency, never lossy. |
-| `cockpit-audit.jsonl` | cockpit backend (`cockpit/server/control.py`) | Append-only **audit log of every mutating cockpit call** (`{ts, action, detail}`): restart enqueues (REST + WS), model-config and governor-config PUTs. One line per call, win or no-op. |
+| `cockpit-audit.jsonl` | cockpit backend (`cockpit/server/control.py`) | Append-only **audit log of every mutating cockpit call** (`{ts, action, detail}`): restart enqueues (REST + WS), model-config and governor-config PUTs. One line per call, win or no-op. Seed: `cockpit-audit.example.jsonl`. |
 | `cockpit-session-secret` | cockpit backend (`cockpit/server/session.py`, first use) | Auto-generated **session-cookie signing secret** (random 32 bytes) for the cockpit's real-auth mode (deferred follow-up — generated on demand, unused until then). Never an env var, never logged; delete to rotate (worst case: everyone gets logged out). |
 | `meals.json` | Dream (staged snapshot) | The **meal-plan/meal-idea snapshot** the cockpit's Meals panel reads (`GET /api/meals`) — `{"staged_at", "plans": [{"title","url","summary","tags"}]}`. Optional: written when Dream stages meal plans from the active store; absent → the panel shows an honest empty state. |
 | `model-config.json` | cockpit / `model_config.py` CLI (seed `model-config.example.json`) | The two **model dials**: `warm_model` (wins over `--model` at every warm-session spawn — `presence.resolve_warm_model`) and `max_routable_model` (the live ceiling on Fable delegation; gates the router's fable arm + `fable_delegate.py`). |
@@ -50,10 +50,13 @@ carry-over); this directory is the cheap local cache the no-LLM sentinel and the
 | `nudge-stagger.json` | `sentinel.py` (`check_reminders`) | Instant of the last **non-piercing** nudge fired (`{"last_nonpiercing_fire": ISO-UTC}`) — the **catch-up stagger** clock. A released backlog fires ≤ 1 non-piercing nudge per pass, ≥ 15 min apart, so it drips instead of walling; piercing items (`Call Me`/Critical/meds) skip it. Absent/broken → fire immediately (fail-open). See `../references/reminders-policy.md` → "Catch-up stagger." |
 | `last-signal.json` | `sentinel.py` | Verdict of the last sentinel one-shot (debug / observability). |
 | `metrics.jsonl` | modes (Trace/Observability advisor) | Append-only per-turn metrics the **Observability advisor** emits (one JSON object per line). Feeds Dream's weekly graduation rollup. Seed: `metrics.example.jsonl`; schema below; see `../references/advisor-chain.md`. |
-| `router-log.jsonl` | `presence.py` (Router advisor, shadow) | Append-only per-inbound-message verdicts from the front-door **Router advisor** running in **shadow mode** (`scripts/router.py`, model `qwen3.5:4b`) — one JSON object per inbound chat message. **Log-only, zero behavior change** in phase 1; it's the accuracy evidence reviewed before phase 2 enables local handling. Seed: `router-log.example.jsonl`; schema below; setup: `../scripts/ROUTER_SETUP.md`. |
+| `router-log.jsonl` | `presence.py` (Router advisor, shadow + fable arm) | Append-only per-inbound-message verdicts from the front-door **Router advisor**, TWO arms sharing this one log (distinguished by `arm`): the **triage arm** (`arm: "triage"`) running in **shadow mode** — trivial vs escalate, log-only, zero behavior change, gathering accuracy evidence before a phase-2 local-handling flip — and the **fable arm** (`arm: "fable"`, v3) — standard vs Fable-level, gated on the live `max_routable_model` ceiling admitting Fable (never even calls Ollama otherwise), whose "fable" verdict rides into the warm session's prompt as a hint LINE (not purely observational, unlike the triage arm). Both use `scripts/router.py`, model `qwen3.5:4b`. Seed: `router-log.example.jsonl`; schema below; setup: `../scripts/ROUTER_SETUP.md`. |
 | `forgetting-events.jsonl` | Chat / Brief / Dream (the reasoning loop) | Append-only **forgetting-event log** (salience Phase 2): one line each time the assistant failed to recall/surface something *and there was a reaction* — the emotional-weight axis of `salience = frequency × weight`. Written organically, **never fished for**. Seed: `forgetting-events.example.jsonl`; schema below; policy: `../references/salience.md`. |
 | `ablation-judgments.jsonl` | Chat (via `scripts/ablation_log.py`) | Append-only **memory-ablation A/B verdicts** (salience Phase 4c) — the human-judged **oracle** the cheap salience proxies calibrate against: the assistant answered a sampled recall turn twice (memory *with* vs *withheld*, blind where practical), the owner picked the better answer **and said why**. Seed: `ablation-judgments.example.jsonl`; schema below; protocol: `../references/salience.md`. |
 | `rag-index.sqlite` | `scripts/rag_index.py` (Dream refresh) / `rag_query.py` (access counters) | Local **semantic RAG index** (Retrieval advisor, phase B): embedded chunks of the assistant's prose corpus (journal/notes/run-log) for semantic recall. Regenerable cache — rebuild with `rag_index.py --rebuild --local`. Also carries the **salience-learning** data (observe-only "what's safe to forget" experiment): `disposable`/`salience_cat`/`predicted_at` tags on chunks + the `salience_access` ledger — which is **measurement, not cache** (deliberately preserved across `--rebuild`; counters key on deterministic chunk ids). Schema below. Binary; no seed. Setup: `scripts/RAG_SETUP.md` + `scripts/SALIENCE_SETUP.md`. |
+| `project-roots.json` | hand-edited (seed `project-roots.example.json`) | Config for the **project-state RAG layer** (`scripts/rag_projects.py`): `roots` scanned for git repos, `non_git_roots` whose immediate unversioned project dirs also get summaries, `extras` (stray projects anywhere on disk), `max_depth`, `exclude_names`, `github.{enabled,limit}`. See `../scripts/RAG_SETUP.md`. |
+| `projects.jsonl` | `scripts/rag_projects.py` | The scan's JSONL records (`{"source":"project","ref":"<path>","text":…}`) — one project-state summary per local project + per GitHub repo with no local clone. Regenerable cache; re-ingestable via `rag_index.py --ingest`. |
+| `projects-map.md` | `scripts/rag_projects.py` (overwrites) | Human-readable **where-everything-lives map**: local projects (path, branch, last commit, about) + GitHub-only repos. The cheap orientation read for "where is project X?"; do not hand-edit. |
 | `health.db` | `scripts/health_import.py` | Local **Samsung Health cache**: sleep sessions + stages, heart rate, stress, SpO₂, skin temperature, steps, meds, weight, parsed out of the export zip. Timestamps are naive-UTC + `tz_offset_min` (Samsung stores UTC, **not** wall clock — reading them as local shifts everything by the local UTC offset; see `../scripts/HEALTH_SETUP.md`). Regenerable cache; the export is cumulative, so delete and re-import any time. Binary; no seed. |
 | `health-dashboard.html` | `scripts/health_dashboard.py` | Rendered **sleep & health dashboard** — self-contained HTML (inline CSS + generated SVG, no CDN), openable straight from disk. Centrepiece is the actigram: one row per night, every sleep session drawn where it actually happened. Regenerable from `health.db`. |
 | `presence.db` | `scripts/presence_import.py` (via the listener's `/presence-ingest`) | Local **presence event store** (Phase 1): geofence enter/exit, activity transitions, sleep/wake — the *edge* log, consumed once-per-transition by the rules layer against a watermark. **Coordinates never land here** — the wire carries only place name + transition. Naive-UTC + `tz_offset_min`. Regenerable cache; binary, no seed. **Pruned to ~30 days nightly in Dream** (`presence_import.py --prune-days 30`). See `../scripts/presence_common.py`. |
@@ -138,9 +141,20 @@ a false "asleep". The snapshot still carries `asleep` (the phone keeps sending s
 only) but `presence_rules.py` ignores it — the rule returns only with a wearable-grade signal (watch heart
 rate + wrist motion).
 
+## Daily seed (`reminders_seed.py`)
+
+The four fixed reminder slots were retired for **exact per-reminder times**. A once-per-local-day
+**seed** (`presence.maybe_seed_day`, *date-rollover* triggered — the first tick of each new local
+calendar date; guarded by `slots.json["reminders-seed"]`) runs the daily reset and queues each ⏰ row's
+exact times — primary time(s) from the row's `Times` field (or its `Time Window` default) plus a 90-min
+re-fire ladder for importance ≥ High / `Nag Until Done` — into `reminders.json` via `reminders_seed.py`
+(idempotent, ids `rmd-<date>-<slug>-<HHMM>`). The ~5 s delivery tick fires each at its due minute; every
+delivery gate (quiet / ack / presence / catch-up stagger) applies unchanged. See
+`../references/reminders-policy.md` + `../docs/reminder-exact-time-scheduling-spec.md`.
+
 ## Standing rolls (`reminders_roll.py`)
 
-Most reminders fit the four daily slots, but some want a **custom intraday cadence** the slots can't
+Most reminders fit an exact-time seed, but some want a **custom intraday cadence** a `Times` list can't
 express — e.g. *check messages every 2 hours, 9am–11pm*. Those live as **rolls** in
 `../scripts/reminders_roll.py` (a `ROLLS` config list keyed to a ⏰ row's `reminder_id`). The presence
 daemon calls `refill_rolls` from its loop, gated **once per local day** via `rolls.json`, and regenerates
@@ -149,6 +163,41 @@ queue math, no Notion and no `claude` spawn, so it's free and safe to run every 
 (a late first run never back-fires past slots) and **idempotent** (stable ids `rmd-<date>-<prefix>-<HH>`,
 so it never double-queues). `Dream` prunes fired entries nightly, keeping the queue bounded. Run
 `python reminders_roll.py --dry-run` to preview. Behavior contract: `../references/reminders-policy.md`.
+
+## `notion-outbox.sqlite` schema
+
+The durable **write-behind outbox** (`../scripts/outbox_common.py`) — one sqlite table, `outbox`, one row
+per act-low Notion write intent. A write is **journaled here first** (the durability guarantee), then a
+later LLM turn flushes it to Notion via MCP (option (a); `../docs/notion-write-behind-outbox-spec.md`).
+Stores the **logical intent**, not a pre-baked API call, so the store is flusher-agnostic (survives a
+switch to a REST-drainer). Fail-**closed**: an entry retries until Notion confirms.
+
+```sql
+outbox (
+    id               TEXT PRIMARY KEY,     -- enqueue-time uuid4; FIFO tiebreak with created_at
+    idempotency_key  TEXT NOT NULL UNIQUE, -- dedup: a repeat enqueue is a no-op; ack:<row>:<date>,
+                                           --   medlog:<intent>, runlog-final:<row>, rstatus:<row>:<date>
+    op               TEXT NOT NULL,        -- ack_reminder | med_log | run_log_finalize | reminder_status
+    target_kind      TEXT NOT NULL,        -- 'page' (update a row) | 'db' (create a row in a collection)
+    target_id        TEXT NOT NULL,        -- ⏰/Run-Log page id, or the collection id to create in
+    payload          TEXT NOT NULL,        -- JSON: the logical fields for this op (not raw API JSON)
+    status           TEXT NOT NULL,        -- pending | inflight | done | failed(=dead-letter)
+    attempts         INTEGER NOT NULL DEFAULT 0,  -- incremented at claim, BEFORE the write (poison-pill)
+    not_before       TEXT,                 -- ISO-UTC backoff gate; NULL = eligible now
+    created_at       TEXT NOT NULL,        -- ISO-UTC
+    last_attempt_at  TEXT,
+    last_error       TEXT,                 -- trimmed message from the most recent failure
+    notion_page_id   TEXT                  -- written back on success (esp. for creates)
+)
+```
+
+**Lifecycle:** `pending` → (drain claims → `inflight`, attempts++) → `done` on Notion-confirm, or back to
+`pending` with a future `not_before` on a transient failure, or `failed` (dead-letter) after
+`MAX_ATTEMPTS` (8) or a permanent 4xx. A crashed drainer's stale `inflight` claim is reclaimed to
+`pending` after 5 min. Dead-letters persist until a human resolves them; Dream prunes `done` older than
+14 days (`outbox.py prune`). Idempotency: updates (acks/status/finalize) converge to the same target
+state, so replay is safe; creates (med rows) use a per-dose intent key + same-txn `notion_page_id`
+write-back to shrink the crash-after-create window. Inspect with `python ../scripts/outbox.py status`.
 
 ## `metrics.jsonl` schema
 
@@ -179,18 +228,22 @@ discarded it. `null` when the turn held nothing to approve.
 
 ## `router-log.jsonl` schema
 
-Append-only **JSON Lines** (one object per inbound chat message) written by the front-door **Router
-advisor** in `presence.py`, phase 1 (**shadow**). The router (`../scripts/router.py`) runs a small local
-Ollama model (`qwen3.5:4b`) to classify each message *trivial-and-safe* vs *escalate* **before** the warm
-Opus session spins — the same daemon-cheap-model shape as Watch. In phase 1 the verdict is **only logged**:
-every message still escalates to the warm session, unchanged. It's a gitignored local analytics cache
-(safe to lose/truncate); it's the accuracy evidence reviewed before phase 2 flips on local handling.
+Append-only **JSON Lines** (one object per inbound chat message), written by TWO arms of the front-door
+**Router advisor** sharing this one log, distinguished by `arm`.
+
+**The triage arm** (`arm: "triage"`, phase 1, **shadow**) — `presence.shadow_classify`. The router
+(`../scripts/router.py`'s `classify()`) runs a small local Ollama model (`qwen3.5:4b`) to classify each
+message *trivial-and-safe* vs *escalate* **before** the warm Opus session spins — the same
+daemon-cheap-model shape as Watch. In phase 1 the verdict is **only logged**: every message still
+escalates to the warm session, unchanged. It's the accuracy evidence reviewed before phase 2 flips on
+local handling.
 
 ```json
 {
   "ts": "2026-07-06T22:34:37Z",          // when classified (UTC)
-  "channel": "telegram",                  // telegram | discord
+  "channel": "telegram",                  // telegram | discord | cockpit
   "text_preview": "took my meds",         // first ~80 chars of the inbound message
+  "arm": "triage",                        // triage | fable
   "verdict": "trivial",                   // trivial | escalate
   "category": "ack",                      // ack | status | recall | other
   "confidence": 0.95,                     // 0.0-1.0; below ROUTER_CONF_THRESHOLD ⇒ escalate/other
@@ -204,6 +257,27 @@ every message still escalates to the warm session, unchanged. It's a gitignored 
 carries the message. The router is **conservative**: Ollama unreachable, bad JSON, an unknown category, or
 confidence below `ROUTER_CONF_THRESHOLD` (default 0.7) → `escalate`/`other`. Abstain ⇒ escalate. To read
 the log, tail it or count verdicts by category (see `../scripts/ROUTER_SETUP.md`).
+
+**The fable arm** (`arm: "fable"`, v3, `cockpit-spec.md` "Model dials & Fable delegation") —
+`presence.fable_arm_classify`, using `router.py`'s `classify_fable()`. Classifies an inbound message
+*standard* vs *Fable-level* (deep synthesis / long-horizon planning / hard multi-step debugging) — but
+**only when the live `max_routable_model` ceiling admits Fable**; otherwise this arm never even calls
+Ollama, so no row is written at all. Unlike the triage arm, a `"fable"` verdict is not purely
+observational: it rides into the warm session's NEXT prompt as a hint line (best-effort, FIFO,
+never persisted — losing the race just means no hint that turn).
+
+```json
+{
+  "ts": "2026-07-06T22:41:00Z",
+  "channel": "telegram",
+  "text_preview": "help me weigh the new offer against staying",
+  "arm": "fable",
+  "verdict": "fable",                     // standard | fable — safe default is "standard" (no delegate)
+  "confidence": 0.85,
+  "reason": "deep multi-factor synthesis",
+  "model": "qwen3.5:4b"
+}
+```
 
 ## `forgetting-events.jsonl` schema
 

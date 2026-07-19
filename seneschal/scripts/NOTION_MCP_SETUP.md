@@ -10,7 +10,7 @@ this session"* and your "mark it done" acks never reach the Tasks / ⏰ Reminder
 
 > **The bug this closes:** you tell the Telegram assistant *"took my meds"*, it says *"got it"* — but the
 > ack only lives in the volatile warm session, never the ⏰ Reminders DB. A reboot clears the session, the
-> next reminder slot reads a still-un-acked row, and it **re-nudges you for something you already did**.
+> next reminder run reads a still-un-acked row, and it **re-nudges you for something you already did**.
 > With Notion wired, the assistant writes the ack straight through to Notion, so it survives the reboot
 > and the loop stops. (See `seneschal/SKILL.md` Chat mode + the persona's no-false-writes principle.)
 
@@ -62,17 +62,17 @@ daemon — Telegram chat included — gets read/write Notion.
 
 Message the assistant on Telegram: *"What's the top open task in my Tasks DB right now?"* It should answer
 from Notion (not "I can't reach Notion"). Then tell it to mark something and **check the DB actually
-changed**. You can also watch the daemon console: a slot run (e.g. `reminders-morning`) should enqueue
-nudges without a Notion error.
+changed**. You can also watch the daemon console: the reminder **seed** run (date-rollover;
+`maybe_seed_day`) should enqueue nudges without a Notion error.
 
 ## Notes
 
 - **Share the databases with the integration** if you use the internal-token (stdio) variant — internal
   integrations only see pages/DBs explicitly shared with them. The hosted OAuth server sees what your
   Notion account can.
-- The four **reminder slots** the daemon runs (see `SCHEDULING.md` / `presence.py` `SLOTS`) read the
-  ⏰ Reminders DB — so **without** Notion access they can't enqueue the seeded-habit nudges (only ad-hoc
-  chat-set reminders fire). Notion access + the daemon's slot scheduler together restore DB-driven
-  reminders.
+- The daily reminder **seed** the daemon runs (`maybe_seed_day`, date-rollover — see `SCHEDULING.md` /
+  `presence.py`) reads the ⏰ Reminders DB — so **without** Notion access it can't enqueue the DB-habit
+  nudges (only ad-hoc chat-set reminders fire). Notion access + the daemon's seed together restore
+  DB-driven reminders.
 - Keep `ANTHROPIC_API_KEY` unset for the daemon (billing safety); the daemon scrubs it from child env
   regardless (`run-presence.cmd`, `presence.py`).
