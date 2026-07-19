@@ -343,6 +343,27 @@ a standing roll re-seeding itself), so buzzes kept landing all night.
   HH:MM` for other spans; `--clear` lifts it ("you can nudge me again"). Chat mode rule 7
   (`seneschal/SKILL.md`) wires it up.
 
+## Live-session defer (don't buzz into a live conversation)
+
+While a human is **actively engaged in an interactive `/assistant` chat** — the daemon's warm
+Telegram/Discord session or a desktop slash session — a due non-piercing nudge shouldn't buzz into the
+middle of the conversation. The **session registry** (`state/sessions/`, one small JSON entry per live
+session) is how the daemon knows:
+
+- **Defer INTO the session, never drop.** At the same delivery chokepoint (`sentinel.check_reminders`),
+  a non-piercing due nudge is **held** (stamped nothing → re-checked each ~5 s tick) while
+  `sentinel.session_is_live` is true, and fires naturally once the session ages out of its 120 s TTL.
+  The redundant Watch comms-peek is skipped too (without consuming its cadence).
+- **Only interactive sources gate.** `daemon` (the warm chat, self-registered every turn) and `desktop`
+  (a slash session, self-registered via `scripts/session_heartbeat.py`) defer delivery. `build` /
+  `scheduled` entries — every other Claude Code session, stamped by the machine-wide
+  `scripts/session_stamp.py` hook — are **awareness-only** ("who's live, on what branch"): the owner is
+  coding, not conversing, so reminders still buzz normally.
+- **The pierce set is the same as quiet's.** `Call Me` + Critical-and-above fire immediately regardless;
+  the gates compose (quiet's drop wins first, piercing pierces both).
+- **Fail-open.** A missing / malformed / stale registry reads *not live* — the absence of the signal can
+  never block a genuine reminder.
+
 ## Catch-up stagger (a released backlog must drip, not wall)
 
 The quiet window *drops* what was slept through, but the **presence gate** (`presence_rules.py`) *holds* —

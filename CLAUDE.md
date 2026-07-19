@@ -39,6 +39,8 @@ seneschal/
                    identity_common.py (persona/identity.json reader — never raises, defaults
                    when absent; presence.py renders its grounding/slot prompts from it),
                    telegram/discord/proton/google comms bridges, reminders_* queue+ack ledger,
+                   session_stamp.py + session_heartbeat.py + mini_dream.py (multi-session
+                   registry under state/sessions/ + the per-session mini-dream distiller),
                    rag_* (local semantic index), router.py, salience tooling, health/presence
                    pipelines, archive_common.py + telegram_ingest.py + discord_export_ingest.py
                    + sms_ingest.py + archive_aggregate.py (message archiver),
@@ -72,6 +74,14 @@ reminders from the local queue, and running a cheap Watch comms-peek on cadence.
 None; filesystem backends need none, `resolve_store_mcp`). It runs off `main` and reloads itself when a
 PR merges (`seneschald-update` scheduled task → ff-pull → graceful restart). Runtime state lives in
 gitignored `seneschal/state/`.
+
+**Multi-session awareness:** a session registry (`state/sessions/`) tracks every live Claude Code
+session on the box — the daemon defers non-piercing nudges into a live interactive `/assistant` chat
+(daemon/desktop sources; build sessions are awareness-only) and skips the redundant comms-peek. The
+machine-wide `session_stamp.py` hook (installed in the user's `~/.claude/settings.json`, never shipped
+here — see `scripts/SCHEDULING.md` → "Session registry hooks") stamps sessions and, on SessionEnd,
+fire-and-forgets `mini_dream.py`, which distills the transcript into
+`state/session-distillations.jsonl` — the cross-instance memory Dream compacts nightly.
 
 ## Conventions
 
