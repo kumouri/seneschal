@@ -333,7 +333,10 @@ durable done-record the Wrap reads.
 
 A sweep across channels, surfacing only what needs the owner, each item drafted-and-held (ask-high to
 send):
-- **Slack** ✅ → delegate to `../subagents/slack-triage/SKILL.md` (DMs, mentions, busy channels).
+- **Slack** ✅ → delegate to `../subagents/slack-triage/SKILL.md` (DMs, mentions, busy channels). Replies
+  are **drafted from the pinned Slack SSOT** (`references/slack-ssot.md`) under the derivation contract
+  and held on the standard approval loop — the assistant always signs; sends stay ask-high. Design:
+  `docs/slack-draft-and-hold-spec.md`.
 - **Email** ✅ (Proton + Gmail) → `../subagents/email-triage/SKILL.md`. Triage **both** inboxes when
   both are configured, replying from the assistant's address (`references/comms-mapping.md`).
 - **Calendar invites** ✅ → delegate to `../subagents/calendar-steward/SKILL.md` (unanswered invites,
@@ -552,6 +555,7 @@ it — is in `references/memory.md`.
 | `references/databases.md` | Assistant-facing domain/schema subset (Tasks, Projects, Flags, People, Goals) + the Run Log — the Notion backend's schema restated for the assistant's own modes; pointer to the canonical journal map. Placeholder ids until store setup fills a local copy. |
 | `references/calendar-mapping.md` | Calendar MCP tools + which calendar is the owner's. |
 | `references/comms-mapping.md` | Email (Proton/Gmail), Slack, Twilio/SMS tool mapping + gotchas. |
+| `references/slack-ssot.md` | The pinned **Slack SSOT** template — the owner-curated fact sheet every Slack draft asserts from (standing facts, restricted/name-gated facts, availability policy, canned answers, the privacy fence, escalation phrases). Kept current by the owner; Dream proposes, never applies. Design: `docs/slack-draft-and-hold-spec.md`. |
 | `references/advisor-chain.md` | The Advisor Chain — the ordered per-turn interceptor pipeline (Spring-AI-style): the advisors, their in/out hooks, the shared turn-context, per-mode composition, and the deferred code-backed rails. |
 | `references/briefing.md` | What a morning Brief / EOD Wrap contains and how to source each part. |
 | `references/reminders-policy.md` | Reminders/nudges: exact times + the daily seed, escalation state machine, rib threshold + tone ladder. |

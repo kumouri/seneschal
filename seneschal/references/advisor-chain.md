@@ -69,8 +69,11 @@ when the turn produced **outbound content** (nothing to review otherwise).
 2. **Identity** — signs as the assistant, in the assistant's own name ("<Assistant>, <the owner>'s
    assistant"); never as the owner, never first-person-as-the-owner.
 3. **Faithfulness** — every claimed fact (date, commitment, task) traces to Notion/calendar/email; nothing
-   invented.
-4. **Privacy** — no health / identity / financial data leaking to an **external** recipient. *(Seed of
+   invented. For **Slack** drafts this is the **derivation contract**: every fact traces to the SSOT
+   (`slack-ssot.md`), a live Retrieval read, or the inbound thread — anything else becomes the escalation
+   phrase or no draft (`../../subagents/slack-triage/SKILL.md`). A claim Critique can't trace is a fail.
+4. **Privacy** — no health / identity / financial data leaking to an **external** recipient. For Slack
+   this maps to the SSOT's **"Never state" fence** (`slack-ssot.md`). *(Seed of
    the future dedicated Privacy advisor — Critique grows into it.)*
 5. **Concision** — leads with the point, no padding.
 

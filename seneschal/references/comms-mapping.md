@@ -44,9 +44,27 @@ inboxes; send only via Proton.**
 
 - Read: `*-slack_read_channel`, `*-slack_read_thread`, `*-slack_search_public(_and_private)`,
   `*-slack_read_user_profile`.
-- Write: `*-slack_send_message_draft` (draft → act-low), `*-slack_send_message` (send → **ask-high**),
-  `*-slack_schedule_message`.
+- Write: `*-slack_send_message` (send → **ask-high**), `*-slack_send_message_draft` (a Slack-side draft —
+  kept only for an explicit *"leave it in my Slack drafts"* ask; the draft-and-hold flow does **not** use
+  it, Q5), `*-slack_schedule_message` (scheduled sends are **out of scope for v1**, Q11).
 - Triage: screen DMs/mentions, summarize busy channels, surface what needs a reply.
+
+**Draft-and-hold (the reply-drafting flow).** When a DM / direct @-mention needs a reply, the assistant
+**drafts** it (act-low) from the pinned **Slack SSOT** (`slack-ssot.md`) under the derivation contract,
+and **holds** it for approval on the standard held-approvals loop (`memory.md` → *Held approvals*; schema
+in `../state/README.md`). Each held draft is a **single signed body** — `send a7` (the assistant always
+signs; Q4's unsigned/as-the-owner variant was deferred by the owner). On approve, the assistant runs a
+**freshness re-check** (re-read the thread since `thread_seen_ts`; a moved thread re-surfaces instead of
+sending) then posts **verbatim** via `slack_send_message`. A send failure is **never auto-retried**
+(double-post risk) — it's kept in carry-over, surfaced, and re-attempted only on a fresh `send`. Full
+behavior + the owner's 11 rulings: `../../subagents/slack-triage/SKILL.md` +
+`../docs/slack-draft-and-hold-spec.md`.
+
+**Daemon Slack hands.** The headless daemon's warm session may *understand* a Telegram `send a7` but lack
+Slack tools to execute it — it then records `status: "approved"` and drains it on the next Slack-capable
+turn (the *Slack-hands gap*). Wiring `scripts/slack-mcp.json` (auto-detected by `presence.py`;
+`--no-slack` opts out — Q9) closes the gap so a Telegram `send` posts immediately:
+`../scripts/SLACK_MCP_SETUP.md`.
 
 ## Telegram — the assistant's primary push + two-way chat (free, local)
 

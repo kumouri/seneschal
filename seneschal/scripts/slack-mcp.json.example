@@ -1,0 +1,11 @@
+{
+  "//": "Copy to slack-mcp.json (git-ignored). The presence daemon AUTO-DETECTS it at scripts/slack-mcp.json and passes it as --mcp-config to every spawned claude, so a Telegram-approved `send a7` posts to Slack immediately instead of parking as status=approved (the Slack-hands gap). The server MUST expose the same slack_* tool names the assistant's skills use (slack_send_message, slack_read_thread, slack_search_public_and_private, slack_read_channel, …). PREFER the user-scope `claude mcp add` path in SLACK_MCP_SETUP.md — then you don't need this file at all. This only grants the daemon HANDS; sending stays ask-high, so the owner's explicit `send <id>` is still the only thing that fires a post.",
+
+  "//hosted": "The url below is Slack's OFFICIAL hosted MCP server (https://mcp.slack.com/mcp) — the same connector the claude.ai app uses, so its slack_* tool names match the assistant's skills (the community npm server uses different names and won't match). Authenticate ONCE interactively: run `claude --mcp-config seneschal/scripts/slack-mcp.json` in a terminal, then /mcp -> slack -> complete OAuth. The token is cached and reused by headless daemon spawns.",
+  "mcpServers": {
+    "slack": {
+      "type": "http",
+      "url": "https://mcp.slack.com/mcp"
+    }
+  }
+}

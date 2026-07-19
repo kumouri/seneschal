@@ -19,6 +19,7 @@ __pycache__/
 **/ha.env
 **/cockpit.env
 **/notion-mcp.json
+**/slack-mcp.json
 **/*.secret
 # HAR captures hold live session cookies/tokens — never commit them
 **/*.har
