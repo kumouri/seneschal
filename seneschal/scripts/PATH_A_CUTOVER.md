@@ -45,8 +45,11 @@ foreach ($f in 'run-log','carry-over','context-digest') {
 
 # 3. Move the checkout onto main. -f discards the now-deleted tracked references/*.md (already backed
 #    up in step 2); state/*.md are gitignored so they survive.
+#    Use `-B main origin/main`, NOT a bare `checkout main`: it works even when `main` does not yet exist
+#    as a local branch, and it disambiguates when more than one remote carries a `main` (a bare checkout
+#    of a not-yet-local branch dies with "matched multiple remote tracking branches" in that case).
 git -c core.fsmonitor=false fetch origin
-git -c core.fsmonitor=false checkout -f main
+git -c core.fsmonitor=false checkout -f -B main origin/main
 git -c core.fsmonitor=false pull --ff-only origin main
 
 # 4. Point the local restart-seneschald.ps1 (and the `reseneschald` alias) at the version-controlled
@@ -76,7 +79,7 @@ name: seneschal-dream
 description: Have the assistant consolidate the day and learn from it
 ---
 
-Run the Dream consolidation (seneschal/SKILL.md): rebuild state/context-digest.md and refresh reminders.
+Run the Dream consolidation (seneschal/SKILL.md): rebuild state/context-digest.md, refresh reminders, propose learnings.
 
 Then follow the Dream PR step in seneschal/SKILL.md: open a PR **only if a tracked source file changed** —
 built in a transient worktree off main — and **merge it on green** (`gh pr merge --merge` once every CI
@@ -105,6 +108,14 @@ the active store (e.g. Notion).
 - **A PR merges to `main`** → within ~10 min `seneschald-update` ff-pulls it and enqueues a graceful
   `restart` control. The daemon applies it **once its warm chat session is idle** (1-min quiet window when
   a restart is pending), re-execs, and comes back on the merged code. No conversation is interrupted.
+- **The updater self-heals and speaks up.** Every Update cycle stamps `state/seneschald-health.json`
+  (`status` / `reason` / `consecutive_blocked` / `last_ok` — `last_ok` is the watch-the-watcher field).
+  If a session parked the live checkout on a feature branch, the updater reclaims `main` automatically
+  **only when** the parked branch has no commits `origin/main` lacks AND the session registry says no
+  live session claims it (`sentinel.py --branch-claimed`, fail-closed — "can't tell" means "hands off").
+  A block persisting past 3 cycles (~30 min) sends the owner a Telegram nudge, re-alerting at most every
+  6 h; an unexpected crash still stamps a blocked heartbeat via the catch-all, so the health file can
+  never freeze silently at `ok`.
 - **Manual hard restart** (rare) → `reseneschald` / `seneschald-control.ps1 -Action Restart`.
 - **Runtime memory** (`state/run-log.md`, `carry-over.md`, `context-digest.md`) is gitignored and never
   conflicts on a pull; the active store (Run Log + carry-over) stays the system of record. See

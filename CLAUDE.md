@@ -90,8 +90,12 @@ force-routes; the Oikonomos governor meters token spend). It forwards the
 (`--store-mcp` override → `store/config.json`'s active backend → legacy `scripts/notion-mcp.json` →
 None; filesystem backends need none, `resolve_store_mcp`) — alongside an auto-detected
 `scripts/slack-mcp.json` (Slack send hands, `--no-slack` to disable). It runs off `main` and reloads
-itself when a PR merges (`seneschald-update` scheduled task → ff-pull → graceful restart). Runtime state
-lives in gitignored `seneschal/state/`.
+itself when a PR merges (`seneschald-update` scheduled task → ff-pull → graceful restart). The updater
+**self-heals and speaks up**: it reclaims `main` from an abandoned feature-branch park only when the
+branch has no unique commits AND the session registry says no live session claims it (`sentinel.py
+--branch-claimed`, fail-closed), stamps `state/seneschald-health.json` every cycle (`last_ok` is the
+watch-the-watcher field), and nudges the owner on Telegram when blocked > 3 cycles (~30 min, re-alert ≤
+every 6 h) — see `scripts/PATH_A_CUTOVER.md`. Runtime state lives in gitignored `seneschal/state/`.
 
 **Multi-session awareness:** a session registry (`state/sessions/`) tracks every live Claude Code
 session on the box — the daemon defers non-piercing nudges into a live interactive `/assistant` chat
