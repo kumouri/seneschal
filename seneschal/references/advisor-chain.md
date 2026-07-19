@@ -38,6 +38,7 @@ the work (outbound), unwound in reverse order.
 | 0 | **Trace** (`SimpleLoggerAdvisor`) | open a Run Log row early (`Status = Partial`) once past critical path | finalize counts + `Status` + carry-over; mirror to `state/run-log.md`; **emit a metrics line** (Observability, below) |
 | 5 | **Prioritization / ranking** *(out-only)* | — | shape the assembled deliverable before Trace logs it: **pull → rank, show all; push → adaptive vital-few** (see below) |
 | 10 | **Orientation / Memory** (`MessageChatMemoryAdvisor`) | read `context-digest.md` → `carry-over.md` → run-log tail; resolve "today" in the owner's configured timezone | persist updated carry-over / digest deltas |
+| 15 | **Oikonomos / budget governor** | compute the turn's budget envelope from `governor-config.json` + ledger rollups (see below) | meter actuals into `governor-ledger.jsonl` (+ a metrics line); fire threshold alerts; enforce turn checkpoints |
 | 20 | **Retrieval / Context** (`RetrievalAugmentationAdvisor`) | modular RAG: **query-transform → retrieve → rerank + compress → augment** — baked-in refs first, cap concurrent `notion-*` reads; *fewer, better* reads (see below) | (usually none) |
 | 30 | **Dispatch / Delegate** | pick the mode; load the owning subagent `SKILL.md` (delegate, don't duplicate) | — |
 | 35 | **Critique / self-review** | review any *drafted outbound* against the five-point check; **revise-once-and-note**, else flag (see below) | — |
@@ -69,8 +70,11 @@ when the turn produced **outbound content** (nothing to review otherwise).
 2. **Identity** — signs as the assistant, in the assistant's own name ("<Assistant>, <the owner>'s
    assistant"); never as the owner, never first-person-as-the-owner.
 3. **Faithfulness** — every claimed fact (date, commitment, task) traces to Notion/calendar/email; nothing
-   invented.
-4. **Privacy** — no health / identity / financial data leaking to an **external** recipient. *(Seed of
+   invented. For **Slack** drafts this is the **derivation contract**: every fact traces to the SSOT
+   (`slack-ssot.md`), a live Retrieval read, or the inbound thread — anything else becomes the escalation
+   phrase or no draft (`../../subagents/slack-triage/SKILL.md`). A claim Critique can't trace is a fail.
+4. **Privacy** — no health / identity / financial data leaking to an **external** recipient. For Slack
+   this maps to the SSOT's **"Never state" fence** (`slack-ssot.md`). *(Seed of
    the future dedicated Privacy advisor — Critique grows into it.)*
 5. **Concision** — leads with the point, no padding.
 
@@ -135,6 +139,79 @@ owner's call)*:
 worth a proactive nudge — it **never merges** them into one buzz. The Reminders policy still fires the
 chosen items **staggered, one per notification** (`reminders-policy.md`); Prioritization gates the set, the
 policy owns the timing. (A Reminders *status digest* is a pull surface — show all.)
+
+## Oikonomos / budget-governor advisor (order 15) — ✅ ADOPTED (v3.5, `docs/cockpit-spec.md`)
+
+**οἰκονόμος**, the household steward — "economy" is its descendant. It slots between Orientation (10)
+and Retrieval (20), so its envelope wraps everything the rest of the turn spends: `in:` computes the
+turn's **budget envelope** from `state/governor-config.json` + the spend-to-date rollups over
+`state/governor-ledger.jsonl`; `out:` meters the turn's actual spend into that same ledger (+ a metrics
+line), fires threshold alerts, and enforces turn checkpoints. Code: `scripts/governor.py`.
+
+**Design honesty — rails vs advisory (read this before touching a knob).** Oikonomos spans two very
+different worlds, and pretending a prompt-side knob is a hard rail (or vice versa) would be worse than
+not shipping it at all:
+
+| Knob | Kind | Where it's actually enforced |
+|------|------|-------------------------------|
+| Per-turn max output tokens | **advisory** | Prompt/doc-side guidance only — the reasoning loop honors it, nothing in code truncates a reply. |
+| Reasoning-effort tier (per mode / per model) | **advisory** | Same — a guidance value the orchestrator reads when picking how hard to think, not a code-enforced cap. |
+| Turn checkpoints (N autonomous turns before pausing to ask) | **advisory** | The orchestrator counts and pauses; no code kills a session mid-run. |
+| Total-turn cap per conversation | **advisory** | Same — a number the reasoning loop is told to respect, alert-at-% aside. |
+| Daily + weekly token budgets **per model** | **rail** (metered + alerting) | `governor.append_spend`/`rollups` meter every turn's real usage; `due_alerts`/`should_alert` fire a Telegram line at the alert-at-% threshold. **Only the Fable model's budget is also a hard block** (via the fable_oneshot gate below) — the warm session's own turn loop has no interruptible point mid-stream, so its budgets stay meter-and-alert only. Honest about the gap: raising the ceiling doesn't currently stop a warm-model turn already producing tokens. |
+| **Fable one-shots per day** | **rail (hard)** | `governor.check("fable_oneshot", ...)` refuses before `fable_delegate.py` ever spawns the subprocess. |
+| **Max Fable one-shots per conversation** | **rail (hard)** | Same gate, cumulative over the conversation's whole lifetime (not day-bound). |
+| Delegation concurrency | **rail (hard)** | Same gate, backed by a small in-flight counter (`begin_fable_call`/`end_fable_call`). |
+| Context-fill wind-down threshold | **advisory** | A number the reasoning loop watches for its own compaction judgment; no code measures context fill today. |
+| Proactive-push rate cap | **advisory** | Layers on the existing quiet-window/stagger rules (`reminders-policy.md`) as guidance, not a second code-enforced limiter. |
+
+The cockpit's Thresholds panel labels every knob `rail` or `advisory` right on the form — never lets the
+two blur together.
+
+**Config — `state/governor-config.json`** (gitignored; tracked `governor-config.example.json`).
+**Schema-driven**: `governor.SCHEMA` is a plain dict (knob → `{type, label, unit, kind, default, min/max
+or options, alert_at_pct, hard_stop}`) so the cockpit's Thresholds panel renders its form straight from
+it — a future knob needs a SCHEMA entry, never a UI rewrite. `load()` is tolerant (a missing file or a
+bad single value falls back to that knob's default, never raises); `save()` validates every touched key
+and raises on the first batch of problems, same strict-writes/tolerant-reads split as `model_config.py`.
+Keys already on disk that this version's SCHEMA doesn't recognize are preserved verbatim (forward
+compat — an older build reading a newer config never drops its knobs).
+
+**Spend ledger — `state/governor-ledger.jsonl`.** One JSON line per governed spend event —
+`{ts, kind, model?, tokens?, conversation_id?}`. Two kinds today: `"tokens"` (a turn's usage, appended by
+`presence.py`'s stream tee — `_make_stream_tee`/`_governor_meter_turn_usage`, the point where the
+claude-CLI's terminal `result` event carries `usage`) and `"fable_oneshot"` (a successful delegation,
+appended by `fable_delegate.py`). `governor.rollups()` computes day/week totals from it, gated on the
+**owner's local calendar-day boundaries** — the house timezone rule (after-midnight activity counts as
+the prior day; gate date logic on the owner's local date, not UTC) — by converting each record's actual
+UTC timestamp to its owner-local wall-clock date via `tz_common` (configured identity zone →
+machine-local fallback), not by re-bucketing at a fixed UTC offset.
+
+**The rail gate — `check(kind, state_dir, **ctx) -> Verdict(allowed, reason, remaining)`.** Today's one
+real caller is `fable_delegate.py`, kind `"fable_oneshot"`: before spawning, it checks (in order) the
+daily quota, the per-conversation quota (keyed on the daemon's current warm-session id — "one
+conversation across every surface," cockpit-spec.md's model — unless overridden), delegation
+concurrency, and Fable's own daily/weekly token budget. A refusal's `reason` is a complete sentence
+naming the quota and when it resets, so the warm session can relay it honestly (see `fable_delegate.py`'s
+own docstring + the grounding paragraph in `presence.py`) instead of inventing an excuse or quietly
+retrying. Fail-open throughout: an absent config reads as default quotas, a corrupt ledger reads as zero
+spend, and an unexpected exception from the governor call itself is treated as an allow inside
+`fable_delegate.delegate()` — a governor bug must never cost a legitimate delegation.
+
+**Threshold alerts.** `due_alerts(state_dir, model)` reports which of a model's daily/weekly budgets have
+crossed their `alert_at_pct`, without marking them sent; the caller (`presence.py`) pushes ONE Telegram
+line per due alert via the existing `send_telegram` path (act-low self-push) and only calls
+`record_alert_sent` after a send that actually landed — same "never rate-limit a failed alert away" rule
+`seneschald-control.ps1`'s `Send-SeneschaldAlert` follows for deploy-health alerts. Re-alerts are deduped
+per knob (not one global flag — several rails can cross threshold independently) for
+`ALERT_REALERT_HOURS` (6h), persisted in `state/governor-alert-state.json` alongside the ledger.
+
+**Cockpit surface — the Thresholds panel.** `GET /api/governor-config` returns the config + SCHEMA +
+today/this-week rollups; `PUT /api/governor-config` validates against a duplicated copy of SCHEMA
+(`cockpit/server/governor.py`, same own-dependency-world posture as `model_config.py` — cockpit-spec.md
+ruling 3) and audits every write. The form groups knobs by `rail`/`advisory`, shows each knob's
+alert-at-%/hard-or-soft badge, and renders spend meters (today/this-week tokens per model, Fable
+one-shots used/remaining) straight from the rollups.
 
 ## Retrieval / Context advisor — deepened into modular RAG (order 20)
 
@@ -228,29 +305,43 @@ as a rate-limit mitigation alongside Retrieval's *fewer, better* reads; and it's
 pattern as Watch. Model = `qwen3.5:4b`, local Ollama, stdlib-only (`scripts/router.py`, mirrors
 `rag_common.py`). Setup + how to read the log + the phase-2 plan: `scripts/ROUTER_SETUP.md`.
 
+**The fable arm (v3, `docs/cockpit-spec.md` "Model dials & Fable delegation") — ✅ ADOPTED.** A second,
+independent classifier in the same `router.py` (`classify_fable`), gated on the LIVE `max_routable_model`
+ceiling (`state/model-config.json`) admitting Fable — when it doesn't, this arm never even calls Ollama.
+Once active, it classifies escalations **standard vs Fable-level** (deep synthesis / long-horizon
+planning / hard multi-step debugging) and, unlike the triage arm above, its `"fable"` verdict is NOT
+purely observational: it rides into the warm session's next prompt as a hint line (never a command —
+the warm session's own judgment and a `!fable` force-route are independent triggers). Both arms share
+`state/router-log.jsonl`, distinguished by `arm: "triage"`/`"fable"`. The cockpit's Router panel charts
+both. Setup: `scripts/ROUTER_SETUP.md` → "The fable arm".
+
 ## Per-mode composition (the per-request `.advisors(...)`)
 
 Each mode declares its chain as a one-liner — the default chain, plus/minus advisors:
 
-- **Chat** — `[trace?, orientation, retrieval, dispatch, critique*, gate, prioritize*]`. Trace is
-  *conditional* (idle chat and read-only questions skip it); `critique*` fires only when the turn drafts
-  outbound content; `prioritize*` applies when the turn surfaces a list — **pull** (they asked) → show all,
-  **push** (the assistant pinging unprompted) → vital-few.
-- **Ask** — `[trace?, orientation, retrieval, dispatch, gate]`. Read-only Q&A; Critique only if it drafts
-  an outbound (rare). A Q&A answer the owner asked for is a pull surface — rank, show all.
-- **Brief / Wrap** — full chain **+ Prioritize (pull → rank, show all)**; Trace always on. (Critique's
-  lighter internal pass is a later phase.)
-- **Triage** — full chain **+ Critique** on every drafted reply **+ Prioritize (pull → rank, show all)** on
-  the summary — `[trace, orientation, retrieval, dispatch, critique, gate, prioritize]`; the Gate is
-  load-bearing here (every send is ask-high).
-- **Reminders** — full chain **+ Prioritize**: the **status digest** is pull (rank, show all); an actual
-  **nudge** is push (adaptive vital-few, fired staggered per `reminders-policy.md` — the gate never merges
-  buzzes).
-- **Watch** — **trimmed**: `[orientation(light), gate, prioritize(push)]`, no heavy Retrieval — it's the
-  cheap peek gate; on escalation it pushes only the vital few and writes a trace.
-- **Dream** — full chain **+ a `Propose-Learnings` advisor** at order 45 (`out:` step): spot patterns,
-  draft gated proposals, open the PR and merge it on green (red/pending CI holds the merge for the owner)
-  — never auto-apply; a merged proposal is *recorded*, not policy, until the owner approves it.
+- **Chat** — `[trace?, orientation, oikonomos, retrieval, dispatch, critique*, gate, prioritize*]`.
+  Trace is *conditional* (idle chat and read-only questions skip it); `critique*` fires only when the
+  turn drafts outbound content; `prioritize*` applies when the turn surfaces a list — **pull** (they
+  asked) → show all, **push** (the assistant pinging unprompted) → vital-few.
+- **Ask** — `[trace?, orientation, oikonomos, retrieval, dispatch, gate]`. Read-only Q&A; Critique only
+  if it drafts an outbound (rare). A Q&A answer the owner asked for is a pull surface — rank, show all.
+- **Brief / Wrap** — full chain (incl. **Oikonomos**) **+ Prioritize (pull → rank, show all)**; Trace
+  always on. (Critique's lighter internal pass is a later phase.)
+- **Triage** — full chain (incl. **Oikonomos**) **+ Critique** on every drafted reply **+ Prioritize
+  (pull → rank, show all)** on the summary — `[trace, orientation, oikonomos, retrieval, dispatch,
+  critique, gate, prioritize]`; the Gate is load-bearing here (every send is ask-high).
+- **Reminders** — full chain (incl. **Oikonomos**) **+ Prioritize**: the **status digest** is pull (rank,
+  show all); an actual **nudge** is push (adaptive vital-few, fired staggered per `reminders-policy.md` —
+  the gate never merges buzzes).
+- **Watch** — **trimmed**: `[orientation(light), oikonomos(envelope-only), gate, prioritize(push)]`, no
+  heavy Retrieval — it's the cheap peek gate; on escalation it pushes only the vital few and writes a
+  trace. Oikonomos still contributes its lightweight budget-envelope line (a cheap peek is exactly the
+  path a runaway push-rate cap needs to see) even though the rest of the chain is trimmed.
+- **Dream** — full chain (incl. **Oikonomos**) **+ a `Propose-Learnings` advisor** at order 45 (`out:`
+  step): spot patterns, draft gated proposals, open the PR and merge it on green (red/pending CI holds
+  the merge for the owner) — never auto-apply; a merged proposal is *recorded*, not policy, until the
+  owner approves it. Oikonomos's rollups are also what a weekly Dream pass would summarize for a spend
+  trend, alongside the existing metrics/router rollups.
 
 Adding a future advisor = insert a row + name it in the modes that want it. That's the extensibility
 this design buys.
@@ -312,9 +403,21 @@ become code. Do this after A proves the shape.
       (instant/offline/zero-Notion), escalate the rest. **Not built** — graduation is the owner's call on
       the shadow evidence, same pattern as the autonomy dial; a Dream rollup can summarize router accuracy
       to tee it up.
+   3. **The fable arm** (v3, `docs/cockpit-spec.md`) ✅ *adopted* — a sibling classifier, standard vs
+      Fable-level, ceiling-gated (ships alongside the two-dial model config + `fable_delegate.py`; spec
+      above, setup `ROUTER_SETUP.md`).
 
    Other future advisors slot in the same way (a row + per-mode declaration): a dedicated Privacy advisor
    split out of Critique, a Cost-Guard advisor. Open when the owner wants them.
+
+7. **Phase 7 — Oikonomos, the budget governor** (v3.5, `docs/cockpit-spec.md` "Oikonomos — the budget
+   governor") ✅ *adopted* — order 15, between Orientation and Retrieval (spec above). The first advisor
+   with BOTH a code-backed rail half (the Fable-delegation quota stack + per-model token
+   metering/alerting, `scripts/governor.py`) and an advisory-only half (per-turn token caps, effort
+   tiers, turn checkpoints, context-fill wind-down, push-rate caps — prompt/doc-side guidance, not
+   mechanically enforced) — the rails-vs-advisory table above exists so that split never gets muddied.
+   Config: schema-driven `state/governor-config.json`; the cockpit's Thresholds panel
+   (`GET`/`PUT /api/governor-config`) renders straight from `governor.SCHEMA`.
 
 ## Decisions — resolved
 

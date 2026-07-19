@@ -1,0 +1,8 @@
+{
+  "example-archon": {
+    "title": "Example Archon — replace with your own",
+    "port": 9700,
+    "ui_port": 9800,
+    "status": "reserved"
+  }
+}

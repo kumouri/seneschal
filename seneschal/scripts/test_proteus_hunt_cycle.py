@@ -59,6 +59,27 @@ class DiffJobs(unittest.TestCase):
         self.assertEqual(ledger["https://x/1"]["best_score"], 72.0)
         self.assertEqual(ledger["https://x/1"]["last_score"], 61.0)
 
+    def test_express_lane_hot_below_threshold(self):
+        # A sub-60 role literally titled a target, true-remote + clean, is still hot.
+        job = _job(score=52.0, remote_verdict="remote")
+        job["target_title"] = "Forward Deployed Engineer"
+        hot, ledger = hunt_cycle.diff_jobs([job], {}, 60.0, NOW)
+        self.assertEqual(len(hot), 1)
+        self.assertTrue(hot[0]["_express"])
+        self.assertTrue(ledger["https://x/1"]["was_express"])
+
+    def test_express_lane_requires_takeable_location(self):
+        job = _job(score=52.0, remote_verdict="relocation")
+        job["target_title"] = "Forward Deployed Engineer"
+        hot, _ = hunt_cycle.diff_jobs([job], {}, 60.0, NOW)
+        self.assertEqual(hot, [])  # target title but not takeable → not hot on its own
+
+    def test_express_dealbreaker_still_blocks(self):
+        job = _job(score=80.0, remote_verdict="remote", flags=["dealbreaker: relocation implied"])
+        job["target_title"] = "Forward Deployed Engineer"
+        hot, _ = hunt_cycle.diff_jobs([job], {}, 60.0, NOW)
+        self.assertEqual(hot, [])
+
 
 class FreshAndQuiet(unittest.TestCase):
     def test_fresh_enough_boundary(self):
@@ -143,6 +164,19 @@ class BuildDigest(unittest.TestCase):
         markdown, stats = daily_digest.build_digest({}, [], self.DAY, 60.0, 45.0)
         self.assertEqual(stats["hot"], 0)
         self.assertIn("none", markdown)
+
+    def test_target_title_section(self):
+        ledger = dict(self._ledger())
+        ledger["https://x/fde"] = {"first_seen": "2026-07-12T15:00:00Z",
+                                   "last_seen": "2026-07-12T15:00:00Z", "title": "Forward Deployed Engineer",
+                                   "company": "Frontier AI", "best_score": 54.0, "last_score": 54.0,
+                                   "flags": [], "comp_min": None, "comp_max": None, "location": "Remote",
+                                   "remote_verdict": "remote", "target_title": "Forward Deployed Engineer"}
+        markdown, stats = daily_digest.build_digest(ledger, [], self.DAY, 60.0, 45.0)
+        self.assertEqual(stats["targets"], 1)
+        self.assertIn("🎯 Target-title matches", markdown)
+        self.assertIn("Frontier AI", markdown)
+        self.assertIn("⟵ **Forward Deployed Engineer**", markdown)
 
 
 if __name__ == "__main__":

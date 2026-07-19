@@ -140,27 +140,42 @@ dashboard keep themselves current. This is the whole manual burden: **one tap, o
 > Alternatively, fold the same two commands into the nightly **Dream** run, which already does act-low
 > local cache refreshes (`seneschal/SKILL.md` → Dream). No new scheduled task, one fewer moving part.
 
-### Tier 1 — genuinely automatic, via Health Connect (transport = Tailscale/LAN)
+### Tier 1 — genuinely automatic, via Health Connect (built; transport = Tailscale/LAN)
 
 Samsung Health syncs to **Health Connect** on the phone. An Android app holding Health Connect read
-permissions can pull `SleepSessionRecord` (with stages), `HeartRateRecord` (**per-sample**),
-`StepsRecord`, and `OxygenSaturationRecord` on a `WorkManager` schedule and ship them to the desktop. No
-tap, and finer data than the zip. The chosen transport is **Tailscale/LAN** — no cloud; the phone POSTs
-straight to a desktop listener over the tailnet.
+permissions pulls `SleepSessionRecord` (with stages), `HeartRateRecord` (**per-sample**), `StepsRecord`,
+`OxygenSaturationRecord`, `ExerciseSessionRecord` (workouts), and `NutritionRecord` (meals) on a
+`WorkManager` schedule and ships them to the desktop. No tap, and finer data than the zip. The chosen
+transport is **Tailscale/LAN** — no cloud; the phone POSTs straight to a desktop listener over the
+tailnet.
 
-The desktop end ships in this repo:
+**v4: workouts + nutrition.** `ExerciseSessionRecord` and `NutritionRecord` ride the same NDJSON pipe as
+sleep — see `phone/android/README.md` → "Health feed" for the on-device permission grants and
+`import_ndjson`'s module docstring for the exact wire shapes. A workout's calories/distance aren't
+fields on the session in Health Connect itself — they're separate `TotalCaloriesBurnedRecord` /
+`DistanceRecord` entries over the same interval — so the phone folds in whatever overlaps a session's own
+start/end before it ever hits the wire; `energy_kcal`/`distance_m` are simply omitted when neither exists.
+The cockpit's health/workout/meal panels read the resulting tables; meal-plan *ideas* are a separate
+staged feed (`state/meals.json`), not this pipeline.
 
+Both ends are built and tested:
+
+* **`HealthSyncWorker`** (`phone/android/.../HealthSyncWorker.kt`) — sibling to the existing
+  `BlocklistSyncWorker`. Every ~3h it reads Health Connect since a watermark (re-reading the last 2 days so
+  same-day step totals stay correct), emits NDJSON (the format `import_ndjson` expects), and POSTs it with
+  an optional bearer token. Idempotent via Health Connect's stable record ids.
 * **`health_listener.py`** — a stdlib HTTP receiver that **binds the tailnet interface only** (Tailscale's
   `100.64.0.0/10`; it refuses a public bind without a token). It archives each batch to
   `state/health-feed.ndjson` and imports it into `health.db`. `POST /health-ingest`, `GET /health`.
-* **`import_ndjson`** in `health_import.py` lands the feed in the **same tables** the zip importer writes,
-  so the dashboard is identical whichever way the data arrived.
+* **`import_ndjson`** in `health_import.py` lands sleep/heart-rate/SpO₂/steps in the **same tables** the zip
+  importer writes, so the dashboard is identical whichever way the data arrived. Workouts and nutrition
+  have no zip equivalent (the CSV export's food/exercise tables were never imported — see "What the CSV
+  export actually contains" above) — they land in the new `workouts` / `nutrition` tables, live-feed only.
 
-The phone end is a companion Android app (**not included in this repo**): a `WorkManager` worker that,
-every ~3h, reads Health Connect since a watermark (re-reading the last 2 days so same-day step totals stay
-correct), emits NDJSON (the format `import_ndjson` expects), and POSTs it with an optional bearer token —
-idempotent via Health Connect's stable record ids. Any client that can POST that NDJSON works. Approve the
-Health Connect read permissions on the phone, then start the listener first:
+**What's left is on-device, and it's the owner's to do** (ask-high): build + install the APK from
+`phone/android/` — it's a committed Gradle project, so `./gradlew installDebug` (or Android Studio's
+Run ▶) builds and pushes it — then approve the Health Connect read permissions on the phone. Step-by-step,
+with the `local.properties` entries, is in **`phone/android/README.md` → "Health feed."** Start the listener first:
 
 ```bash
 python health_listener.py --token <pick-a-token>   # binds your Tailscale IP, port 8765
@@ -194,6 +209,8 @@ any consumer can render local without guessing.
 | `medication_log`, `weight` | one per entry | |
 | `movement` | one per 60s bin (JSON export) | `activity_level`; the actigraphy signal |
 | `hr_minute` | one per 60s bin / sample | per-minute heart rate (JSON export / live feed) |
+| `workouts` | one per Health Connect `ExerciseSessionRecord` | live feed only (v4); `exercise_type`/`title`/`notes`/`energy_kcal`/`distance_m` are `NULL` when Health Connect had nothing for them |
+| `nutrition` | one per Health Connect `NutritionRecord` | live feed only (v4); `meal_type`/`name`/`energy_kcal`/`protein_g`/`carbs_g`/`fat_g` are `NULL` when they weren't logged |
 
 Rebuild from scratch any time — it's a cache, and the export is cumulative:
 

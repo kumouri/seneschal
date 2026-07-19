@@ -8,7 +8,8 @@ dealbreaker flags, capped per cycle, quiet-window aware), and appends a cycle re
 digest (daily_digest.py) rolls up. The full Proteus archon (workups, cover letters) stays
 on-demand — this loop is the tripwire, not the writer.
 
-State (all under archons/proteus/out/hourly/, gitignored):
+State (all under archons/proteus/state/, gitignored — see proteus_paths.py for the
+archon-wide state/ vs out/ rule):
   seen.json     url → {first_seen, last_seen, title, company, best_score, last_score, flags,
                        comp_max, location, notified}
   cycles.jsonl  one line per run: {at, fetched, kept, new_hot, notified, deferred, errors}
@@ -29,7 +30,12 @@ from datetime import datetime, timezone
 TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
 PROTEUS_DIR = os.path.dirname(TOOLS_DIR)
 REPO_ROOT = os.path.dirname(os.path.dirname(PROTEUS_DIR))
-OUT_DIR = os.path.join(PROTEUS_DIR, "out", "hourly")
+
+sys.path.insert(0, TOOLS_DIR)
+import proteus_paths  # noqa: E402  (canonical state/ vs out/ paths)
+
+# Runtime churn lives in state/, deliverables in out/ (the archon-wide rule).
+OUT_DIR = str(proteus_paths.STATE_DIR)
 QUIET_FILE = os.path.join(REPO_ROOT, "seneschal", "state", "quiet.json")
 TELEGRAM_SEND = os.path.join(REPO_ROOT, "seneschal", "scripts", "telegram_send.py")
 TELEGRAM_ENV = os.path.join(REPO_ROOT, "seneschal", "scripts", "telegram.env")
@@ -64,8 +70,22 @@ def diff_jobs(scored_jobs: list[dict], ledger: dict, threshold: float, at: str) 
         url = job.get("url") or f"{job.get('source')}:{job.get('external_id')}"
         score = float(job.get("match_percent") or 0.0)
         flags = job.get("flags") or []
+        target_title = job.get("target_title")
+        dealbroken = any(str(f).startswith("dealbreaker") for f in flags)
+        remote_ok = job.get("remote_verdict") in ("remote", "commutable")
+        # A role is hot if it clears the score bar OR it's a structural target-title match that's
+        # actually takeable (true-remote/commutable, no dealbreaker) — the express lane, because a
+        # role literally titled one of the profile's targets shouldn't need a comp-posted score to
+        # reach the owner. The express lane bypasses the score bar, so it needs its own age gate —
+        # otherwise a year-old role titled exactly like a target still pings no matter how far age
+        # decay sank its score.
+        stale = (job.get("age_tier") or "") in ("old", "ancient")
+        express = bool(target_title) and remote_ok and not dealbroken and not stale
+        hot = (score >= threshold or express) and not dealbroken
+
         entry = ledger.get(url)
-        was_hot = bool(entry and float(entry.get("best_score") or 0.0) >= threshold)
+        was_hot = bool(entry and (float(entry.get("best_score") or 0.0) >= threshold
+                                  or entry.get("was_express")))
         if entry is None:
             entry = {"first_seen": at, "notified": False}
         entry.update({
@@ -79,11 +99,12 @@ def diff_jobs(scored_jobs: list[dict], ledger: dict, threshold: float, at: str) 
             "comp_max": job.get("comp_max"),
             "location": job.get("location"),
             "remote_verdict": job.get("remote_verdict"),
+            "target_title": target_title,
+            "was_express": bool(entry.get("was_express")) or express,
         })
         ledger[url] = entry
-        dealbroken = any(str(f).startswith("dealbreaker") for f in flags)
-        if score >= threshold and not was_hot and not dealbroken:
-            newly_hot.append(dict(job, url=url))
+        if hot and not was_hot:
+            newly_hot.append(dict(job, url=url, _express=express))
     return newly_hot, ledger
 
 
@@ -116,7 +137,8 @@ def comp_label(entry: dict) -> str:
 
 def notify_line(job: dict) -> str:
     verdict = VERDICT_LABEL.get(job.get("remote_verdict") or "", job.get("location") or "location n/a")
-    return (f"🛰️ Proteus: new {job['match_percent']:.1f}% match — {job.get('company')} · "
+    tag = f"🎯 {job['target_title']}" if job.get("_express") else f"new {job['match_percent']:.1f}% match"
+    return (f"🛰️ Proteus: {tag} — {job.get('company')} · "
             f"{job.get('title')} · {comp_label(job)} · {verdict}\n{job.get('url')}")
 
 
@@ -144,7 +166,14 @@ def main(argv=None) -> int:
     parser.add_argument("--notify-cap", type=int, default=3)
     parser.add_argument("--no-notify", action="store_true")
     parser.add_argument("--dry-run", action="store_true", help="fetch+score+diff but write/send nothing")
+    parser.add_argument("--prune-runs-days", type=int, default=proteus_paths.RUNS_RETENTION_DAYS,
+                        help="delete state/runs/<run-date>/ boards older than N days (0 = keep forever). "
+                             "They're forensic only — nothing reads them; the live board is scored-latest.json")
     args = parser.parse_args(argv)
+
+    # self-healing move of runtime files from the pre-state/ layout (out/hourly, out/)
+    migrated = proteus_paths.migrate_legacy_state()
+    pruned = proteus_paths.prune_runs(args.prune_runs_days)
 
     if os.path.exists(os.path.join(OUT_DIR, "paused")):
         print(json.dumps({"ok": True, "skipped": "paused"}))
@@ -157,7 +186,8 @@ def main(argv=None) -> int:
     run_tool("fetch_jobs.py", ["--watchlist", os.path.join(PROTEUS_DIR, "watchlist.json"),
                                "--out", jobs_path])
     run_tool("score_jobs.py", ["--profile", os.path.join(PROTEUS_DIR, "profile.json"),
-                               "--jobs", jobs_path, "--out", scored_path, "--top", "0"])
+                               "--jobs", jobs_path, "--out", scored_path, "--top", "0",
+                               "--seen", os.path.join(OUT_DIR, "seen.json")])  # evergreen flagging
 
     with open(scored_path, encoding="utf-8") as fh:
         scored_doc = json.load(fh)
@@ -191,9 +221,14 @@ def main(argv=None) -> int:
                                  "notified": notified, "deferred": deferred,
                                  "quiet": quiet}, ensure_ascii=False) + "\n")
 
-    print(json.dumps({"ok": True, "at": at, "considered": scored_doc.get("considered"),
-                      "new_hot": len(newly_hot), "notified": len(notified),
-                      "deferred": len(deferred), "quiet": quiet}))
+    result = {"ok": True, "at": at, "considered": scored_doc.get("considered"),
+              "new_hot": len(newly_hot), "notified": len(notified),
+              "deferred": len(deferred), "quiet": quiet}
+    if migrated:
+        result["migrated_to_state"] = migrated
+    if pruned:
+        result["pruned_runs"] = pruned
+    print(json.dumps(result))
     return 0
 
 

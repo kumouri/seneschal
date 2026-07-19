@@ -113,9 +113,20 @@ calibrated against — pilotable by hand from day one:
    (schema: `../state/README.md`), and the weekly `salience_rollup.py` folds the verdicts into its
    report — including under abstention, since human ground truth is meaningful from judgment #1.
 
-**Friction rules:** always on the owner's request; offered unprompted at most rarely, never as a quiz
-they didn't invite, never mid-flow on something urgent. Sampled and on-request only — the A/B never
-replaces a normal answer without the owner opting in, and nothing about it changes live retrieval.
+**Friction rules (revised — blinding fix):** the assistant **initiates** the A/B itself at a **random**
+cadence; the owner does **not** request them. (Requesting re-primes the owner *and* lets the assistant
+cherry-pick the turn — both defeat the blind. The old "always on the owner's request" rule is retired.)
+Eligibility = a turn where a recalled memory *materially shaped* the answer; on each eligible turn the
+assistant makes a **real random draw** to decide whether to run one — so neither the timing nor the
+which-is-which is under anyone's deliberate control — bounded by a **daily quota of ≥ 1 and ≤ 5**: if
+none has fired by late in the day, the next eligible turn fires one to guarantee the floor; stop after
+the 5th.
+Blind on both axes: the owner doesn't know when one's coming, and the A/B order is randomized with the
+memory-bearing side revealed only **after** they judge (log *without* `--not-blind`). Never sprung
+mid-flow on something urgent or emotionally heavy — defer to the next eligible turn. The owner can
+**pause** the experiment or **dial the rate** any time (opting out is always fine); only *requesting a
+specific A/B* is what's retired. The A/B never silently replaces a normal answer's substance, and
+nothing about it changes live retrieval.
 
 ## Cold start / kill criteria
 

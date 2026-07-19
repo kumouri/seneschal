@@ -21,15 +21,21 @@ from datetime import datetime, timedelta
 TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
 PROTEUS_DIR = os.path.dirname(TOOLS_DIR)
 REPO_ROOT = os.path.dirname(os.path.dirname(PROTEUS_DIR))
-HOURLY_DIR = os.path.join(PROTEUS_DIR, "out", "hourly")
-DIGEST_DIR = os.path.join(PROTEUS_DIR, "out", "digests")
+sys.path.insert(0, TOOLS_DIR)
+import proteus_paths  # noqa: E402  (canonical state/ vs out/ paths)
+
+# runtime churn reads from state/; the digest itself is a deliverable, so out/digests/
+HOURLY_DIR = str(proteus_paths.STATE_DIR)
+DIGEST_DIR = str(proteus_paths.DIGEST_DIR)
 SCRIPTS = os.path.join(REPO_ROOT, "seneschal", "scripts")
 
 EMAIL_TO = os.environ.get("PROTEUS_DIGEST_TO", "")  # the owner's address; set via env or run-proteus-digest.cmd
 
 
 def _day_of(iso: str) -> str:
-    """Local calendar date of a UTC ISO stamp (America/Chicago is the machine's local zone)."""
+    """Local calendar date of a UTC ISO stamp (the owner's zone is assumed to be the machine's
+    local zone — the same convention `seneschal/scripts/tz_common.py` resolves for the rest of
+    the suite)."""
     try:
         return datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone().strftime("%Y-%m-%d")
     except (ValueError, AttributeError):
@@ -67,14 +73,19 @@ def _fmt(url: str, entry: dict) -> str:
 
 
 def build_digest(ledger: dict, cycles: list[dict], day: str, threshold: float, near: float) -> tuple[str, dict]:
-    """Pure builder: (markdown, stats). Sections: new-hot, near-miss, flagged-strong, gone."""
+    """Pure builder: (markdown, stats). Sections: target-title, new-hot, near-miss, flagged, gone."""
     new_today = {u: e for u, e in ledger.items() if _day_of(e.get("first_seen", "")) == day}
+    clean = lambda e: not any(str(f).startswith("dealbreaker") for f in e.get("flags") or [])
+    # Express tier: literally titled one of the profile's targets, takeable — the roles worth eyes first.
+    target_hits = {u: e for u, e in new_today.items()
+                   if e.get("target_title") and clean(e)
+                   and e.get("remote_verdict") in ("remote", "commutable", "remote?")}
     hot = {u: e for u, e in new_today.items()
-           if float(e.get("best_score") or 0) >= threshold
-           and not any(str(f).startswith("dealbreaker") for f in e.get("flags") or [])}
+           if float(e.get("best_score") or 0) >= threshold and clean(e)
+           and u not in target_hits}
     near_miss = {u: e for u, e in new_today.items()
-                 if near <= float(e.get("best_score") or 0) < threshold
-                 and not any(str(f).startswith("dealbreaker") for f in e.get("flags") or [])}
+                 if near <= float(e.get("best_score") or 0) < threshold and clean(e)
+                 and u not in target_hits}
     flagged = {u: e for u, e in new_today.items() if (e.get("flags") or [])}
     prev_day = (datetime.strptime(day, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
     gone = {u: e for u, e in ledger.items()
@@ -83,15 +94,25 @@ def build_digest(ledger: dict, cycles: list[dict], day: str, threshold: float, n
 
     day_cycles = [c for c in cycles if _day_of(c.get("at", "")) == day]
     notified = {u for c in day_cycles for u in c.get("notified", [])}
-    stats = {"cycles": len(day_cycles), "new_today": len(new_today), "hot": len(hot),
-             "near": len(near_miss), "flagged": len(flagged), "gone": len(gone),
+    stats = {"cycles": len(day_cycles), "new_today": len(new_today), "targets": len(target_hits),
+             "hot": len(hot), "near": len(near_miss), "flagged": len(flagged), "gone": len(gone),
              "ledger": len(ledger)}
 
     lines = [f"Proteus daily job digest — {day}", "",
-             f"{stats['cycles']} hunt cycles today · {stats['new_today']} new postings entered the "
-             f"ledger · {stats['hot']} above {threshold:.0f}% · ledger tracks {stats['ledger']} total.", ""]
+             f"{stats['cycles']} hunt cycles today · {stats['new_today']} new postings · "
+             f"{stats['targets']} target-title matches · {stats['hot']} more above {threshold:.0f}% · "
+             f"ledger tracks {stats['ledger']} total.", ""]
 
-    lines.append(f"## New today at/above {threshold:.0f}% ({len(hot)})")
+    lines.append(f"## 🎯 Target-title matches ({len(target_hits)}) — roles literally in your lane")
+    if target_hits:
+        for url, e in sorted(target_hits.items(), key=lambda kv: -float(kv[1].get("best_score") or 0)):
+            tag = " *(alerted)*" if url in notified else ""
+            lines.append(_fmt(url, e) + f"  ⟵ **{e.get('target_title')}**" + tag)
+    else:
+        lines.append("- none today.")
+    lines.append("")
+
+    lines.append(f"## Also at/above {threshold:.0f}% ({len(hot)})")
     if hot:
         for url, e in sorted(hot.items(), key=lambda kv: -float(kv[1].get("best_score") or 0)):
             tag = " *(alerted)*" if url in notified else " *(not alerted — catch it here)*"
@@ -159,7 +180,8 @@ def main(argv=None) -> int:
 
     sent = {"email": False, "telegram": False}
     subject = (f"Proteus daily job digest — {args.date} "
-               f"({stats['hot']} new ≥{args.threshold:.0f}%, {stats['near']} near)")
+               f"({stats['targets']} target-title, {stats['hot']} more ≥{args.threshold:.0f}%, "
+               f"{stats['near']} near)")
     if not args.no_email:
         result = subprocess.run(
             [sys.executable, os.path.join(SCRIPTS, "proton_send.py"),

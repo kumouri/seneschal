@@ -1,0 +1,3 @@
+{"ts":"2026-07-18T13:31:00Z","kind":"tokens","model":"claude-opus-4-8","tokens":4200}
+{"ts":"2026-07-18T14:02:00Z","kind":"tokens","model":"claude-sonnet-5","tokens":1800}
+{"ts":"2026-07-18T14:05:00Z","kind":"fable_oneshot","model":"claude-fable-5","conversation_id":"telegram-warm-1"}

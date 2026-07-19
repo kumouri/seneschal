@@ -1,0 +1,19 @@
+{
+  "schema": "seneschal.projects/1",
+  "roots": [
+    "C:/Users/<you>/workspace",
+    "C:/Users/<you>/repos"
+  ],
+  "non_git_roots": [
+    "C:/Users/<you>/workspace"
+  ],
+  "extras": [
+    "C:/Program Files (x86)/SomeApp/embedded-project"
+  ],
+  "max_depth": 3,
+  "exclude_names": [
+    "node_modules", ".venv", "venv", "__pycache__", ".idea", ".vscode",
+    "dist", "build", "target", "out", ".gradle", ".next", "bin", "obj"
+  ],
+  "github": { "enabled": true, "limit": 200 }
+}

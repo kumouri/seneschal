@@ -51,6 +51,35 @@ Because indexing is incremental, unchanged docs are skipped, so the nightly pass
 `--rebuild --local` (plus a fresh ingest) rebuilds from scratch if the index is ever lost — it's a
 regenerable cache, never a system of record.
 
+## The project-state layer (`rag_projects.py`)
+
+The index also carries a **projects corpus** (source `project`): one state-summary doc per project the
+owner is (or was) working on — where it lives on disk, branch, dirty state, recent commits, README
+gist, and the matching GitHub repo — plus a doc for every GitHub repo with **no local clone**. That's
+what lets the assistant answer *"what's the state of `<project>`?"* with either the state itself or
+the exact place to go look.
+
+```
+cp seneschal/state/project-roots.example.json seneschal/state/project-roots.json   # then fill in real roots
+python seneschal/scripts/rag_projects.py --ingest
+```
+
+- **Config** (`state/project-roots.json`, gitignored): `roots` are scanned recursively (bounded by
+  `max_depth`, pruned below a found repo and inside `exclude_names`) for git repos; `non_git_roots`
+  additionally get light summaries of their immediate unversioned project dirs; `extras` list stray
+  projects anywhere on disk (e.g. a bot living inside a game's install folder). `github.enabled` pulls
+  the repo list via `gh` (already authed; additive — absent/failed `gh` just skips that layer).
+- **Outputs:** `state/projects.jsonl` (the records), `state/projects-map.md` (a human-readable
+  where-everything-lives table — the cheap orientation read), and — with `--ingest` — embedded docs in
+  the index. All three are regenerable caches.
+- **Freshness:** doc ids are `project:<path>`, indexing is incremental by hash (an unchanged project
+  costs nothing), and after each ingest the `project` source is **reconciled** — docs for projects that
+  vanished from the scan are dropped (`--no-prune` disables; the salience access ledger is never
+  touched). **Dream re-runs `rag_projects.py --ingest` nightly** alongside the journal refresh, so the
+  corpus tracks reality. Git reads run with `core.fsmonitor=false` (a filesystem-monitor tool can hang
+  git in some repos) and per-command timeouts, so one sick repo degrades to a thinner summary, never a
+  hung scan.
+
 ## How Retrieval uses it
 
 Inside the Retrieval advisor's *retrieve* step, when the turn needs recall over the assistant's history,

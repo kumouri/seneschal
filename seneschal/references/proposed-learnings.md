@@ -42,7 +42,9 @@ is met — ≥30 days / ≥50 tagged docs — and never for a θ_protect-shielde
   SOFT prune: excluded from answers, fully reversible, still counted for un-forget evidence).
   No hard deletion; that would be a separate, later gate.
   Applies to: state/rag-index.sqlite chunk rows (via a small marking script) + references/salience.md.
-  Gate check: evidence window met; category is not θ_protect-shielded; the mark is reversible.
+  Gate check: internal-only, reversible by flipping the column back, no outbound; θ_protect and
+  identity.core ineligibility both held over the window. Needs the owner's explicit approval + their
+  choice of the age threshold N.
 ```
 
 ## Pending
@@ -50,9 +52,11 @@ is met — ≥30 days / ≥50 tagged docs — and never for a θ_protect-shielde
 *(nothing yet)*
 
 ## Applied
+_(Approved proposals, with the date applied. Mirror the change into `autonomy-policy.md`'s graduation log.)_
 
 *(nothing yet)*
 
 ## Declined
+_(Proposals the owner turned down — kept so the assistant doesn't re-propose them.)_
 
 *(nothing yet)*

@@ -7,7 +7,8 @@
     "slack": { "send": "ask-high", "respond": "ask-high" },
     "calendar": { "respond": "ask-high" },
     "notion": { "trackerWrites": "act-low" },
-    "reminders": { "fire": "act-low", "trackerWrites": "act-low", "linkedTaskGoalDone": "ask-high" }
+    "reminders": { "fire": "act-low", "trackerWrites": "act-low", "linkedTaskGoalDone": "ask-high" },
+    "forge": { "deploy": "act-low", "admit": "act-low", "delegate": "act-low", "mint": "ask-high", "revise": "ask-high", "retire": "ask-high", "_doc": "Archon lifecycle (archons.md). deploy/admit/delegate graduated on the owner's standing authorization — the claude-cli adapter is subscription-billed (ANTHROPIC_API_KEY scrubbed), so the spend objection the gate existed for is gone. Roster changes (mint/revise/retire) stay ask-high. Independent of this dial: an Archon's outbound drafts still ride the assistant's draft-and-hold gate, and a non-spend objection to a specific delegation (legal/non-compete exposure, unverifiable posting, avoid-list hit) is a separate gate that is still held." }
   },
   "graduationLog": [
     {
@@ -17,6 +18,10 @@
     {
       "at": "2026-06-28",
       "change": "Example entry — maintain the ⏰ Reminders tracker + fire reminder nudges to the owner's own channels (Telegram via the presence daemon; Notion) — daily reset, miss/streak counters, gentle rib — reversible (tracker-only writes), inbound (the owner's own content), bounded by reminders-policy.md, never touches other people, audited (Run Log Mode=Reminders + carry-over). Boundary: flipping a linked Task/Goal to Done, or creating a persistent Task from 'remind me to…', stays ask-high — decided by the owner."
+    },
+    {
+      "at": "2026-06-28",
+      "change": "Example entry — deploy, admit, and delegate to an already-minted Archon (Forge mode; archons.md) — the owner's standing authorization: 'spin up archons as needed'. The gate was only ever about spend, and the owner retired that objection at the source: the claude-cli adapter shells to headless `claude` on the subscription with ANTHROPIC_API_KEY scrubbed (demiurge ADR 0006), so no delegation can reach the metered API, and the rest is budgeted into the plan. Reversible (the process is torn down; output is files on disk), non-outward (an Archon drafts, never sends), bounded by the charter + the spec's budget rails, audited (ledger.jsonl + a Run Log Mode=Forge row). Boundaries: mint/revise/retire stay ask-high (roster judgment, not spend); an Archon's outbound drafts still ride the assistant's draft-and-hold gate; and a non-spend objection to a specific delegation (legal/non-compete exposure, unverifiable posting, avoid-list hit) is a separate gate still held for the owner's call — decided by the owner."
     }
   ]
 }

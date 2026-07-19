@@ -9,7 +9,7 @@ reader must skip it. Rows also carry a trailing comma, so ``csv.DictReader`` yie
 
 **2. `start_time` / `end_time` are UTC. `time_offset` is how you get local.** This is the one that
 matters, and it is *not* obvious — the strings look like wall clock, and reading them as wall clock
-silently shifts every conclusion by 5-6 hours (exactly America/Chicago's offset). Proof, from the data
+silently shifts every conclusion by 5-6 hours (exactly the reference dataset's UTC offset). Proof, from the data
 itself: on the US spring-forward day **2026-03-08** the hourly-binned ``tracker.heart_rate`` rows carry
 all 24 hours ``00..23`` with no gap; if the strings were local wall clock, hour ``02`` could not exist.
 Symmetrically, on the fall-back day **2025-11-02** no hour is duplicated. The ``time_offset`` column
@@ -323,6 +323,45 @@ CREATE TABLE IF NOT EXISTS hr_minute (
 );
 CREATE INDEX IF NOT EXISTS ix_hrmin_night ON hr_minute(night);
 CREATE INDEX IF NOT EXISTS ix_hrmin_date  ON hr_minute(local_date);
+
+-- Health Connect ExerciseSessionRecord, from the live feed only (Call Shield v4; no zip equivalent).
+-- energy/distance aren't fields on the session in Health Connect itself -- they live in separate
+-- TotalCaloriesBurnedRecord/DistanceRecord entries -- so the phone folds in whatever overlaps the
+-- session's own [start, end) before it ever hits the wire; NULL here just means neither was recorded.
+CREATE TABLE IF NOT EXISTS workouts (
+    uuid          TEXT PRIMARY KEY,
+    start_utc     TEXT NOT NULL,
+    end_utc       TEXT NOT NULL,
+    tz_offset_min INTEGER NOT NULL,
+    start_local   TEXT NOT NULL,
+    end_local     TEXT NOT NULL,
+    local_date    TEXT NOT NULL,
+    duration_min  REAL,
+    exercise_type TEXT,             -- Health Connect's own vocabulary, e.g. "running", "weightlifting"
+    title         TEXT,
+    notes         TEXT,
+    energy_kcal   REAL,
+    distance_m    REAL
+);
+CREATE INDEX IF NOT EXISTS ix_workout_date ON workouts(local_date);
+
+-- Health Connect NutritionRecord (meals), from the live feed only (Call Shield v4). Meal-plan *ideas*
+-- are a separate, staged feed (state/meals.json, read by cockpit/server/health.py) -- this table is
+-- what the owner actually ate/logged.
+CREATE TABLE IF NOT EXISTS nutrition (
+    uuid          TEXT PRIMARY KEY,
+    start_utc     TEXT NOT NULL,
+    end_utc       TEXT,
+    tz_offset_min INTEGER NOT NULL,
+    local_date    TEXT NOT NULL,
+    meal_type     TEXT,            -- breakfast | lunch | dinner | snack | unknown
+    name          TEXT,
+    energy_kcal   REAL,
+    protein_g     REAL,
+    carbs_g       REAL,
+    fat_g         REAL
+);
+CREATE INDEX IF NOT EXISTS ix_nutrition_date ON nutrition(local_date);
 """
 
 

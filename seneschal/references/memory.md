@@ -77,11 +77,16 @@ as well as the Notion carry-over (system of record). Each held item gets a **sta
 reply can refer to it.
 
 **Holding (when the assistant drafts something ask-high):**
-1. Write the draft to its channel store where applicable (Proton/Gmail draft, Slack draft).
+1. Write the draft to its channel store **where applicable** (Proton/Gmail draft). **Slack has no channel
+   store** — the held entry's stored text is the single copy, sent verbatim on approve (a Slack draft
+   would be a second mutable copy with no reliable cleanup on reject; see the Slack spec, Q5).
 2. Append an entry to `pending-approvals.json` and the Notion carry-over with: `id`, `kind`
    (`email` | `slack` | `calendar_response` | `notion_write` | `archon` — a Forge lifecycle action or
    delegation, see `archons.md`), `channelRef`, `summary`, `bodyPreview`, `created_at`,
-   `status: "pending"`.
+   `status: "pending"`. **Slack drafts add:** `body` (the verbatim send text — the assistant always
+   signs; the unsigned/as-the-owner variant was deferred), `sources` (the derivation-contract citations),
+   `critique_note`, and `thread_seen_ts` (the newest thread message at draft time — powers the freshness
+   re-check). Schema: `../state/README.md`.
 3. **Surface it** to the owner on whatever surface fits — in chat (if they're live), and/or a Telegram
    push (*"Drafted a reply to Alex — reply `send a3` or `drop a3`."*), and/or a Notion comment. Use the
    short id so a one-word reply is unambiguous.
@@ -89,16 +94,25 @@ reply can refer to it.
 **Detecting the owner's decision:**
 - **Chat / Telegram:** the sentinel pulls the reply into the inbox; Watch/Chat reads intent — `send`/`yes`/
   `approve` (+ id, or the most recent if only one is pending) → **approve**; `drop`/`no`/`reject` →
-  **reject**. Ambiguous → ask, don't guess.
+  **reject**. A **Slack** draft is a single signed body (the unsigned variant was deferred), so
+  `send a7` is unambiguous. `edit a7: <text>` / *"change a7 to say…"* re-holds under the same id
+  (`edited_before_approve`). Ambiguous → ask, don't guess.
 - **Notion:** Watch checks for new comments on the carry-over / pending-approvals surface and reads the
   same intent. (This is an LLM-tier read — the sentinel doesn't parse Notion.)
 
 **Executing (reuse the `approve_draft` / `reject_draft` path in `SKILL.md`):**
 - **Approve →** send/execute via the normal local path (email → `../scripts/proton_send.py` without
-  `--dry-run`; Slack → Slack MCP send; calendar → `respond_to_event`). Set the entry `status: "sent"`.
-- **Reject →** discard the draft; set `status: "rejected"`.
+  `--dry-run`; Slack → **freshness re-check** the thread since `thread_seen_ts`, then `slack_send_message`
+  the stored **`body` verbatim**; calendar → `respond_to_event`). Set the entry `status: "sent"`.
+- **Reject →** discard the draft; set `status: "rejected"`. (A Slack reject has nothing to clean up — no
+  channel-side copy was written.)
 - Either way, **remove it from the open carry-over** and leave a Run Log trace. A failed send →
-  `status: "failed"`, kept in carry-over so it isn't lost.
+  `status: "failed"`, kept in carry-over so it isn't lost (**no automatic Slack retry** — re-read the
+  channel to see if it landed, report, and let a fresh `send` re-attempt).
+- **Slack-hands gap** — a session that *understands* a `send` but lacks Slack tools records
+  `status: "approved"` (approved-but-unsent, kept in carry-over) and says so; the next Slack-capable turn
+  drains `approved` entries first, re-running the freshness re-check. Closed by wiring the daemon's
+  `slack-mcp.json` (`../scripts/SLACK_MCP_SETUP.md`, Q9).
 
 `pending-approvals.json` schema is documented in `../state/README.md`.
 
@@ -114,3 +128,48 @@ reminders* — so the next morning's **Brief** can orient cheaply without re-que
 - **Brief reads** it first, at Phase 0, before any store query.
 - **If missing**, fall back to carry-over + the store; the next Dream regenerates it. Keep it short —
   cheap orientation, not a transcript.
+
+---
+
+## Durable act-low writes — the write-behind outbox (Notion backend)
+
+The run-log and carry-over above are how the assistant remembers *across runs*; the **outbox** is how
+its **act-low Notion-backend writes don't get lost** *within* the failure window. An ack (⏰ row →
+`Status`/`Last Acknowledged`), a med-intake row, and (phase 2) a run-log finalize are **journaled to a
+durable local store first** — `../state/notion-outbox.sqlite`, via `../scripts/outbox.py` — **then
+flushed to Notion** by the LLM turn via MCP, retried until they land. This closes the chat→store
+ack write-through gap (acks that reached `state/acks.json` but never flipped the store row, silently
+desyncing the system of record).
+
+- **Journal-first is the guarantee.** Once `outbox.py ack …` (or `medlog …`) returns `ok`, the write
+  *will* land even across a reboot — so the assistant may honestly tell the owner "recorded" the
+  instant it's journaled, superseding the old **manual "park it in carry-over to record next run"**
+  step *for those writes*. Carry-over parking remains the fallback for writes the outbox doesn't cover.
+- **Belt-and-suspenders.** The happy path still does the direct MCP write in-turn (zero added latency);
+  the outbox only earns its keep when that write fails. Enqueue is idempotent, so the double-write is a
+  no-op — see the ack flow in `SKILL.md` (Chat mode) and the schema/lifecycle in `../state/README.md`.
+- **Fail-closed**, the mirror of `acks.json`'s fail-open gate: an entry retries until Notion confirms,
+  then dead-letters (surfaced, never dropped). Full design + the flush (a)/(b) fork:
+  `../docs/notion-write-behind-outbox-spec.md`. Filesystem backends write locally and atomically, so
+  their act-low writes never route through the outbox (see the spec's backend-scope section).
+
+## Session distillations — the mini-dream (cross-instance memory, phase 2b)
+
+The registry (`state/sessions/`) says who's live *now*; the **mini-dream** is how sessions that already
+ended stay part of the assistant's memory (an LSM-tree analogy): a **fast append path** per session, and
+a **slow compaction path** nightly.
+
+- **Fast path (append).** On every SessionEnd — any Claude Code session on the machine, via the global
+  `session_stamp.py` hook — `scripts/mini_dream.py` distills the transcript into one JSON line appended
+  to `state/session-distillations.jsonl`, **anchored to the assistant's home repo no matter what project
+  the session ran in**. Salience-laddered: trivial sessions leave no record; small ones get a free
+  deterministic distillate; substantial ones (≥ 6 real user turns) get a headless LLM distill
+  (`claude -p`, cheap model, subscription-billed with `ANTHROPIC_API_KEY` scrubbed) that falls back to
+  deterministic on any failure. Idempotent per session id; a distiller's own session never dreams itself
+  (`SENESCHAL_MINI_DREAM`).
+- **Read at orientation.** Every assistant surface (the `/assistant` grounding, the Orientation advisor)
+  tails the last ~5 records — "what did the other instances do lately?" — and folds anything relevant in.
+- **Slow path (compaction, Dream step 2b).** Nightly, Dream ingests new distillates into the local RAG
+  index (`{"source": "session-distillation", "ref": <id>, "text": …}`) and prunes the log
+  (`mini_dream.py --prune-days 30`) — recent context is a cheap tail read, old context is semantic
+  recall from the index, and the log never accretes. Schema + ladder details: `../state/README.md`.

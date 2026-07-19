@@ -44,9 +44,27 @@ inboxes; send only via Proton.**
 
 - Read: `*-slack_read_channel`, `*-slack_read_thread`, `*-slack_search_public(_and_private)`,
   `*-slack_read_user_profile`.
-- Write: `*-slack_send_message_draft` (draft → act-low), `*-slack_send_message` (send → **ask-high**),
-  `*-slack_schedule_message`.
+- Write: `*-slack_send_message` (send → **ask-high**), `*-slack_send_message_draft` (a Slack-side draft —
+  kept only for an explicit *"leave it in my Slack drafts"* ask; the draft-and-hold flow does **not** use
+  it, Q5), `*-slack_schedule_message` (scheduled sends are **out of scope for v1**, Q11).
 - Triage: screen DMs/mentions, summarize busy channels, surface what needs a reply.
+
+**Draft-and-hold (the reply-drafting flow).** When a DM / direct @-mention needs a reply, the assistant
+**drafts** it (act-low) from the pinned **Slack SSOT** (`slack-ssot.md`) under the derivation contract,
+and **holds** it for approval on the standard held-approvals loop (`memory.md` → *Held approvals*; schema
+in `../state/README.md`). Each held draft is a **single signed body** — `send a7` (the assistant always
+signs; Q4's unsigned/as-the-owner variant was deferred by the owner). On approve, the assistant runs a
+**freshness re-check** (re-read the thread since `thread_seen_ts`; a moved thread re-surfaces instead of
+sending) then posts **verbatim** via `slack_send_message`. A send failure is **never auto-retried**
+(double-post risk) — it's kept in carry-over, surfaced, and re-attempted only on a fresh `send`. Full
+behavior + the owner's 11 rulings: `../../subagents/slack-triage/SKILL.md` +
+`../docs/slack-draft-and-hold-spec.md`.
+
+**Daemon Slack hands.** The headless daemon's warm session may *understand* a Telegram `send a7` but lack
+Slack tools to execute it — it then records `status: "approved"` and drains it on the next Slack-capable
+turn (the *Slack-hands gap*). Wiring `scripts/slack-mcp.json` (auto-detected by `presence.py`;
+`--no-slack` opts out — Q9) closes the gap so a Telegram `send` posts immediately:
+`../scripts/SLACK_MCP_SETUP.md`.
 
 ## Telegram — the assistant's primary push + two-way chat (free, local)
 
@@ -63,6 +81,23 @@ runs** (one persona, one brain, one approval gate); the *to-the-owner* register 
   returns new messages and advances the offset. The **sentinel** polls each cycle; a new message wakes
   the brain in **Chat mode** (`SKILL.md`) to reply via `telegram_send.py`. A short rolling thread is
   cached in `../state/telegram-thread.json` so fresh sessions keep conversational continuity.
+- **Reactions (act-low, observe-first):** a reaction on one of the assistant's messages arrives as
+  `[the owner reacted 👍 (= ack) to: "…"]` — the emoji→intent map is the owner's
+  (`../state/telegram-reactions.json`: 👍 ack · ❤ liked · 👎 reject · 😴/🥱 snooze · 🤝/🙏 hold ·
+  ✍/🤔 elaborate; anything else = note; emoji outside Telegram's allowed reaction set are mapped but
+  can't fire). The intent is a **hint**: the assistant acts on it in context (drop the draft, snooze
+  the item, elaborate). The **only** automated path is a 👍 on a **same-day reminder nudge**, which
+  runs the normal ack (dequeue + outbox `Done`) and says so in the line. A reaction can never send —
+  **a reaction approving an outbound draft is ask-high and deliberately unbuilt** (spec §3.4 Phase C).
+- **Reply context (act-low):** when the owner swipe-replies to an earlier message, the quoted message
+  rides in as `(replying to: "…") <their text>` (truncated ~300 chars; a quoted *file* is described,
+  not dropped) — so they never have to restate what they're answering.
+- **Inbound attachments (act-low):** a document/photo/voice/audio/video the owner sends is downloaded
+  to `../state/inbox/` (daemon poll only — `--download-dir`) and surfaced to the warm session as
+  `[attachment: … saved to <path>] <caption>`, so the assistant can act on the file in context. It
+  **never auto-runs a tool on it**; the turn decides. Over Telegram's ~20 MB `getFile` ceiling it says
+  so and points at the local-file path instead. Fail-open: a bad fetch loses the file, never the
+  message. Spec: `../docs/telegram-inbound-spec.md`.
 - **Creds** live in `../scripts/telegram.env` (git-ignored); offset in `../state/telegram-offset`.
   An allowlist (`TELEGRAM_ALLOWED_CHAT_IDS`) restricts who can drive the assistant.
 - **Asleep machine:** Telegram retains updates ~24h, so messages are picked up on the next poll

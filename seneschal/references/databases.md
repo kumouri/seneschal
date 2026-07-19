@@ -23,7 +23,8 @@ journal-steward's `notion-mcp-mapping.md`.
 | Page | ID | Role |
 |------|----|------|
 | Personal Home | `00000000-0000-0000-0000-000000000009` | Top-level hub; parent of People, Tasks, Projects. |
-| Interstitial Journal | `00000000-0000-0000-0000-000000000010` | Working journal page. Its top **carry-over callout** is a prime source for the morning Brief. |
+| Interstitial Journal | `00000000-0000-0000-0000-000000000010` | Working journal page. Its top **carry-over callout** is a prime source for the morning Brief. Its tracking databases live one level down, under **IJData**. |
+| IJData | `00000000-0000-0000-0000-000000000022` | Container page — the top child of the Interstitial Journal. **Parent of all the tracking databases** (incl. ⏰ Reminders), moved off the Journal page itself. |
 
 > **Journal-activity signal (for the journal-presence reminder gate).** The owner's daily writing lives
 > on the **Interstitial Journal** page as **top-level date toggles** — `<details><summary><mention-date
@@ -95,8 +96,9 @@ Finances / …).
 
 The assistant's **own** tracker for things the owner wants reminding of (recurring habits, today's
 unconfirmed todos, deadlines approaching). **Provisioned + seeded at setup** with an initial set of rows
-(recurring habits, deadline watches, one-offs). Lives on the **Interstitial Journal** page
-(`00000000-0000-0000-0000-000000000010`, under Personal Home); database page id
+(recurring habits, deadline watches, one-offs). Lives under the **IJData** page
+(`00000000-0000-0000-0000-000000000022`, a child of the **Interstitial Journal**
+`00000000-0000-0000-0000-000000000010` under Personal Home); database page id
 `00000000-0000-0000-0000-000000000011`. Behavior lives in `reminders-policy.md`.
 
 > **Ack by cached id — skip the query.** Every row's stable **page id** lives in the live cache table
@@ -127,7 +129,14 @@ unconfirmed todos, deadlines approaching). **Provisioned + seeded at setup** wit
   with the item. Both count as "done today" for the Wrap.
 - `Cadence` (select: `Daily`, `Weekdays`, `Every 3 days`, `Every 5 days`, `Weekly`, `Multiple/day`,
   `One-off`) — interval/Weekly/One-off rows go due by date, not the daily reset (`reminders-policy.md`).
-- `Time Window` (select: `Morning`, `Midday`, `Evening`, `Bedtime`, `Anytime`) — maps a habit to a slot.
+- `Times` (text) — **the reminder's exact fire time(s):** a comma-list of `HH:MM` owner-local times
+  (e.g. `08:00` or `08:00, 20:00`), enqueued for the whole day by the daily **seed**
+  (`../scripts/reminders_seed.py`). Empty ⇒ fall back to the `Time Window` default below. *(Additive
+  property — until a row has `Times` it uses `Time Window`, so migration is zero-regression. See
+  `reminders-policy.md` → "Exact per-reminder times + the daily seed.")*
+- `Time Window` (select: `Morning`, `Midday`, `Evening`, `Bedtime`, `Anytime`) — **coarse fallback
+  sugar**, used only when `Times` is empty: maps to a default time (Morning 08:00 / Midday 12:30 /
+  Evening 18:30 / Bedtime 21:30 / Anytime 09:00). Kept for the "just make it an evening thing" shorthand.
 - `Due / Target` (date) — for `Today Todo` (today) / `Deadline Watch` (the deadline).
 - `Last Reminded` (date) · `Last Acknowledged` (date) — interval/Weekly cadences compute "due" off
   `Last Acknowledged`. **`Last Acknowledged` doubles as the durable "done that day" record** — it survives
@@ -139,7 +148,7 @@ unconfirmed todos, deadlines approaching). **Provisioned + seeded at setup** wit
   `Finished`).
 - `Reminded Today` (checkbox) — intraday re-fire guard; cleared by the daily reset.
 - `Ack` (checkbox) — **owner-facing** one-tap acknowledgment (the v1 two-way affordance). **One-shot
-  input, not a record:** the next reconciling run (any reminder slot, or chat) consumes it — `Status =
+  input, not a record:** the next reconciling run (any reminder run, or chat) consumes it — `Status =
   Done`, `Last Acknowledged = today`, `Consecutive Misses = 0` — then **unticks it** so a stale tick
   can't auto-complete a later cycle. Agents write the fields directly and never treat an unticked `Ack`
   as "not done"; read `Last Acknowledged`/`Status` instead (`reminders-policy.md`).

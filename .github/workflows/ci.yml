@@ -45,6 +45,20 @@ jobs:
         # 00000000-… placeholders that setup fills into gitignored local copies.
         run: python seneschal/scripts/check_placeholders.py
 
+      - name: PowerShell syntax check
+        # AST-parse every tracked .ps1 (ubuntu pwsh — immune to Windows AMSI wedges that
+        # make local pwsh validation unreliable). Parse errors fail the job.
+        shell: pwsh
+        run: |
+          $failed = $false
+          foreach ($f in (git ls-files '*.ps1')) {
+            $errs = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $f), [ref]$null, [ref]$errs) | Out-Null
+            if ($errs) { $failed = $true; Write-Host "PARSE ERRORS in ${f}:"; $errs | ForEach-Object { Write-Host "  $($_.Extent.StartLineNumber): $($_.Message)" } }
+            else { Write-Host "OK $f" }
+          }
+          if ($failed) { exit 1 }
+
   references:
     name: Reference data check
     runs-on: ubuntu-latest
@@ -69,3 +83,41 @@ jobs:
         run: npm run typecheck
       - working-directory: phone
         run: npm test
+
+  cockpit-server:
+    name: Cockpit backend test (FastAPI)
+    runs-on: ubuntu-latest
+    # The cockpit (cockpit/) is its own dependency world — fastapi + uvicorn live in the `cockpit`
+    # uv extras group, never installed by the live daemon's `uv sync --frozen`. The python job's
+    # byte-compile + seneschal/scripts discover already cover these files without the extras
+    # (cockpit/server/test_app.py SKIPS itself, doesn't error, when fastapi is absent) — this job
+    # is what actually runs the cockpit test suite, including test_parity.py, the tripwire for the
+    # hand-duplicated model_config/governor copies.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        run: python -m pip install --quiet uv
+      - name: Sync cockpit extras (+ the test group for FastAPI's TestClient transport)
+        run: uv sync --extra cockpit --group test
+      - name: Run cockpit backend unit tests
+        run: uv run python -m unittest discover -s cockpit/server -p "test_*.py"
+
+  cockpit-web:
+    name: Cockpit frontend typecheck + build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: cockpit/web/package-lock.json
+      - working-directory: cockpit/web
+        run: npm ci
+      - working-directory: cockpit/web
+        run: npm run typecheck
+      - working-directory: cockpit/web
+        run: npm run build

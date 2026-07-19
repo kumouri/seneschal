@@ -14,18 +14,20 @@ chat + reminders + comms-peek). No hosted queue, no cloud service in the loop.
 
 ### 1. Heavyweight runs — owned by the presence daemon
 
-**The daemon runs these itself.** `presence.py` has a built-in slot scheduler (`SLOTS` +
-`maybe_run_slots`) that fires the Brief / Wrap / Dream / Daily-Journal runs **and** the four reminder
-slots on their local times, spawning a fresh headless `claude -p` per run (same mechanism as the
-comms-peek). No separate Task Scheduler entries are needed — one always-on `\seneschald` owns the whole
-cadence. Times live in `SLOTS` in `presence.py`; each fires at most once per local day, and a slot missed
+**The daemon runs these itself.** `presence.py` has a built-in slot scheduler (`SLOTS_TEMPLATE` +
+`maybe_run_slots`) that fires the Brief / Wrap / Dream / Daily-Journal runs on their local times (plus
+the once-per-day reminder **seed** — a *date-rollover* trigger, `maybe_seed_day`, see below), spawning a
+fresh headless `claude -p` per run (same mechanism as the comms-peek). No separate Task Scheduler entries
+are needed — one always-on `\seneschald` owns the whole cadence. Times live in `SLOTS_TEMPLATE` in
+`presence.py`; each fires at most once per local day, and a slot missed
 while the machine was asleep fires late on the next loop **if** still within `--slot-catchup-min` (default
 180 min), else it's skipped for the day (so a 06:30 brief never fires at 11 pm). Disable with `--no-slots`;
 pick a model with `--slot-model`. The daily fired-state is `state/slots.json`.
 
-> **Needs Notion.** These headless runs (especially the reminder slots, which read the ⏰ DB) require the
-> daemon to have Notion access — see `NOTION_MCP_SETUP.md`. Without it, slot runs launch but can't reach
-> Notion, so DB-driven reminders won't enqueue.
+> **Needs the store.** These headless runs (especially the reminder seed, which reads the ⏰ tracker)
+> require the daemon to have store access — run `/setup-store` (Notion backends wire an MCP; see
+> `NOTION_MCP_SETUP.md` for the legacy path). Without it, slot runs launch but can't reach the store, so
+> tracker-driven reminders won't enqueue.
 
 The slot times + prompts (edit in `presence.py`):
 
@@ -33,14 +35,19 @@ The slot times + prompts (edit in `presence.py`):
 |-------------------|--------------|--------------|
 | `daily-journal` | 05:00 | Daily Journal steward |
 | `morning-brief` | 06:30 | Brief (chat + Telegram + Proton email + Run Log) |
-| `reminders-morning` | 08:00 | Reminders slot (daily reset + enqueue) |
-| `reminders-midday` | 12:30 | Reminders slot |
-| `reminders-evening` | 18:30 | Reminders slot |
-| `eod-wrap` | 21:07 | Wrap |
-| `reminders-bedtime` | 21:30 | Reminders slot |
-| `dream` | 22:00 | Dream consolidation |
+| `eod-wrap` | 21:07 | Wrap (+ journal-presence nudge-or-satisfy) |
+| `dream` | 22:00 | Dream consolidation (+ journal-presence satisfy backstop) |
 
-**Standing reminder rolls.** Alongside the four reminder slots, the daemon also refills any **standing
+**Exact-time reminders — the daily seed (not a fixed slot).** The four fixed reminder slots
+(Morning/Midday/Evening/Bedtime) were retired 2026-07-14 for arbitrary per-reminder times. Reminder
+timing now comes from a **once-per-local-day seed** (`maybe_seed_day`, spawned on the first tick of each
+new owner-local date — a *date-rollover* trigger, **not** a `SLOTS` entry, so a machine asleep through
+midnight still seeds on wake with no catch-up cliff that could skip the daily reset): it runs the daily
+reset and queues each ⏰ row's exact times via `reminders_seed.py`; the ~5 s delivery tick fires each at
+its minute. Kill switch `--no-seed-day` (and `--no-slots` covers it too). See
+`../references/reminders-policy.md` + `../docs/reminder-exact-time-scheduling-spec.md`.
+
+**Standing reminder rolls.** Alongside the daily seed, the daemon also refills any **standing
 every-N-hours roll** (e.g. an every-2h *check messages from Alex* poll, 9am–11pm) **once per local
 day**, straight from its loop via `reminders_roll.py` — pure local queue math (no Notion, no `claude`
 spawn), future-only and idempotent, guarded by `state/rolls.json`. Rolls are configured in
@@ -55,10 +62,17 @@ invokes the orchestrator in one mode — but with the daemon owning them, that's
 |------|--------------|--------|
 | `seneschal-morning-brief` | ~6:30 AM daily | "Run the morning **Brief** (`seneschal/SKILL.md`). Deliver in chat + push highlights to Telegram + email via Proton + write the Run Log." |
 | `seneschal-eod-wrap` | ~9:07 PM daily | "Run the **Wrap** (`seneschal/SKILL.md`)." |
-| `seneschal-dream` | nightly, after Wrap (e.g. ~9:30 PM) | "Run the **Dream** consolidation (`seneschal/SKILL.md`): rebuild `state/context-digest.md` and refresh reminders." |
-| `seneschal-daily-journal` | 5:00 AM daily | "Run the **Daily Journal** steward (`seneschal/SKILL.md`)." |
+| `seneschal-dream` | nightly, after Wrap (e.g. ~9:30 PM) | "Run the **Dream** consolidation (`seneschal/SKILL.md`): rebuild `state/context-digest.md`, refresh reminders, propose learnings, then commit + open a PR." |
+| `seneschal-daily-journal` | 5:00 AM daily | "Run the **Daily Journal** (`subagents/journal-steward/daily-journal-steward/SKILL.md`)." |
 
 ### 2. The presence daemon — always-on service
+
+> **The setup wizard automates this.** `/setup daemon` renders a per-machine launcher +
+> `register-tasks.ps1` (every Task Scheduler step below in one approve-once, one-elevation
+> script — `seneschald`, `seneschald-update`, optionally the §3 health listener), the
+> systemd-user-unit / launchd equivalents on Linux/macOS, and the §5 session hooks
+> (`settings_merge.py`, diff-shown). The manual path below stays **authoritative** — the
+> wizard renders exactly these parameters (`render_units.py`).
 
 `presence.py` runs resident (assuming an always-on host) and is event-driven, so it's ~free while idle.
 It owns Telegram chat (a warm `claude` session), fires reminders, and runs the comms-peek.
@@ -172,6 +186,41 @@ sentinel file (create `paused` in the tool's output dir to skip cycles without u
 first-ever cycle with a `--no-notify` flag so it seeds the seen-ledger without re-alerting already-known
 items. The loop is the tripwire, not the writer — anything that drafts for the outside world stays an
 on-demand, gated delegation.
+
+### 5. Session registry hooks — machine-wide (manual path; `/setup daemon` automates it)
+
+The **session registry** (`state/sessions/` — see `../references/reminders-policy.md` → "Live-session
+defer") learns about *every* Claude Code session on the box through a machine-wide hook:
+`session_stamp.py` writes/refreshes an awareness-only `build` entry on session events, and on
+**SessionEnd** it also fire-and-forgets the `mini_dream.py` distiller (→
+`state/session-distillations.jsonl`). The daemon and a desktop `/assistant` session register
+themselves separately (`sentinel.write_session_heartbeat` / `session_heartbeat.py`) — the hook covers
+everything else.
+
+Wire it in **your user-level `~/.claude/settings.json`** — *not* this repo's `.claude/settings.json*`
+(a repo-shipped hook would impose it on every install and double-fire beside the user copy; personal
+hook config never ships). All **four events** point at the same script, absolute-pathed into the live
+checkout so any project's session lands entries in the shared state dir (replace `$REPO` with your
+checkout path, e.g. `C:/Users/you/workspace/seneschal`):
+
+```json
+{
+  "env": { "PYTHONUTF8": "1" },
+  "hooks": {
+    "SessionStart":     [ { "hooks": [ { "type": "command", "command": "python $REPO/seneschal/scripts/session_stamp.py", "timeout": 10 } ] } ],
+    "UserPromptSubmit": [ { "hooks": [ { "type": "command", "command": "python $REPO/seneschal/scripts/session_stamp.py", "timeout": 10 } ] } ],
+    "Stop":             [ { "hooks": [ { "type": "command", "command": "python $REPO/seneschal/scripts/session_stamp.py", "timeout": 10 } ] } ],
+    "SessionEnd":       [ { "hooks": [ { "type": "command", "command": "python $REPO/seneschal/scripts/session_stamp.py", "timeout": 10 } ] } ]
+  }
+}
+```
+
+Notes: the `timeout: 10` keeps a wedged git/filesystem from ever stalling a session (the script itself
+is fail-silent and always exits 0); the `PYTHONUTF8=1` env entry stops Windows' legacy console codepage
+from tripping Python over emoji/UTF-8 transcript content. The hook prints nothing by contract
+(SessionStart/UserPromptSubmit stdout would be injected into the session's context). The setup wizard
+automates this registration (`/setup daemon` → `settings_merge.py` — diff first, append-only,
+backup-first, refuses a corrupt settings.json) — this is the manual path it mirrors.
 
 ## Pre-approving tools (one-time)
 

@@ -1,0 +1,35 @@
+{
+  "max_output_tokens_per_turn": 8000,
+  "reasoning_effort_by_mode": {
+    "Chat": "medium",
+    "Brief": "medium",
+    "Wrap": "medium",
+    "Triage": "medium",
+    "Ask": "medium",
+    "Reminders": "low",
+    "Forge": "medium",
+    "Archive": "low",
+    "Watch": "low",
+    "Dream": "high"
+  },
+  "turn_checkpoint_n": 8,
+  "max_turns_per_conversation": 40,
+  "daily_token_budget_by_model": {
+    "claude-haiku-4-5": 2000000,
+    "claude-sonnet-5": 1000000,
+    "claude-opus-4-8": 400000,
+    "claude-fable-5": 150000
+  },
+  "weekly_token_budget_by_model": {
+    "claude-haiku-4-5": 10000000,
+    "claude-sonnet-5": 5000000,
+    "claude-opus-4-8": 2000000,
+    "claude-fable-5": 750000
+  },
+  "fable_oneshots_per_day": 5,
+  "fable_oneshots_per_conversation": 2,
+  "fable_concurrency_max": 1,
+  "context_fill_winddown_pct": 80,
+  "proactive_push_rate_per_hour": 3,
+  "updated_at": "2026-07-18T00:00:00Z"
+}

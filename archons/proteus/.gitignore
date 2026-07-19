@@ -1,0 +1,37 @@
+# Proteus — per-archon ignore rules.
+#
+# Every Archon carries its own .gitignore so the state/ vs out/ split holds wherever
+# the archon is checked out, not just inside this repo's tree (whose root .gitignore also
+# covers archons/*/out|state as a safety net). See seneschal/references/archons.md.
+
+# --- state/ : runtime churn — rewritten every cycle, regenerable, never in git ---
+# (rolling ledgers, "latest" caches, counters, queues, sentinels, pid/log files)
+state/*
+!state/README.md
+!state/*.example.json
+!state/*.example.jsonl
+!state/*.example.md
+
+# --- out/ : deliverables — drafted documents, digests, generated views ----------
+# Products, not machinery. Ignored here because Proteus's outputs embed the owner's
+# contact details (tailored resumes/cover letters); the generator is tracked, its
+# output isn't.
+out/
+
+# --- secrets: only the *.example is ever tracked --------------------------------
+*.env
+!*.env.example
+*.secret
+*_token.json
+
+# --- private inputs: only the *.example is ever tracked -------------------------
+profile.json
+watchlist.json
+voice-profile.md
+
+# --- local noise ----------------------------------------------------------------
+__pycache__/
+*.pyc
+*.log
+*.pid
+*.stackdump

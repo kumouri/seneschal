@@ -1,4 +1,4 @@
-# Front-door Router — setup (Advisor Chain — Router advisor, phase 1 shadow)
+# Front-door Router — setup (Advisor Chain — Router advisor: phase 1 shadow + the v3 fable arm)
 
 The assistant's **Router advisor** is a **front-door model router**: it runs in the daemon
 (`presence.py`), Watch's sibling, and classifies each **inbound chat message** *trivial-and-safe* vs
@@ -6,6 +6,10 @@ The assistant's **Router advisor** is a **front-door model router**: it runs in 
 point (phase 2) is to eventually handle clearly-trivial turns locally — instant, offline, zero-Notion —
 and escalate everything else to Opus. Full spec: `../references/advisor-chain.md` (Router advisor
 section).
+
+As of **v3** (`../docs/cockpit-spec.md` "Model dials & Fable delegation"), the SAME `router.py` also
+carries a second, independent classifier — the **fable arm** — that decides, among escalations,
+*standard* vs *Fable-level*. See "The fable arm (v3)" below.
 
 It's **free-but-local** (local Ollama + Python **standard library** — no `pip`, mirrors `rag_common.py`)
 and **conservative by construction**: `router.classify()` never raises, and any failure or low-confidence
@@ -62,7 +66,7 @@ The classifier biases **hard toward escalate**; only three narrow cases are triv
 Each inbound message appends one JSON line to `../state/router-log.jsonl` (schema in `../state/README.md`):
 
 ```json
-{"ts":"2026-07-06T22:34:37Z","channel":"telegram","text_preview":"took my meds","verdict":"trivial","category":"ack","confidence":0.95,"model":"qwen3.5:4b"}
+{"ts":"2026-07-06T22:34:37Z","channel":"telegram","text_preview":"took my meds","arm":"triage","verdict":"trivial","category":"ack","confidence":0.95,"model":"qwen3.5:4b"}
 ```
 
 Quick views (from the repo root):
@@ -80,7 +84,34 @@ Opus) is a **false-trivial** — the dangerous error, since phase 2 would have h
 on something genuinely trivial is only a missed optimization, not a risk. The whitelist and threshold are
 tuned to make false-trivials rare.
 
-## The phase-2 plan (how it graduates)
+## The fable arm (v3, `cockpit-spec.md` "Model dials & Fable delegation")
+
+A second, independent classifier in the same `router.py` — `classify_fable()` — that decides, among
+escalations, **standard vs Fable-level**: whether the warm model would plausibly struggle, or Fable would
+clearly do substantially better (deep multi-factor synthesis, long-horizon planning, hard multi-step
+debugging or architecture reasoning). Wired in by `presence.fable_arm_classify`.
+
+**The ceiling gates whether this arm runs AT ALL.** `fable_arm_classify` reads `state/model-config.json`
+live and, if `max_routable_model` isn't Fable-tier (`model_config.admits_fable`), returns immediately —
+**no Ollama call, no log row** — "the fable arm doesn't even run" (cockpit-spec.md ruling 4). Once the
+ceiling admits Fable, every inbound message is classified and logged (`arm: "fable"`, schema in
+`../state/README.md`), alongside the triage arm's `arm: "triage"` rows in the same file.
+
+**Unlike the triage arm, a `"fable"` verdict is not purely observational.** It queues a short hint LINE
+(`presence.FABLE_HINT_LINE`) onto `DaemonState.fable_hints`, which `drainer_task` best-effort-attaches to
+the next prompt it builds (FIFO, never persisted — if the classification hasn't finished by the time a
+turn's prompt is built, that turn just proceeds without a hint; this is advisory only, never a command,
+and the warm session's own judgment plus force-route remain independent triggers regardless). The safe
+fallback direction is **`"standard"`** (no delegation) — the mirror image of the triage arm's `"escalate"`
+default, since a Fable call is the rare/expensive path here, not the safe one.
+
+**Delegation itself** happens via `fable_delegate.py` (a `claude -p --model claude-fable-5` one-shot the
+warm session invokes via its own tool use — never a session handoff), triggered by this hint, the warm
+session's own judgment, or a force-route (`!fable` prefix / the cockpit's "Send to Fable" toggle — see
+`GROUNDING`'s delegation section in `presence.py`). `fable_delegate.py` re-enforces the ceiling itself
+(refuses with exit 2 if it doesn't admit Fable) — belt and braces with the arm-gating above.
+
+## The phase-2 plan (how the TRIAGE arm graduates)
 
 Once the shadow log shows the classifier is reliably right on the whitelist — in particular, near-zero
 false-trivials — phase 2 adds `--router-mode live`: the daemon handles clearly-trivial turns locally (an
