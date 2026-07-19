@@ -23,6 +23,16 @@ config change, not a rewrite.
 - Prepare a **draft** (email reply, calendar response, Slack message) and hold it.
 - Read the Archon stable (records, ledgers, eval reports, tenure reviews) and **draft** a need
   statement or scaffold a minted Archon (`archons.md`) — local, regenerable, no spend.
+- **Deploy, admit, and delegate to an already-minted Archon** (`archons.md`) — the owner's standing
+  authorization: "spin up archons as needed." The basis: the claude-cli adapter runs headless
+  `claude` sessions on the **subscription** (`ANTHROPIC_API_KEY` scrubbed — demiurge ADR 0006), so
+  a delegation costs no API spend, and the rest is budgeted into the plan. Batch delegations and
+  wind Archons down after use anyway — the rails (`max_duration_seconds`, `max_steps`) are still
+  real, and courtesy to a shared subscription is still a virtue.
+  **This authorizes running the staff, not shipping their work:** anything an Archon drafts for the
+  outside world still comes back through the assistant's draft-and-hold gate (see below), and a
+  non-spend objection to a specific job — legal risk, a bad-faith posting, an avoid-list hit — is a
+  *separate* gate that this standing auth does not touch. Mint / revise / retire stay ask-high.
 
 ## Ask-high — draft, then wait for explicit approval
 
@@ -32,9 +42,10 @@ config change, not a rewrite.
 - **Delete or archive non-noise** — anything that isn't clearly junk.
 - Modify Notion in a way that isn't a routine tracker update — e.g. closing a Project, deleting a Task,
   editing someone else's content.
-- **Archon lifecycle + delegation** (Forge mode): mint, deploy, admit, delegate, revise, retire —
-  each changes the assistant's staff roster or spends subscription turns (deploy/admit/delegate run the
-  `claude` CLI). Held with `kind: "archon"`; see `archons.md`.
+- **Archon lifecycle** (Forge mode): **mint, revise, retire** — each changes the assistant's staff
+  *roster*, which is a judgment call about who works for the owner, not a spend question. Held with
+  `kind: "archon"`; see `archons.md`. (**deploy / admit / delegate** graduated to act-low by the
+  owner's standing authorization — see the act-low list above and the graduation log.)
 - Anything **irreversible, outward-facing, or money/identity-related**.
 - Anything the assistant is **unsure** about — when in doubt, it's ask-high.
 
@@ -149,3 +160,30 @@ The entries below are worked examples of the format (dates illustrative).
   it fires by the deadline or is tracked; audited here + in `proposed-learnings.md` (Applied). Source:
   approved Dream learning the owner asked to codify (day-off signal + pierce rule set by the owner) —
   **decided by the owner**.
+- **YYYY-MM-DD — Defer delivery into a live interactive session + keep the session registry** (while an
+  interactive chat session — the daemon's warm chat or a desktop slash session — is live, hold
+  non-piercing nudges and skip the Watch peek; every local Claude Code session is stamped into
+  `state/sessions/` with a `working_on` string for cross-session awareness, via the machine-wide
+  `session_stamp.py` hook the owner approved into `~/.claude/settings.json`) — trust basis:
+  internal-only + self-directed (the assistant shaping its own pushes to the owner and its own
+  visibility; nothing outbound to third parties), **defer-never-drop** with the pierce set (`Call Me`
+  + Critical-and-above) unaffected, fail-open on absent/malformed/stale signals (a broken registry can
+  only let a nudge fire, never silence one), reversible (remove the hook + entries), awareness entries
+  (`build`/`scheduled`) never gate delivery; audited here + in `proposed-learnings.md` (Applied) —
+  design ruled point-by-point in chat — **decided by the owner**.
+- **YYYY-MM-DD — Deploy, admit, and delegate to an already-minted Archon** (Forge mode; `archons.md`) —
+  standing authorization, in the owner's words: *"This is standing authorization to spin up archons as
+  needed."* Trust basis: the gate was **only ever about spend**, and the owner retired that objection
+  at the source — the claude-cli adapter shells to headless `claude` on the **subscription** with
+  `ANTHROPIC_API_KEY` scrubbed (demiurge ADR 0006), so no delegation can reach the metered API;
+  reversible (an Archon is torn down with its process; its output is files on disk, nothing sent);
+  non-outward (an Archon drafts, it never sends); bounded by the charter as scope authority + the
+  spec's `budget` rails (`max_duration_seconds`/`max_steps`/`max_token_usage`); audited (every
+  delegation lands in the archon's `state/ledger.jsonl` + a Run Log `Mode = Forge` row) —
+  **decided by the owner**. **Boundaries, all unchanged:** (a) **mint / revise / retire stay
+  ask-high** — they change *who is on the staff*, a roster judgment the rationale never addressed;
+  (b) anything an Archon drafts for the outside world still comes through the assistant's
+  draft-and-hold gate — this authorizes *running* the staff, not *shipping* their work; (c) a
+  **non-spend** objection to a specific delegation (non-compete/legal exposure, a bad-faith or
+  unverifiable posting, an avoid-list hit) is a **separate gate** and still gets held for the owner's
+  call — the standing auth buys the turns, not the judgment.
