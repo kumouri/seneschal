@@ -34,11 +34,15 @@ seneschal/
                    briefing, reminders-policy, autonomy-policy(+config), memory protocol, advisor-chain,
                    salience, archons, notion-rate-limits (stub → store/notion/mapping.md),
                    proposed-learnings (Dream's PR target)
-  docs/            asyncio-daemon-design.md + asyncio-daemon-plan.md (the reactive-core design)
+  docs/            asyncio-daemon-design.md + asyncio-daemon-plan.md (the reactive-core design),
+                   notion-write-behind-outbox-spec.md (durable act-low Notion writes; Notion
+                   backend only) + spec-prompts/ (the historical planning prompts behind specs)
   scripts/         presence.py (resident asyncio daemon), sentinel.py (helper/one-shot),
                    identity_common.py (persona/identity.json reader — never raises, defaults
                    when absent; presence.py renders its grounding/slot prompts from it),
                    telegram/discord/proton/google comms bridges, reminders_* queue+ack ledger,
+                   outbox.py + outbox_common.py (durable write-behind journal for act-low
+                   Notion writes — Notion backend only; filesystem backends write direct),
                    session_stamp.py + session_heartbeat.py + mini_dream.py (multi-session
                    registry under state/sessions/ + the per-session mini-dream distiller),
                    rag_* (local semantic index), router.py, salience tooling, health/presence
