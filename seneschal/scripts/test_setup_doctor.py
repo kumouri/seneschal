@@ -524,6 +524,15 @@ class DaemonCheck(Base):
         row = sd.check_daemon(self.ctx())
         self.assertIn("seneschald-update", row["detail"])
 
+    def test_darwin_launchd_label_detected(self):
+        # The rendered agent label is com.seneschal.presence (render_units.py) — the
+        # check must match it, not just a literal "seneschald".
+        self.patch(sd, "_run",
+                   lambda cmd, timeout=30.0, env=None: (0, "123\t0\tcom.seneschal.presence\n", ""))
+        row = sd.check_daemon(self.ctx(platform="darwin"))
+        self.assertIn("loaded", row["detail"])
+        self.assertNotIn("not loaded", row["detail"])
+
 
 class HooksCheck(Base):
     def test_hook_present_green(self):

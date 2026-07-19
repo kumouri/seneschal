@@ -59,11 +59,9 @@ it: "you've already got X — I won't re-ask."
 ## 5 — The road ahead
 
 Close with a short human paragraph, not a lecture: the chapter list from the SKILL's table
-(persona → store → owner interview → auth + models → channels → MCP → cockpit), that
-everything is skippable, that it resumes if interrupted (`/setup` picks up where it left
-off), and that `/setup <chapter>` jumps anywhere. Note honestly that the `daemon` and
-`verify` chapters land in a later PR — starting the daemon is a by-hand step for now
-(`seneschal/scripts/SCHEDULING.md`).
+(persona → store → owner interview → auth + models → channels → MCP → cockpit → daemon →
+verify), that everything is skippable, that it resumes if interrupted (`/setup` picks up
+where it left off), and that `/setup <chapter>` jumps anywhere.
 
 Then mark and move on:
 

@@ -497,8 +497,10 @@ def check_daemon(ctx) -> dict:
     elif ctx.platform == "darwin":
         rc, out, _ = _run(["launchctl", "list"], timeout=15.0)
         if rc is not None:
-            registered = "seneschald" in out
-            reg_note = "launchd job seneschald " + ("loaded" if registered else "not loaded")
+            # The daemon chapter's agent label is com.seneschal.presence (render_units.py);
+            # also accept a hand-rolled "seneschald" label.
+            registered = "com.seneschal." in out or "seneschald" in out
+            reg_note = "launchd agent com.seneschal.presence " + ("loaded" if registered else "not loaded")
     else:
         rc, out, _ = _run(["systemctl", "--user", "is-active", "seneschald.service"], timeout=15.0)
         if rc is not None:

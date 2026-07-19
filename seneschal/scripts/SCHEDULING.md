@@ -67,6 +67,13 @@ invokes the orchestrator in one mode — but with the daemon owning them, that's
 
 ### 2. The presence daemon — always-on service
 
+> **The setup wizard automates this.** `/setup daemon` renders a per-machine launcher +
+> `register-tasks.ps1` (every Task Scheduler step below in one approve-once, one-elevation
+> script — `seneschald`, `seneschald-update`, optionally the §3 health listener), the
+> systemd-user-unit / launchd equivalents on Linux/macOS, and the §5 session hooks
+> (`settings_merge.py`, diff-shown). The manual path below stays **authoritative** — the
+> wizard renders exactly these parameters (`render_units.py`).
+
 `presence.py` runs resident (assuming an always-on host) and is event-driven, so it's ~free while idle.
 It owns Telegram chat (a warm `claude` session), fires reminders, and runs the comms-peek.
 
@@ -180,7 +187,7 @@ first-ever cycle with a `--no-notify` flag so it seeds the seen-ledger without r
 items. The loop is the tripwire, not the writer — anything that drafts for the outside world stays an
 on-demand, gated delegation.
 
-### 5. Session registry hooks — machine-wide (manual setup)
+### 5. Session registry hooks — machine-wide (manual path; `/setup daemon` automates it)
 
 The **session registry** (`state/sessions/` — see `../references/reminders-policy.md` → "Live-session
 defer") learns about *every* Claude Code session on the box through a machine-wide hook:
@@ -212,7 +219,8 @@ Notes: the `timeout: 10` keeps a wedged git/filesystem from ever stalling a sess
 is fail-silent and always exits 0); the `PYTHONUTF8=1` env entry stops Windows' legacy console codepage
 from tripping Python over emoji/UTF-8 transcript content. The hook prints nothing by contract
 (SessionStart/UserPromptSubmit stdout would be injected into the session's context). The setup wizard
-will automate this registration later — this is the manual path.
+automates this registration (`/setup daemon` → `settings_merge.py` — diff first, append-only,
+backup-first, refuses a corrupt settings.json) — this is the manual path it mirrors.
 
 ## Pre-approving tools (one-time)
 
