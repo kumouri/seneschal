@@ -75,8 +75,16 @@ the "genuinely automatic" sleep feed, no manual export tap. It reuses the existi
 (`BlocklistSyncWorker`), runs every ~3 hours, and lands in the same `health.db` the dashboard reads. Full
 picture: `seneschal/scripts/HEALTH_SETUP.md`.
 
+**v4: workouts + nutrition.** The worker also reads `ExerciseSessionRecord` (workouts) and
+`NutritionRecord` (meals) and ships them over the same NDJSON pipe as `t: "workout"` / `t: "nutrition"`
+lines — see `import_ndjson`'s docstring in `health_import.py` for the exact wire shapes. A workout's
+calories/distance aren't fields on the session itself in Health Connect — they're separate
+`TotalCaloriesBurnedRecord` / `DistanceRecord` entries over the same interval — so the worker also reads
+those and folds in whatever overlaps a given session's start/end before posting.
+
 Everything the health feed needs is already in this committed project — the Health Connect dependency, the
-`android.permission.health.READ_*` permissions, the `<queries>` block, and the permissions-rationale
+`android.permission.health.READ_*` permissions (sleep, heart rate, oxygen saturation, steps, exercise,
+total calories burned, distance, nutrition), the `<queries>` block, and the permissions-rationale
 `activity-alias`. You only add the endpoint + token to `local.properties`.
 
 **1. Desktop side first.** On the machine that holds `health.db`, run the listener (it binds your Tailscale
@@ -95,9 +103,9 @@ HEALTH_INGEST_TOKEN=<the same token you passed to health_listener.py>
 ```
 
 **3. Build + install** (`./gradlew installDebug`, or Run ▶). On launch the app requests Health Connect read
-access through Health Connect's own system dialog — **approve** sleep, heart rate, blood oxygen, steps, and
-(for hands-off background syncing) allow-all-the-time. Then **Sync now** fires the first pull; after that
-it's automatic.
+access through Health Connect's own system dialog — **approve** sleep, heart rate, blood oxygen, steps,
+exercise, total calories burned, distance, nutrition, and (for hands-off background syncing)
+allow-all-the-time. Then **Sync now** fires the first pull; after that it's automatic.
 
 **4. Verify.** The listener prints a line per ingest (`[time] ingest NB -> {...}`). Then rebuild the
 dashboard on the desktop: `python seneschal/scripts/health_dashboard.py`.

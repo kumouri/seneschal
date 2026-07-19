@@ -3,10 +3,15 @@ package com.kumouri.seneschal
 import android.content.Context
 import androidx.health.connect.client.HealthConnectClient
 import androidx.health.connect.client.permission.HealthPermission
+import androidx.health.connect.client.records.DistanceRecord
+import androidx.health.connect.client.records.ExerciseSessionRecord
 import androidx.health.connect.client.records.HeartRateRecord
+import androidx.health.connect.client.records.MealType
+import androidx.health.connect.client.records.NutritionRecord
 import androidx.health.connect.client.records.OxygenSaturationRecord
 import androidx.health.connect.client.records.SleepSessionRecord
 import androidx.health.connect.client.records.StepsRecord
+import androidx.health.connect.client.records.TotalCaloriesBurnedRecord
 import androidx.health.connect.client.request.ReadRecordsRequest
 import androidx.health.connect.client.time.TimeRangeFilter
 import androidx.work.Constraints
@@ -35,6 +40,11 @@ import java.util.concurrent.TimeUnit
  * reads them from local.properties at build time (see the android README). Idempotent: every record
  * carries Health Connect's stable id, and the desktop upserts on it, so overlapping re-reads never
  * duplicate. We deliberately re-read the last GRACE_DAYS on each run so same-day step totals stay correct.
+ *
+ * Also reads ExerciseSessionRecord (workouts) and NutritionRecord (meals). A workout's calories/distance
+ * aren't fields on the session record itself -- Health Connect stores them as separate
+ * TotalCaloriesBurnedRecord / DistanceRecord entries covering the same interval -- so we read those too
+ * and fold in whatever overlaps a given session's [start, end).
  *
  * The wire format is documented in seneschal/scripts/health_import.py (import_ndjson). Nothing here reads
  * or sends anything but the owner's own health data to their own desktop.
@@ -70,6 +80,8 @@ class HealthSyncWorker(context: Context, params: WorkerParameters) :
             readHeartRate(client, range, lines)
             readSpo2(client, range, lines)
             readSteps(client, range, lines)
+            readWorkouts(client, range, lines)
+            readNutrition(client, range, lines)
             if (lines.isEmpty()) return Result.success()
 
             if (!post(lines)) return Result.retry()
@@ -142,6 +154,54 @@ class HealthSyncWorker(context: Context, params: WorkerParameters) :
         }
     }
 
+    private suspend fun readWorkouts(c: HealthConnectClient, range: TimeRangeFilter, out: MutableList<String>) {
+        val sessions = c.readRecords(ReadRecordsRequest(ExerciseSessionRecord::class, range)).records
+        if (sessions.isEmpty()) return
+        // Calories/distance aren't fields on the session -- they're separate records over the same
+        // interval -- so pull both once for the whole range and fold in whatever overlaps each session.
+        val calories = c.readRecords(ReadRecordsRequest(TotalCaloriesBurnedRecord::class, range)).records
+        val distances = c.readRecords(ReadRecordsRequest(DistanceRecord::class, range)).records
+        for (r in sessions) {
+            val off = offsetMinutes(r.startZoneOffset, r.startTime)
+            val kcal = calories.filter { overlaps(it.startTime, it.endTime, r.startTime, r.endTime) }
+                .sumOf { it.energy.inKilocalories }
+            val meters = distances.filter { overlaps(it.startTime, it.endTime, r.startTime, r.endTime) }
+                .sumOf { it.distance.inMeters }
+            val obj = JSONObject()
+                .put("t", "workout").put("uuid", r.metadata.id)
+                .put("start_ms", r.startTime.toEpochMilli()).put("end_ms", r.endTime.toEpochMilli())
+                .put("offset_min", off)
+                .put("exercise_type", ExerciseSessionRecord.EXERCISE_TYPE_INT_TO_STRING_MAP[r.exerciseType] ?: "unknown")
+            r.title?.let { obj.put("title", it) }
+            r.notes?.let { obj.put("notes", it) }
+            if (kcal > 0.0) obj.put("energy_kcal", kcal)
+            if (meters > 0.0) obj.put("distance_m", meters)
+            out.add(obj.toString())
+        }
+    }
+
+    private suspend fun readNutrition(c: HealthConnectClient, range: TimeRangeFilter, out: MutableList<String>) {
+        val records = c.readRecords(ReadRecordsRequest(NutritionRecord::class, range)).records
+        for (r in records) {
+            val off = offsetMinutes(r.startZoneOffset, r.startTime)
+            val obj = JSONObject()
+                .put("t", "nutrition").put("uuid", r.metadata.id)
+                .put("start_ms", r.startTime.toEpochMilli()).put("end_ms", r.endTime.toEpochMilli())
+                .put("offset_min", off)
+                .put("meal_type", MealType.MEAL_TYPE_INT_TO_STRING_MAP[r.mealType] ?: "unknown")
+            r.name?.let { obj.put("name", it) }
+            r.energy?.let { obj.put("energy_kcal", it.inKilocalories) }
+            r.protein?.let { obj.put("protein_g", it.inGrams) }
+            r.totalCarbohydrate?.let { obj.put("carbs_g", it.inGrams) }
+            r.totalFat?.let { obj.put("fat_g", it.inGrams) }
+            out.add(obj.toString())
+        }
+    }
+
+    /** Half-open interval overlap: does [aStart, aEnd) share any instant with [bStart, bEnd)? */
+    private fun overlaps(aStart: Instant, aEnd: Instant, bStart: Instant, bEnd: Instant): Boolean =
+        aStart.isBefore(bEnd) && bStart.isBefore(aEnd)
+
     private fun post(lines: List<String>): Boolean {
         val body = lines.joinToString("\n").toByteArray(Charsets.UTF_8)
         val conn = (URL(BuildConfig.HEALTH_INGEST_URL).openConnection() as HttpURLConnection).apply {
@@ -184,7 +244,11 @@ class HealthSyncWorker(context: Context, params: WorkerParameters) :
             HealthPermission.getReadPermission(SleepSessionRecord::class),
             HealthPermission.getReadPermission(HeartRateRecord::class),
             HealthPermission.getReadPermission(OxygenSaturationRecord::class),
-            HealthPermission.getReadPermission(StepsRecord::class)
+            HealthPermission.getReadPermission(StepsRecord::class),
+            HealthPermission.getReadPermission(ExerciseSessionRecord::class),
+            HealthPermission.getReadPermission(NutritionRecord::class),
+            HealthPermission.getReadPermission(TotalCaloriesBurnedRecord::class),
+            HealthPermission.getReadPermission(DistanceRecord::class)
         )
 
         private fun connectedConstraints() =

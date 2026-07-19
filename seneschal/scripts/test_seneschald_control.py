@@ -34,9 +34,28 @@ GIT = shutil.which("git")
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
+def _pwsh_responsive() -> bool:
+    """Findable is not enough: a host-wide AMSI wedge can make every pwsh launch hang forever,
+    which would hang the whole suite (observed 2026-07-18). One cached probe with a hard timeout —
+    unresponsive pwsh degrades these integration tests to a skip, exactly like an absent one."""
+    if not (sys.platform == "win32" and PWSH):
+        return False
+    try:
+        return subprocess.run(
+            [PWSH, "-NoProfile", "-NonInteractive", "-Command", "1"],
+            capture_output=True, timeout=10,
+        ).returncode == 0
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+
+
+PWSH_OK = _pwsh_responsive()
+
+
 @unittest.skipUnless(
-    sys.platform == "win32" and PWSH and GIT,
-    "seneschald-control.ps1 is a Windows PowerShell script; this integration test needs win32 + pwsh + git",
+    PWSH_OK and GIT,
+    "seneschald-control.ps1 is a Windows PowerShell script; this integration test needs win32 + a "
+    "RESPONSIVE pwsh (an AMSI-wedged one hangs every launch) + git",
 )
 class SeneschaldControlUpdateTest(unittest.TestCase):
     """Drive `seneschald-control.ps1 -Action Update` through the paths that must stamp health."""

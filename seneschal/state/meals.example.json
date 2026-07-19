@@ -1,0 +1,17 @@
+{
+  "staged_at": "2026-07-18T02:00:00-05:00",
+  "plans": [
+    {
+      "title": "Meal prep week — protein-forward",
+      "url": "https://www.notion.so/example-meal-plan-page",
+      "summary": "Batchable lunches: chicken + rice bowls, lentil soup, overnight oats.",
+      "tags": ["batch", "high-protein"]
+    },
+    {
+      "title": "Quick weeknight ideas",
+      "url": "https://www.notion.so/example-meal-idea-page",
+      "summary": "15-minute dinners for low-spoon nights.",
+      "tags": ["quick", "low-effort"]
+    }
+  ]
+}

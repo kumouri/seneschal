@@ -2,7 +2,7 @@
 """Tests for the Samsung Health pipeline — chiefly the timezone contract, which is the whole ballgame.
 
 Samsung stores ``start_time``/``end_time`` in UTC and the local offset separately. Reading those strings
-as wall clock shifts every conclusion by 5-6 hours — exactly America/Chicago's offset — which is almost
+as wall clock shifts every conclusion by 5-6 hours — exactly the reference dataset's UTC offset — which is almost
 certainly how an earlier analysis concluded Samsung was under-detecting sleep onset by "~5.5h median".
 The DST tests below are the evidence that settles it, expressed as code so a future change can't quietly
 re-introduce the bug.
@@ -213,6 +213,131 @@ class TestNdjsonLiveFeed(unittest.TestCase):
         conn.close()
 
 
+class TestWorkoutNutritionLiveFeed(unittest.TestCase):
+    """Call Shield v4: ExerciseSessionRecord ("workout") and NutritionRecord ("nutrition") over the
+    same Health Connect -> desktop feed, landing in the new `workouts` / `nutrition` tables."""
+
+    def _db(self):
+        self.tmp = tempfile.mkdtemp()
+        return hc.connect(os.path.join(self.tmp, "live.db"))
+
+    def _workout_line(self, **overrides):
+        rec = {
+            "t": "workout", "uuid": "w1", "start_ms": _ms(2026, 7, 1, 12, 0),
+            "end_ms": _ms(2026, 7, 1, 13, 0), "offset_min": -300,
+            "exercise_type": "running", "title": "Morning run", "notes": "felt great",
+            "energy_kcal": 412.5, "distance_m": 5230.0,
+        }
+        rec.update(overrides)
+        return json.dumps(rec)
+
+    def _nutrition_line(self, **overrides):
+        rec = {
+            "t": "nutrition", "uuid": "n1", "start_ms": _ms(2026, 7, 1, 18, 0),
+            "end_ms": _ms(2026, 7, 1, 18, 0), "offset_min": -300,
+            "meal_type": "dinner", "name": "Chicken salad",
+            "energy_kcal": 540, "protein_g": 42, "carbs_g": 30, "fat_g": 18,
+        }
+        rec.update(overrides)
+        return json.dumps(rec)
+
+    def test_workout_and_nutrition_import(self):
+        conn = self._db()
+        counts = hi.import_ndjson(conn, [self._workout_line(), self._nutrition_line()])
+        self.assertEqual(counts["workout"], 1)
+        self.assertEqual(counts["nutrition"], 1)
+
+        w = conn.execute(
+            "SELECT start_local, end_local, local_date, duration_min, exercise_type, title, notes, "
+            "energy_kcal, distance_m FROM workouts").fetchone()
+        self.assertEqual(w["start_local"], "2026-07-01T07:00:00")   # 12:00 UTC - 5h
+        self.assertEqual(w["end_local"], "2026-07-01T08:00:00")
+        self.assertEqual(w["local_date"], "2026-07-01")
+        self.assertEqual(w["duration_min"], 60.0)
+        self.assertEqual(w["exercise_type"], "running")
+        self.assertEqual(w["title"], "Morning run")
+        self.assertEqual(w["notes"], "felt great")
+        self.assertEqual(w["energy_kcal"], 412.5)
+        self.assertEqual(w["distance_m"], 5230.0)
+
+        n = conn.execute(
+            "SELECT local_date, meal_type, name, energy_kcal, protein_g, carbs_g, fat_g "
+            "FROM nutrition").fetchone()
+        self.assertEqual(n["local_date"], "2026-07-01")
+        self.assertEqual(n["meal_type"], "dinner")
+        self.assertEqual(n["name"], "Chicken salad")
+        self.assertEqual(n["energy_kcal"], 540)
+        self.assertEqual(n["protein_g"], 42)
+        self.assertEqual(n["carbs_g"], 30)
+        self.assertEqual(n["fat_g"], 18)
+        conn.close()
+
+    def test_workout_and_nutrition_tolerate_missing_optional_fields(self):
+        """Health Connect omits title/notes/energy/distance and nutrient fields when unset — the phone
+        never sends nulls for them, so the importer must accept the keys being simply absent."""
+        conn = self._db()
+        counts = hi.import_ndjson(conn, [
+            json.dumps({"t": "workout", "uuid": "w2", "start_ms": _ms(2026, 7, 2, 12, 0),
+                        "end_ms": _ms(2026, 7, 2, 12, 30), "offset_min": -300,
+                        "exercise_type": "yoga"}),
+            json.dumps({"t": "nutrition", "uuid": "n2", "start_ms": _ms(2026, 7, 2, 12, 0),
+                        "end_ms": _ms(2026, 7, 2, 12, 0), "offset_min": -300,
+                        "meal_type": "snack"}),
+        ])
+        self.assertEqual(counts["workout"], 1)
+        self.assertEqual(counts["nutrition"], 1)
+        w = conn.execute("SELECT title, notes, energy_kcal, distance_m FROM workouts").fetchone()
+        self.assertIsNone(w["title"])
+        self.assertIsNone(w["notes"])
+        self.assertIsNone(w["energy_kcal"])
+        self.assertIsNone(w["distance_m"])
+        n = conn.execute("SELECT name, energy_kcal, protein_g FROM nutrition").fetchone()
+        self.assertIsNone(n["name"])
+        self.assertIsNone(n["energy_kcal"])
+        self.assertIsNone(n["protein_g"])
+        conn.close()
+
+    def test_reimport_is_idempotent(self):
+        conn = self._db()
+        lines = [self._workout_line(), self._nutrition_line()]
+        hi.import_ndjson(conn, lines)
+        hi.import_ndjson(conn, lines)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM workouts").fetchone()[0], 1)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM nutrition").fetchone()[0], 1)
+        conn.close()
+
+    def test_mixed_batch_with_unknown_type_is_tolerant(self):
+        """A batch carrying every record type together, plus one this importer has never heard of,
+        must land every known record and merely count the rest — never abort the batch."""
+        conn = self._db()
+        lines = [
+            json.dumps({"t": "sleep_session", "uuid": "s1", "start_ms": _ms(2026, 7, 1, 6, 0),
+                        "end_ms": _ms(2026, 7, 1, 11, 0), "offset_min": -300, "stages": []}),
+            self._workout_line(),
+            self._nutrition_line(),
+            json.dumps({"t": "meal_plan_idea"}),  # a hypothetical future type
+        ]
+        counts = hi.import_ndjson(conn, lines)
+        self.assertEqual(counts["sleep_session"], 1)
+        self.assertEqual(counts["workout"], 1)
+        self.assertEqual(counts["nutrition"], 1)
+        self.assertEqual(counts["skipped"], 1)
+        conn.close()
+
+    def test_malformed_workout_line_is_counted_not_fatal(self):
+        """A workout record missing a required key (here: no `uuid`) must not crash the batch."""
+        conn = self._db()
+        counts = hi.import_ndjson(conn, [
+            json.dumps({"t": "workout", "start_ms": _ms(2026, 7, 1, 12, 0),
+                        "end_ms": _ms(2026, 7, 1, 13, 0), "offset_min": -300}),
+            self._nutrition_line(),
+        ])
+        self.assertEqual(counts.get("bad"), 1)
+        self.assertEqual(counts.get("nutrition"), 1)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM workouts").fetchone()[0], 0)
+        conn.close()
+
+
 class TestMissedSleep(unittest.TestCase):
     """The green 'Samsung missed this' layer: still + at sleeping HR + no session, in a long-enough run."""
 
@@ -258,7 +383,7 @@ class TestSchema(unittest.TestCase):
                 conn.close()  # Windows won't remove the tempdir while the db handle is open
             self.assertLessEqual({"exports", "sleep_session", "sleep_stage", "heart_rate",
                                   "stress", "spo2", "skin_temp", "steps_daily",
-                                  "movement", "hr_minute"}, names)
+                                  "movement", "hr_minute", "workouts", "nutrition"}, names)
 
     def test_export_id_and_rejection(self):
         self.assertEqual(hc.export_id("samsunghealth_export_20260707152802.zip"),
