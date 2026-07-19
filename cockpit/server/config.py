@@ -26,11 +26,10 @@ DEFAULT_PIPE_HOST = "127.0.0.1"
 DEFAULT_PIPE_PORT = 8471
 PIPE_TOKEN_FILENAME = "cockpit-pipe-token"
 
-# Real OIDC auth config (the auth stack itself — login/callback/logout routes — is a deferred
-# follow-up; these getters stay so that PR is a pure re-add). Only COCKPIT_OIDC_CLIENT_ID has no
-# sensible default (a real client id doesn't exist until the owner provisions an OIDC app), so its
-# presence is what flips `auth.auth_mode()` from "dev"/"unconfigured" to "oidc" (see auth.py) —
-# leave it unset in this build.
+# Real OIDC auth config (v5 — the login/callback/logout routes live in app.py, the trust chain in
+# auth.py + oidc.py). Only COCKPIT_OIDC_CLIENT_ID has no sensible default (a real client id doesn't
+# exist until the owner provisions an OIDC app — see ../zitadel/ZITADEL_SETUP.md), so its presence
+# is what flips `auth.auth_mode()` from "dev"/"unconfigured" to "oidc" (see auth.py).
 DEFAULT_OIDC_ISSUER = "http://localhost:8480"
 DEFAULT_OIDC_REDIRECT = "http://127.0.0.1:8760/auth/callback"
 DEFAULT_ALLOWED_USER = "owner"
@@ -48,9 +47,9 @@ def get_state_dir() -> Path:
 
 
 def is_dev_no_auth() -> bool:
-    """The dev-only auth bypass. Real OIDC auth is a deferred follow-up; until it lands this is the
-    one seam every gated route checks. Still 127.0.0.1-bound regardless (see app.py's localhost-only
-    middleware) — this flag only controls the auth *stub*, not exposure."""
+    """The dev-only auth bypass — the default mode until the owner provisions an OIDC app (real OIDC
+    auth outranks it; see auth.auth_mode's precedence). Still 127.0.0.1-bound regardless (see app.py's
+    localhost-only middleware) — this flag only controls the auth *stub*, not exposure."""
     return os.environ.get("COCKPIT_DEV_NO_AUTH") == "1"
 
 
@@ -82,7 +81,7 @@ def get_emote_dir() -> Optional[Path]:
     return Path(d) if d else None
 
 
-# --------------------------------------------------- real OIDC auth (deferred follow-up; see above)
+# --------------------------------------------------------------- real OIDC auth (v5; see above)
 
 def get_oidc_issuer() -> str:
     return os.environ.get("COCKPIT_OIDC_ISSUER", DEFAULT_OIDC_ISSUER).rstrip("/")

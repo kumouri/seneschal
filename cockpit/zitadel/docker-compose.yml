@@ -1,0 +1,56 @@
+# Zitadel — the cockpit's IdP (design: ../../seneschal/docs/cockpit-spec.md, "Auth (Zitadel) & the
+# archon SSO portal").
+#
+# Version pinned deliberately; bump it on purpose, never via `latest`.
+#
+# Run from this directory (compose reads the sibling .env — copy .env.example → .env and fill it):
+#   docker compose -p seneschald-zitadel up -d
+# Console: http://localhost:8480/ui/console  (localhost-bound; public exposure via a tunnel is a
+# deliberately deferred, separate step). Setup + first-login walkthrough: ZITADEL_SETUP.md.
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${ZITADEL_DB_ADMIN_PASSWORD}
+      POSTGRES_DB: postgres
+    volumes:
+      - zitadel-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  zitadel:
+    image: ghcr.io/zitadel/zitadel:v4.16.1
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    command: start-from-init --masterkey "${ZITADEL_MASTERKEY}" --tlsMode disabled
+    environment:
+      ZITADEL_DATABASE_POSTGRES_HOST: db
+      ZITADEL_DATABASE_POSTGRES_PORT: 5432
+      ZITADEL_DATABASE_POSTGRES_DATABASE: zitadel
+      ZITADEL_DATABASE_POSTGRES_USER_USERNAME: zitadel
+      ZITADEL_DATABASE_POSTGRES_USER_PASSWORD: ${ZITADEL_DB_USER_PASSWORD}
+      ZITADEL_DATABASE_POSTGRES_USER_SSL_MODE: disable
+      ZITADEL_DATABASE_POSTGRES_ADMIN_USERNAME: postgres
+      ZITADEL_DATABASE_POSTGRES_ADMIN_PASSWORD: ${ZITADEL_DB_ADMIN_PASSWORD}
+      ZITADEL_DATABASE_POSTGRES_ADMIN_SSL_MODE: disable
+      ZITADEL_EXTERNALDOMAIN: localhost
+      ZITADEL_EXTERNALPORT: 8480
+      ZITADEL_EXTERNALSECURE: "false"
+      ZITADEL_FIRSTINSTANCE_ORG_NAME: seneschald
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_USERNAME: owner
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORD: ${ZITADEL_ADMIN_INITIAL_PASSWORD}
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_EMAIL_ADDRESS: owner@example.com
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_EMAIL_VERIFIED: "true"
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORDCHANGEREQUIRED: "true"
+    ports:
+      - "127.0.0.1:8480:8080"
+
+volumes:
+  zitadel-db:

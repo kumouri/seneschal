@@ -3,23 +3,28 @@
 A local-first **web observatory** over the seneschal daemon: live sessions, oneiroi, deploy health,
 presence, reminders, plan usage, a graceful-restart control, a live agent-style chat pane fed by the
 daemon pipe, the two model dials + the router dashboard, **Oikonomos** (the budget governor's
-Thresholds panel), sleep/workout/nutrition panels + a staged Meals card, and archon tiles with a
-GET-only reverse proxy.
+Thresholds panel), sleep/workout/nutrition panels + a staged Meals card, archon tiles with a
+GET-only reverse proxy, and the **real OIDC auth stack** (login round trip, session issuance, the
+break-glass recovery ladder, and the public decoy chat).
 
-Two pieces:
+Four pieces:
 
 - **`server/`** — a FastAPI backend (Python; the `cockpit` uv extras group — fastapi + uvicorn).
   Reads the daemon's `seneschal/state/*` tolerantly, holds the one outbound connection to the
   daemon's cockpit pipe, and exposes everything under `/api/*` on `127.0.0.1:8760`.
 - **`web/`** — a Vite + TypeScript + React frontend. `npm run build` produces `web/dist`, which the
   backend serves as static files, so one uvicorn process serves both the API and the UI.
+- **`zitadel/`** + **`breakglass/`** — the self-hosted IdP compose stack and the separate,
+  stdlib-only emergency-recovery supervisor (see "Auth" below).
+- **`decoy/`** — the public, unauthenticated honeypot chat, a fully isolated separate process
+  (see "Auth" below and `decoy/README.md`).
 
-**This build is dev-no-auth only.** The real auth stack (OIDC login round trip, session issuance,
-the break-glass recovery ladder) is a **deferred follow-up PR** — `auth.py`'s mode precedence is
-already in place and degrades naturally: with `COCKPIT_DEV_NO_AUTH=1` every gated route is open (the
-dev stub); with nothing configured every gated route answers an honest 503 `"auth not configured"`.
-Leave `COCKPIT_OIDC_CLIENT_ID` unset until the auth PR lands. Either way the server **only ever
-binds `127.0.0.1`** — the flag controls the auth stub, not exposure.
+**Dev-no-auth remains the default.** The real auth stack ships in this repo, but it stays off until
+the owner provisions an OIDC app (see "Auth" below) — `auth.py`'s mode precedence degrades
+naturally: with `COCKPIT_DEV_NO_AUTH=1` every gated route is open (the dev stub); with nothing
+configured every gated route answers an honest 503 `"auth not configured"`; with
+`COCKPIT_OIDC_CLIENT_ID` set, the real OIDC session gates everything. Either way the server **only
+ever binds `127.0.0.1`** — the flags control the auth mode, not exposure.
 
 **Oneiroi** (singular *oneiros*) is the display name for the per-session distillates
 `seneschal/scripts/mini_dream.py` writes to `state/session-distillations.jsonl` ("mini-dreams" in
@@ -30,10 +35,13 @@ older docs — script/file names are unchanged).
 ```
 cockpit/
   server/   FastAPI backend (Python, uv `cockpit` extras group — fastapi + uvicorn)
-    app.py           the app itself — routes, the localhost-only middleware, the lifespan-managed pipe client
-    config.py        env resolution (SENESCHAL_STATE_DIR, pipe knobs, the deferred-auth getters)
+    app.py           the app itself — routes (incl. /auth/*), the localhost-only middleware, the
+                     lifespan-managed pipe client
+    config.py        env resolution (SENESCHAL_STATE_DIR, pipe knobs, the OIDC getters)
     auth.py          mode precedence (oidc/dev/unconfigured), require_auth/require_csrf, allowlist
-    session.py       signed session-cookie primitives (stdlib hmac/hashlib; used once real auth lands)
+    oidc.py          stdlib OIDC client (discovery, PKCE, code exchange, userinfo — no JWT/JWKS lib)
+    session.py       signed session-cookie + pending-login-cookie primitives (stdlib hmac/hashlib)
+    _fake_oidc_server.py   in-process fake OIDC provider — the auth tests' fixture, not a test file
     pipe_client.py   the ONE outbound connection to the daemon's cockpit pipe (reconnect+backoff)
     ws_hub.py        fans daemon-relayed frames out to N browser tabs (GET /api/ws)
     transcript.py    GET /api/transcript backfill (tolerant tail of warm-transcript.jsonl)
@@ -56,6 +64,16 @@ cockpit/
     src/components/HealthSummaryPanel.tsx, SleepPanel.tsx, WorkoutsPanel.tsx, NutritionPanel.tsx,
       MealsPanel.tsx   the health/workout/meal panel group
     src/components/ArchonsPanel.tsx   the archon tile row (from the per-install registry)
+    src/components/BreakglassPage.tsx + src/breakglassApi.ts   the break-glass ladder UI (talks to
+      the separate supervisor directly)
+  zitadel/  the self-hosted IdP: docker-compose stack + .env.example + ZITADEL_SETUP.md (the
+            one-time app-registration walkthrough)
+  breakglass/  the emergency-recovery supervisor — deliberately stdlib-only, its own process/port
+    supervisor.py    the HTTP server (rung 3: the Telegram phrase; executes restart/force-pull)
+    actions.py       the two actions behind a Runner seam (tests never touch the real machine)
+    assertion.py     the short-lived HMAC assertion minted by the backend, verified here (the ONE
+                     shared module between cockpit/server and this package)
+  decoy/    the public honeypot chat — separate process, zero tools/data/secrets (own README.md)
 ```
 
 ## Running it locally
@@ -102,7 +120,7 @@ serves both the API and the built UI.
 |---|---|---|
 | `SENESCHAL_STATE_DIR` | `<this checkout>/seneschal/state` | The daemon's state directory this backend reads. Override for dev/tests. |
 | `COCKPIT_DEV_NO_AUTH` | unset | `1` allows every gated `/api/*` route (REST and `/api/ws`) without a session — the dev stub. With neither this nor OIDC set, every route except `/api/health` and `/api/auth/status` 503s `"auth not configured"` (the websocket closes with code 4401). The server only ever binds `127.0.0.1` regardless (belt-and-braces enforced twice: the uvicorn `--host` flag, plus a middleware that rejects any non-loopback client — that middleware doesn't run for websocket connections, a Starlette limitation, so `/api/ws` re-checks the same mode itself). |
-| `COCKPIT_OIDC_ISSUER` / `COCKPIT_OIDC_CLIENT_ID` / `COCKPIT_OIDC_REDIRECT` / `COCKPIT_ALLOWED_USER` | see `cockpit.env.example` | **Deferred-auth config.** Setting `COCKPIT_OIDC_CLIENT_ID` flips `auth.auth_mode()` to `"oidc"`, but the login routes land in the follow-up auth PR — leave it unset in this build (in `oidc` mode without them, every gated route just 401s). |
+| `COCKPIT_OIDC_ISSUER` / `COCKPIT_OIDC_CLIENT_ID` / `COCKPIT_OIDC_REDIRECT` / `COCKPIT_ALLOWED_USER` | see `cockpit.env.example` | **Real-auth config.** Setting `COCKPIT_OIDC_CLIENT_ID` flips `auth.auth_mode()` to `"oidc"` and turns on the login round trip (`/auth/login` → the IdP → `/auth/callback` → session cookie). Leave it unset until the OIDC app is provisioned — `zitadel/ZITADEL_SETUP.md` is the one-time walkthrough. |
 | `COCKPIT_ARCHON_REGISTRY_PATH` | `<server dir>/archon-registry.json` | Override for the archon registry file (tests point this at a throwaway file). The real registry is per-install and gitignored; seed it from `archon-registry.example.json`. Absent → empty roster, one log line, no error. |
 | `COCKPIT_PIPE_HOST` | `127.0.0.1` | Host of the daemon's cockpit pipe (`pipe_client.py`) — the daemon only ever binds loopback, so this should stay `127.0.0.1` outside of an unusual dev setup. |
 | `COCKPIT_PIPE_PORT` | `8471` | Port of the daemon's cockpit pipe — must match `presence.py --cockpit-port` (same default). |
@@ -151,9 +169,10 @@ Browser-originated `chat.send`/`status.get` prefer the live pipe and fall back a
 
 ## API
 
-All under `/api/` (the archon proxy's `/archons/*` routes are top-level, not under `/api/`). Every
-route except `/api/health` and `/api/auth/status` requires `COCKPIT_DEV_NO_AUTH=1` in this build
-(mode precedence: `auth.auth_mode()`) — `/api/ws` re-checks the same mode itself.
+All under `/api/` (the archon proxy's `/archons/*` routes and the `/auth/*` login round trip are
+top-level, not under `/api/`). Every route except `/api/health` and `/api/auth/status` requires a
+session in `oidc` mode or `COCKPIT_DEV_NO_AUTH=1` in dev mode (mode precedence: `auth.auth_mode()`)
+— `/api/ws` re-checks the same mode itself.
 
 | Route | Reads | Notes |
 |---|---|---|
@@ -182,6 +201,10 @@ route except `/api/health` and `/api/auth/status` requires `COCKPIT_DEV_NO_AUTH=
 | `GET /meals` | `state/meals.json` | The Dream-staged meal-plan/meal-idea snapshot. Absent/corrupt -> `{"available": false, "staged_at": null, "plans": []}`. |
 | `GET /api/archons` | archon registry | The per-install registry + a tolerant reachability probe for each `"live"` entry. Absent registry -> empty roster. |
 | `GET /archons/{id}/{path:path}` | — (proxies) | GET-only reverse proxy to `http://127.0.0.1:<port>/<path>` for a `"live"` archon. 404 unknown id, 503 not-live/no-port, 502/504 unreachable/timeout. Non-GET → 405 with a clear message (a documented limitation). |
+| `GET /auth/login` (top-level) | — | Starts the OIDC round trip: builds the issuer's authorize URL (PKCE S256 + a `state` nonce), stashes the verifier/state in a short-lived signed cookie, redirects. 503 when OIDC isn't configured. |
+| `GET /auth/callback` (top-level) | — (writes cookies + audit) | Validates `state`, exchanges the code (server-to-server, stdlib urllib), calls userinfo, checks the single-user allowlist, sets the session cookie, redirects to `/`. Doubles as the break-glass rungs-1-2 callback (redirects to `/#breakglass-assertion=...` instead of minting a session). |
+| `GET /auth/logout` (top-level) | — (writes cookie + audit) | Clears the session cookie and redirects to `/`. Never gated, never errors. |
+| `GET /api/breakglass/reauth/start?action=` | — (writes audit) | Break-glass rungs 1-2: a FRESH IdP re-auth (`prompt=login&max_age=0`) for `restart` or `force-pull`. Requires an already-authenticated session (a step-UP, not a bypass). |
 
 ## The chat pane + model dials & router
 
@@ -252,14 +275,34 @@ face the internet directly. **A documented limitation:** an archon needing a wri
 (POST/PUT/PATCH/DELETE) would need this widened — those methods 405 with a clear message rather
 than silently failing.
 
-## Auth modes
+## Auth
+
+**Dev-no-auth remains the default** — a fresh install needs none of this section. Enabling real
+auth is three opt-in pieces, each optional past the first:
+
+1. **Stand up Zitadel (the IdP):** `cockpit/zitadel/` — copy `.env.example` → `.env` (generate real
+   secrets; the file has a generation note), `docker compose -p seneschald-zitadel up -d`, then the
+   one-time OIDC app registration + first-login walkthrough in `zitadel/ZITADEL_SETUP.md`.
+2. **Wire the env config:** copy `server/cockpit.env.example` → `server/cockpit.env` (gitignored)
+   and fill `COCKPIT_OIDC_ISSUER` / `COCKPIT_OIDC_CLIENT_ID` / `COCKPIT_OIDC_REDIRECT` /
+   `COCKPIT_ALLOWED_USER`. Setting the client id is the flip that turns real auth on; restart the
+   backend with the file loaded (`--env-file cockpit/server/cockpit.env`, or export the vars).
+3. **The opt-in extras:**
+   - **The decoy** (`decoy/`) — the public, unauthenticated honeypot chat: a fully separate
+     process (default `127.0.0.1:8490`) with zero tools, zero data access, zero shared secrets;
+     prompt-injection against it is inert by construction. Run/env story: `decoy/README.md`.
+   - **Break-glass** (`breakglass/` + the cockpit UI's Break-glass page) — see "Break-glass" below.
+
+### Auth modes
 
 `auth.auth_mode()` picks ONE of three, freshly on every call (no caching, no restart needed to pick
 up an env change):
 
-1. **`oidc`** — `COCKPIT_OIDC_CLIENT_ID` is set. **Deferred:** the login/callback/logout routes and
-   session issuance land in the follow-up auth PR; in this build, `oidc` mode just means every gated
-   route 401s. Don't set it yet.
+1. **`oidc`** — `COCKPIT_OIDC_CLIENT_ID` is set. Real session-cookie auth: the authorization-code +
+   PKCE round trip (`/auth/login` → the issuer → `/auth/callback`), the userinfo call as the trust
+   anchor (deliberately no local JWT/JWKS verification — see `auth.py`'s module docstring), a
+   single-user allowlist (`COCKPIT_ALLOWED_USER`), and a signed HttpOnly SameSite=Strict session
+   cookie with sliding expiry.
 2. **`dev`** — no OIDC config, but `COCKPIT_DEV_NO_AUTH=1`. The dev stub: every gated route open,
    no session, no CSRF check (there's no session to hijack).
 3. **`unconfigured`** — neither. Every gated route 503s `"auth not configured"`.
@@ -267,26 +310,49 @@ up an env change):
 **CSRF:** every **mutating** route (`POST /api/control/restart`, `PUT /api/model-config`,
 `PUT /api/governor-config`) also depends on `require_csrf`, which demands a custom header
 (`X-Cockpit-Requested-With: cockpit` — `cockpit/web/src/api.ts` sends it on every request) — a no-op
-outside `oidc` mode, so it costs nothing today and is already wired for the auth PR.
+outside `oidc` mode. Full reasoning for why the header + SameSite=Strict suffice: `auth.py`'s
+module docstring.
+
+### Break-glass
+
+The emergency ladder for a wedged daemon the auto-update task can't fix — three rungs: a **fresh
+IdP re-auth** (password + TOTP, `prompt=login&max_age=0`; rungs 1-2, served by the backend's
+`/api/breakglass/reauth/start` + the `bg`-flagged `/auth/callback`, which mint a short-lived
+single-use HMAC **assertion**), then a **one-time phrase over Telegram** typed back within 5
+minutes (rung 3, served by the SEPARATE supervisor). Two actions: `restart` (kill + relaunch the
+daemon) and `force-pull` (hard-reset the live checkout to the deploy branch first — destructive
+only to uncommitted tracked changes; `state/` is gitignored and survives). Every rung, success or
+failure, is appended to `state/breakglass-audit.jsonl` and pushed to Telegram.
+
+The supervisor is **deliberately its own stdlib-only process** (no fastapi — it must survive the
+cockpit backend, the venv, and the daemon all being broken):
+
+```
+python cockpit/breakglass/supervisor.py --port 8499
+```
+
+The frontend's Break-glass page talks to it directly (`http://127.0.0.1:8499`, never proxied
+through `/api/*`). Full trust-chain writeup: `breakglass/supervisor.py`'s module docstring.
 
 ## Testing
 
 ```
 uv sync --extra cockpit --group test
 uv run python -m unittest discover -s cockpit/server -p "test_*.py"
+uv run python -m unittest discover -s cockpit/decoy -p "test_*.py"
+uv run python -m unittest discover -s cockpit/breakglass -p "test_*.py"
 cd cockpit/web && npm ci && npm run typecheck && npm run build
 ```
 
-The backend tests SKIP (not error) when fastapi isn't installed, so the repo's stdlib suite
-(`python -m unittest discover -s seneschal/scripts`) stays green on a bare interpreter.
-`test_parity.py` runs unconditionally — it's the tripwire that fires when the hand-duplicated
-`model_config.py`/`governor.py` tables drift from their `seneschal/scripts/` originals.
+The backend + decoy tests SKIP (not error) when fastapi isn't installed, so the repo's stdlib suite
+(`python -m unittest discover -s seneschal/scripts`) stays green on a bare interpreter; the
+break-glass suite is stdlib-only and runs anywhere. `test_parity.py` runs unconditionally — it's
+the tripwire that fires when the hand-duplicated `model_config.py`/`governor.py` tables drift from
+their `seneschal/scripts/` originals. The auth tests run against a real in-process fake OIDC server
+(`server/_fake_oidc_server.py`) — no network, no real IdP needed.
 
 ## What's genuinely next
 
-- **The auth stack (deferred follow-up):** the OIDC login round trip (authorization code + PKCE, no
-  local JWT/JWKS verification), the signed session cookie (`session.py` already ships), the
-  single-user allowlist, and the break-glass recovery ladder. `auth.py`, `config.py`'s OIDC getters,
-  and the CSRF seam are already in place so that PR is a pure re-add.
-- **Public exposure:** a tunnel in front of the cockpit — only after the auth stack lands.
-  Everything binds `127.0.0.1` until then.
+- **Public exposure:** a tunnel in front of the cockpit (+ the decoy as the public face) — a
+  deliberately separate step. Everything binds `127.0.0.1` until then; flip the session cookie's
+  `secure` flag in the same change that stands up TLS (see `auth.py`).

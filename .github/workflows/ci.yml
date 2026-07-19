@@ -92,7 +92,10 @@ jobs:
     # byte-compile + seneschal/scripts discover already cover these files without the extras
     # (cockpit/server/test_app.py SKIPS itself, doesn't error, when fastapi is absent) — this job
     # is what actually runs the cockpit test suite, including test_parity.py, the tripwire for the
-    # hand-duplicated model_config/governor copies.
+    # hand-duplicated model_config/governor copies. The decoy (cockpit/decoy/) shares the exact
+    # same extras group and skip-when-absent guard, so its tests fold in here as an extra step
+    # rather than a whole new job. cockpit/breakglass is stdlib-only and doesn't strictly NEED the
+    # extras group, but it rides along in this same venv/job for simplicity, next to the decoy.
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -104,6 +107,10 @@ jobs:
         run: uv sync --extra cockpit --group test
       - name: Run cockpit backend unit tests
         run: uv run python -m unittest discover -s cockpit/server -p "test_*.py"
+      - name: Run decoy chat unit tests
+        run: uv run python -m unittest discover -s cockpit/decoy -p "test_*.py"
+      - name: Run break-glass supervisor unit tests (stdlib-only)
+        run: uv run python -m unittest discover -s cockpit/breakglass -p "test_*.py"
 
   cockpit-web:
     name: Cockpit frontend typecheck + build
