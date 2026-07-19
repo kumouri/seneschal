@@ -180,3 +180,38 @@ store-update reminders <ref> { status: done, last_acknowledged: <today>, consecu
 
 **Why by cached id:** the lookup query is the throttled path; the ack write is not. Writing directly by
 the cached page id sidesteps throttle #2 entirely and keeps acks landing even during a query bout.
+
+---
+
+## Outbox — durable act-low writes
+
+Because Notion is **remote and rate-limited**, a `store-update`/`store-create` issued by a volatile
+session (chiefly a daemon-originated chat ack) can fail *after* the assistant has already said "done."
+The **write-behind outbox** (`../../scripts/outbox.py` + `outbox_common.py`, journal
+`../../state/notion-outbox.sqlite`) closes that gap: the write's *intent* is journaled locally first
+(durable — survives a reboot), then flushed here idempotently. The skill layer still speaks
+`store-update`; the outbox is HOW this backend makes that verb durable for daemon-originated acks. It is
+**Notion-backend only** — enabled only when `store/config.json` says `active: "notion"`; the filesystem
+backends (obsidian/markdown) write locally and atomically, so their acks take the direct path and never
+touch it. Full design: `../../docs/notion-write-behind-outbox-spec.md`.
+
+**Intent → tool.** Each journaled entry is a *logical* intent, translated to an MCP call at flush time —
+never a pre-baked payload. An `ack_reminder` intent flushes as one **`notion-update-page`** on the
+**cached** ⏰ page id (the worked example above, replayed verbatim: `Status` = the translated option
+string, `Last Acknowledged` = the ack's local date, `Consecutive Misses` = 0, untick `Ack` — no lookup
+query, no read-back). A `med_log` intent flushes as one **`notion-create-pages`** into its target
+`collection://…`. The generic enqueued intents (`run_log_finalize`, `reminder_status`) flush as
+`notion-update-page` by the row id they carry. Property names and option strings resolve through
+`schema.md`, exactly like a direct write.
+
+**Flush rules.** The drain is **single-consumer FIFO** (oldest first — per-target order for free) and
+runs opportunistically inside LLM turns: `outbox.py pull --json` → replay each intent via the tool above
+→ `outbox.py mark --done` (for a create, pass `--notion-page-id` so the landed row id is recorded in the
+same local transaction). Every entry carries a **`UNIQUE` idempotency key** (`ack:<row>:<date>`,
+`medlog:<intent-uuid>`, …), so a repeat enqueue is a no-op and a replayed update converges — flushing
+twice is safe. A transient failure (429/5xx/network) is `mark --retry` — exponential backoff, honoring
+`Retry-After`; a permanent one (404/400/403) or an exhausted attempt budget is `mark --dead-letter` —
+the entry stops retrying but **stays in the table and is surfaced** (`outbox.py status` lists every
+dead-letter; never silently dropped, never blocking the rest of the queue). The happy path is
+belt-and-suspenders: the turn's direct write still fires, and the drainer finds the entry
+already-satisfied.
