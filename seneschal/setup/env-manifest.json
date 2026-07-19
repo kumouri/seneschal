@@ -621,7 +621,7 @@
     },
     {
       "id": "cockpit",
-      "title": "Seneschal Cockpit OIDC auth (deferred — dev-no-auth ships today)",
+      "title": "Seneschal Cockpit OIDC auth (optional — dev-no-auth is the default)",
       "required": false,
       "enable_question": null,
       "handled_by": "cockpit",
@@ -632,7 +632,7 @@
       "depends": [],
       "notes": [
         "Owned by the cockpit chapter (handled_by: cockpit) — listed here so the doctor sees every env surface.",
-        "Dev-no-auth build: leave COCKPIT_OIDC_CLIENT_ID unset until the deferred OIDC auth stack lands; setting it flips auth_mode() to 'oidc' with no login routes to serve it.",
+        "Dev-no-auth remains the default: leave COCKPIT_OIDC_CLIENT_ID unset until the OIDC app is provisioned (cockpit/zitadel/ZITADEL_SETUP.md); setting it flips auth_mode() to 'oidc' and turns on the real login round trip.",
         "The session-cookie signing secret is deliberately NOT an env var — auto-generated to state/cockpit-session-secret."
       ],
       "vars": [
@@ -647,7 +647,7 @@
           "name": "COCKPIT_OIDC_CLIENT_ID",
           "required": false,
           "secret": false,
-          "prompt": "The cockpit's OIDC client id (PKCE public client; LEAVE UNSET until the auth stack lands)"
+          "prompt": "The cockpit's OIDC client id (PKCE public client; leave unset for dev-no-auth — provisioning: cockpit/zitadel/ZITADEL_SETUP.md)"
         },
         {
           "name": "COCKPIT_OIDC_REDIRECT",

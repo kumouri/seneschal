@@ -43,8 +43,9 @@ scalars · `(select: …)` = single-select, exact options · `(status: …)` = a
 | Page | Placeholder id | Role |
 |------|----------------|------|
 | Personal Home | `00000000-0000-0000-0000-000000000009` | Top-level hub; parent of People, Tasks, Projects, Run Log. |
-| Interstitial Journal | `00000000-0000-0000-0000-000000000010` | The working journal page — hosts the `journal` domain (date toggles + carry-over callout) and the inline Reminders DB. |
-| Reminders DB page | `00000000-0000-0000-0000-000000000011` | The page that holds the inline Reminders database (its collection is `…0007`). |
+| Interstitial Journal | `00000000-0000-0000-0000-000000000010` | The working journal page — hosts the `journal` domain (date toggles + carry-over callout). Its tracking databases live one level down, under **IJData**. |
+| IJData | `00000000-0000-0000-0000-000000000022` | Container page — the top child of the Interstitial Journal. **Parent of all the tracking databases** (incl. Reminders — the DB page `…0011` lives under it). Discover-or-create as a child of the Interstitial Journal (`…0010`). |
+| Reminders DB page | `00000000-0000-0000-0000-000000000011` | The page that holds the Reminders database (its collection is `…0007`), under IJData. |
 | Run Log DB page | `00000000-0000-0000-0000-000000000012` | The page that holds the assistant's Run Log database (its collection is `…0008`), under Personal Home. |
 | Achievements Log | `00000000-0000-0000-0000-000000000014` | Append-only page: a running chronological list under `## <date>` headers (target of `store-append`). Distinct from the Achievements Tracker database `…0013`. |
 
@@ -171,9 +172,10 @@ options may be added by passing a new string.
 
 ### reminders — `collection://00000000-0000-0000-0000-000000000007`
 
-The assistant's own reminder tracker. Inline DB on the Interstitial Journal page (`…0010`); DB page id
-`…0011`. **`Status` and `Type`/`Importance`/`Cadence`/`Time Window` are all `select`s** (not status
-properties); reminder `Status` options are **emoji-free**, while `Importance` carries emoji.
+The assistant's own reminder tracker. Lives under the **IJData** page (`…0022`, a child of the
+Interstitial Journal `…0010`); DB page id `…0011`. **`Status` and `Type`/`Importance`/`Cadence`/
+`Time Window` are all `select`s** (not status properties); reminder `Status` options are
+**emoji-free**, while `Importance` carries emoji.
 
 | Canonical field | Notion property | Type | Notes |
 |---|---|---|---|

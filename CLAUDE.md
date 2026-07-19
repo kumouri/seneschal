@@ -74,8 +74,12 @@ cockpit/           the Seneschal Cockpit — a local-first web observatory over 
                    `cockpit` uv extras group — fastapi + uvicorn, never pulled in by the daemon's
                    `uv sync --frozen`) reading seneschal/state/* tolerantly + holding the one
                    client connection to the daemon's cockpit pipe; web/ is a Vite + TS + React
-                   frontend (built dist/ served static by the backend). Dev-no-auth build — the
-                   OIDC auth stack is a deferred follow-up. test_parity.py is the CI tripwire
+                   frontend (built dist/ served static by the backend). Real OIDC auth ships
+                   (auth-code + PKCE via auth.py/oidc.py; dev-no-auth remains the default until
+                   an OIDC app is provisioned) alongside zitadel/ (the self-hosted IdP compose
+                   stack + setup walkthrough), breakglass/ (the stdlib-only emergency-recovery
+                   supervisor + its 3-rung ladder), and decoy/ (the public honeypot chat —
+                   separate process, zero tools/data). test_parity.py is the CI tripwire
                    for its hand-duplicated model_config/governor copies
 subagents/         morning-briefing, eod-wrap, email-triage, slack-triage, calendar-steward,
                    store-qa, reminders, message-archivist, journal-steward (generic core),
@@ -175,9 +179,9 @@ ancient Greek — "oh-NAY-roy" — script/file names are unchanged).
 tracked `.py`, runs the unittest suite under `seneschal/scripts/`, checks uv.lock consistency,
 validates autonomy-config.json, and runs the UUID placeholder guard. Two cockpit jobs cover the
 web observatory: `cockpit-server` (`uv sync --extra cockpit --group test`, then unittest discover
-over `cockpit/server/` — including `test_parity.py`, the tripwire for the cockpit's
-hand-duplicated model_config/governor tables) and `cockpit-web` (Node 22, `npm ci` +
-`npm run typecheck` + `npm run build` in `cockpit/web/`). `android.yml` builds the
+over `cockpit/server/`, `cockpit/decoy/`, and `cockpit/breakglass/` — including `test_parity.py`,
+the tripwire for the cockpit's hand-duplicated model_config/governor tables) and `cockpit-web`
+(Node 22, `npm ci` + `npm run typecheck` + `npm run build` in `cockpit/web/`). `android.yml` builds the
 Call Shield app on `phone/android/**` changes. The phone Worker has its own npm gates
 (`cd phone && npm run typecheck && npm test`). Reproduce the Python checks locally:
 
