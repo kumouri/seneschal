@@ -66,7 +66,9 @@ Out of the box that's a working, nameless default-Claude assistant on no store. 
 run **`/setup`** — a guided, **resumable** wizard that walks persona, data store, owner profile,
 auth + model dials, channel env files (Telegram first), MCP servers, and the cockpit, one skippable
 chapter at a time; interrupt it anywhere and `/setup` resumes where it left off (`/setup <chapter>`
-jumps). The daemon and verify chapters are **landing next** — until then
+jumps). A closing **verify** chapter runs the doctor over the whole install, and **`/doctor`**
+re-runs that health check any time — one green/yellow/red row per surface, with a fix pointer on
+everything that isn't green. The daemon chapter is **landing next** — until then
 [`SCHEDULING.md`](seneschal/scripts/SCHEDULING.md) covers starting the daemon by hand.
 
 ## What's in the box

@@ -19,7 +19,9 @@ distilled from stays private; this is the machinery with the person removed.
 ## Layout
 
 ```
-.claude/commands/  assistant.md — the /assistant slash command (opens an in-character chat)
+.claude/commands/  assistant.md (/assistant — opens an in-character chat), setup*.md (the
+                   /setup wizard entrypoints), doctor.md (/doctor — the health board +
+                   in-session MCP probes)
 persona/           who the assistant is + who it works for (see persona/README.md): tracked
                    persona.default.md / persona.template.md / identity.example.json; the real
                    persona.md / identity.json / owner-profile.md are gitignored per-install
@@ -57,8 +59,9 @@ seneschal/
                    rag_* (local semantic index), router.py, salience tooling, health/presence
                    pipelines, archive_common.py + telegram_ingest.py + discord_export_ingest.py
                    + sms_ingest.py + archive_aggregate.py (message archiver),
-                   setup_state.py + setup_env.py (the /setup wizard's deterministic
-                   substrate: resumability ledger + manifest-driven env-file writer),
+                   setup_state.py + setup_env.py + setup_doctor.py (the /setup wizard's
+                   deterministic substrate: resumability ledger + manifest-driven env-file
+                   writer + the /doctor green/yellow/red health board),
                    check_placeholders.py (CI guard), *_SETUP.md guides,
                    seneschald-control.ps1 + run-*.cmd (Windows scheduled-task wrappers)
   setup/           env-manifest.json — the machine-readable manifest of every configurable env
@@ -91,10 +94,12 @@ its `chapters/`): preflight → persona → store → owner-interview → auth-m
 (notion/calendar/slack, with the awaiting-auth-restart dance) → cockpit → daemon → verify. Every
 chapter marks the ledger (`seneschal/state/setup-state.json` via `setup_state.py`; `infer`
 respects pre-wizard work), a crashed/partial run resumes at the first unfinished chapter, and
-`/setup <chapter>` jumps anywhere. The `daemon` and `verify` chapters land in follow-up PRs (the
-sequencer marks them blocked-with-a-note until then). Standalone `/setup-persona` and
-`/setup-store` still work and update the same ledger. The framework runs on the shipped defaults
-(default-Claude persona, no store) until any of it is run.
+`/setup <chapter>` jumps anywhere. The closing `verify` chapter runs the doctor; **`/doctor`**
+re-runs that health check any time — `setup_doctor.py`'s green/yellow/red board (exit code =
+red count) plus the in-session MCP probes the script can't do. The `daemon` chapter lands in a
+follow-up PR (the sequencer marks it blocked-with-a-note until then). Standalone
+`/setup-persona` and `/setup-store` still work and update the same ledger. The framework runs
+on the shipped defaults (default-Claude persona, no store) until any of it is run.
 
 ## The daemon, briefly
 
