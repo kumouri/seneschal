@@ -216,46 +216,340 @@ def _substitute_models(text: str, models: dict, continuation: str) -> str:
     return text
 
 
-def render_update_sh(repo: Path) -> str:
-    """The POSIX merge-detector — a deliberately small mirror of
-    ``seneschald-control.ps1 -Action Update`` (ff-only pull + dep sync + graceful restart
-    request). No self-heal/alerting arms here; the Windows control script stays the
-    reference implementation and this one refuses loudly instead of guessing."""
-    repo_posix = str(repo).replace("\\", "/").rstrip("/")
-    return f"""#!/bin/sh
-# >>> RENDERED LOCAL - generated {_stamp()} by render_units.py. Gitignored; never commit.
-# The POSIX merge-detector: when origin/main advances, ff-only pull + `uv sync --frozen`,
+_UPDATE_SH_TEMPLATE = """#!/usr/bin/env bash
+# >>> RENDERED LOCAL - generated @STAMP@ by render_units.py. Gitignored; never commit.
+# The POSIX merge-detector: when origin/main advances, ff-only pull + 'uv sync --frozen',
 # then ask the RUNNING daemon to reload gracefully via the control queue (no hard kill).
-# A simplified sibling of seneschald-control.ps1 -Action Update (the reference flow):
-# any surprise (off-branch checkout, failed pull/sync) logs + holds - it never forces.
+# Full-parity sibling of seneschald-control.ps1 -Action Update (the ps1 stays the
+# reference implementation). Like the ps1 it also:
+#   * SELF-HEALS an abandoned off-branch park - reclaims the deploy branch ONLY when
+#     merge-base shows the parked branch has no unique commits AND sentinel.py
+#     --branch-claimed says no live session is on it (fail-closed: claimed / unknown /
+#     check-error all hold);
+#   * stamps state/seneschald-health.json on EVERY path (an EXIT trap turns even an
+#     unexpected crash into a blocked 'update-error' stamp - the heartbeat can never
+#     freeze at 'ok');
+#   * nudges the owner on Telegram once a block outlasts ALERT_AFTER_CYCLES cycles,
+#     re-alerting at most every REALERT_HOURS hours; last_alert is recorded only on a
+#     VERIFIED send (telegram_send exit 0), so a failed alert retries next cycle.
 set -u
-REPO="{repo_posix}"
-LOG="$REPO/seneschal/state/seneschald-update.log"
-log() {{
-  printf '[%s] %s\\n' "$(date +%Y-%m-%dT%H:%M:%S)" "$1" >> "$LOG" 2>/dev/null || true
-  printf -- '- %s\\n' "$1"
-}}
-cd "$REPO" || exit 0
-GIT="git -c core.fsmonitor=false"
-$GIT fetch origin main >/dev/null 2>&1 || {{ log "SKIP: fetch failed - holding on current code"; exit 0; }}
-branch=$($GIT rev-parse --abbrev-ref HEAD 2>/dev/null) || exit 0
-if [ "$branch" != "main" ]; then
-  log "SKIP: checkout is on '$branch', not main - left alone"
-  exit 0
+
+REPO="@REPO@"
+DEPLOY_BRANCH="main"   # THE branch merges land on - Path A: merging IS deploying
+STATE_DIR="$REPO/seneschal/state"
+SCRIPTS_DIR="$REPO/seneschal/scripts"
+LOG="$STATE_DIR/seneschald-update.log"
+HEALTH_FILE="$STATE_DIR/seneschald-health.json"
+PENDING_RESTART="$STATE_DIR/pending-restart"
+ALERT_AFTER_CYCLES=3   # ~30 min at the 10-min cadence - past a transient session checkout
+REALERT_HOURS=6        # don't nag every cycle for a block the owner already knows about
+
+# daemon.env - the token home the setup wizard's auth-models chapter established.
+# Sourced like the presence local: unattended runs (cron/launchd) don't get systemd's
+# EnvironmentFile, so the script self-serves.
+DAEMON_ENV="${XDG_CONFIG_HOME:-$HOME/.config}/seneschal/daemon.env"
+if [ -f "$DAEMON_ENV" ]; then
+  set -a
+  . "$DAEMON_ENV"
+  set +a
 fi
-local_rev=$($GIT rev-parse '@' 2>/dev/null) || exit 0
-remote_rev=$($GIT rev-parse origin/main 2>/dev/null) || exit 0
-[ "$local_rev" = "$remote_rev" ] && exit 0
-log "main advanced - pull --ff-only"
-$GIT pull --ff-only origin main >/dev/null 2>&1 || {{ log "pull --ff-only FAILED - holding (run git status)"; exit 0; }}
-if [ -f "$REPO/pyproject.toml" ] && command -v uv >/dev/null 2>&1; then
-  uv sync --frozen >/dev/null 2>&1 || {{ log "uv sync --frozen FAILED - holding the restart"; exit 0; }}
-fi
+
 PY=python3
 command -v python3 >/dev/null 2>&1 || PY=python
-"$PY" "$REPO/seneschal/scripts/request_control.py" --action restart --reason "merge to main" || true
-log "pulled + graceful restart requested"
+
+log() {
+  printf '[%s] %s\\n' "$(date +%Y-%m-%dT%H:%M:%S)" "$1" >> "$LOG" 2>/dev/null || true
+  printf -- '- %s\\n' "$1"
+}
+
+git_c() { git -c core.fsmonitor=false "$@"; }
+
+# Stamp state/seneschald-health.json - same fields and merge semantics as the ps1's
+# Set-SeneschaldHealth (status/reason/detail/branch/head/consecutive_blocked/
+# blocked_since/last_ok/last_alert/updated_at). Never fails the cycle.
+stamp_health() {
+  # $1 status  $2 reason  $3 detail  $4 branch  $5 head
+  "$PY" - "$HEALTH_FILE" "$1" "$2" "$3" "$4" "$5" <<'PYEOF' || true
+import json, sys, datetime
+path, status, reason, detail, branch, head = sys.argv[1:7]
+try:
+    with open(path, encoding="utf-8") as fh:
+        prev = json.load(fh)
+except Exception:
+    prev = {}
+now = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+h = {"status": status, "reason": reason, "detail": detail, "branch": branch,
+     "head": head, "consecutive_blocked": 0, "blocked_since": None,
+     "last_ok": prev.get("last_ok"), "last_alert": prev.get("last_alert"),
+     "updated_at": now}
+if status == "ok":
+    h["last_ok"] = now
+else:
+    was_blocked = prev.get("status") not in (None, "ok")
+    h["consecutive_blocked"] = (int(prev.get("consecutive_blocked") or 0) if was_blocked else 0) + 1
+    h["blocked_since"] = (prev.get("blocked_since") or now) if was_blocked else now
+try:
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(h, fh, indent=2)
+except Exception:
+    pass
+PYEOF
+}
+
+# Telegram nudge, rate-limited - the ps1's Send-SeneschaldAlert. $1 = the detail text
+# just stamped. last_alert is recorded ONLY on a verified send (exit 0); a failed send
+# logs and retries next cycle instead of silently rate-limiting itself away.
+send_alert() {
+  detail_text=$1
+  decision=$("$PY" - "$HEALTH_FILE" "$ALERT_AFTER_CYCLES" "$REALERT_HOURS" <<'PYEOF'
+import json, sys, datetime
+path, after_cycles, realert_hours = sys.argv[1], int(sys.argv[2]), float(sys.argv[3])
+try:
+    with open(path, encoding="utf-8") as fh:
+        h = json.load(fh)
+except Exception:
+    print("skip"); sys.exit(0)
+if h.get("status") == "ok" or int(h.get("consecutive_blocked") or 0) < after_cycles:
+    print("skip"); sys.exit(0)
+now = datetime.datetime.now()
+last_alert = h.get("last_alert")
+if last_alert:
+    try:
+        if (now - datetime.datetime.fromisoformat(last_alert)).total_seconds() < realert_hours * 3600:
+            print("skip"); sys.exit(0)
+    except Exception:
+        pass
+mins = 0
+since = h.get("blocked_since")
+if since:
+    try:
+        mins = max(0, int((now - datetime.datetime.fromisoformat(since)).total_seconds() // 60))
+    except Exception:
+        pass
+print("send %d %d" % (mins, int(h.get("consecutive_blocked") or 0)))
+PYEOF
+) || decision="skip"
+  case "$decision" in
+    send\\ *) ;;
+    *) return 0 ;;
+  esac
+  set -- $decision
+  mins=${2:-0}
+  cycles=${3:-0}
+  env_file="$SCRIPTS_DIR/telegram.env"
+  if [ ! -f "$env_file" ]; then
+    log "ALERT suppressed: no telegram.env"
+    return 0
+  fi
+  text="Heads up - I've stopped auto-reloading.
+
+$detail_text
+
+Blocked $mins min ($cycles cycles). Merges to $DEPLOY_BRANCH aren't reaching me until it's cleared - I'm still running, just on older code."
+  if "$PY" "$SCRIPTS_DIR/telegram_send.py" --text "$text" --env-file "$env_file" >/dev/null 2>&1; then
+    log "ALERTED the owner on Telegram (blocked $mins min)"
+    "$PY" - "$HEALTH_FILE" <<'PYEOF' || true
+import json, sys, datetime
+path = sys.argv[1]
+try:
+    with open(path, encoding="utf-8") as fh:
+        h = json.load(fh)
+    h["last_alert"] = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(h, fh, indent=2)
+except Exception:
+    pass
+PYEOF
+  else
+    log "alert FAILED (telegram_send non-zero) - NOT rate-limiting; retries next cycle"
+  fi
+}
+
+# Mirror of the ps1's Sync-DaemonDeps: 0 = safe to restart (synced, nothing to sync,
+# or uv absent - don't brick deploys); 1 ONLY when a real sync attempt failed.
+sync_deps() {
+  [ -f "$REPO/pyproject.toml" ] || return 0
+  if ! command -v uv >/dev/null 2>&1; then
+    log "WARN: uv not found - skipping dependency sync (install uv to enable the daemon venv)."
+    return 0
+  fi
+  if ! uv sync --frozen >/dev/null 2>&1; then
+    log "DEPS FAILED: uv sync --frozen exited non-zero - holding the restart."
+    return 1
+  fi
+  log "deps synced (uv sync --frozen)"
+  return 0
+}
+
+# The ps1's catch-all: EVERY cycle stamps health. Any exit that did not pass through
+# finish() (a set -u abort, a crashed command, ...) lands here as a blocked
+# 'update-error' heartbeat instead of freezing the stamp at its last - usually 'ok' -
+# value while merges quietly stop arriving.
+FINISHED=0
+finish() { FINISHED=1; exit 0; }
+on_exit() {
+  [ "${FINISHED:-0}" -eq 1 ] && return 0
+  detail="The update cycle hit an unexpected error before it could finish (see seneschald-update.log)."
+  stamp_health blocked update-error "$detail" "(unknown)" "(unknown)"
+  log "ERROR: update crashed before it could finish"
+  send_alert "$detail"
+}
+trap on_exit EXIT
+
+cd "$REPO" 2>/dev/null || {
+  detail="Could not cd to $REPO - the checkout is missing or unreadable."
+  stamp_health blocked update-error "$detail" "(unknown)" "(unknown)"
+  log "ERROR: cd $REPO failed"
+  send_alert "$detail"
+  finish
+}
+
+git_c fetch origin "$DEPLOY_BRANCH" >/dev/null 2>&1 || true
+# Gate on rev-parse's EXIT CODE (mirrors the ps1): an unresolvable origin/$DEPLOY_BRANCH
+# would otherwise poison every check below and mis-blame the parked branch.
+if ! remote=$(git_c rev-parse "origin/$DEPLOY_BRANCH" 2>/dev/null) || [ -z "$remote" ]; then
+  detail="Could not resolve origin/$DEPLOY_BRANCH (is the network / remote reachable?). I can't tell whether a merge landed, so I'm holding on the current code."
+  stamp_health blocked fetch-failed "$detail" "$DEPLOY_BRANCH" "(unknown)"
+  log "SKIP: origin/$DEPLOY_BRANCH did not resolve - fetch/remote problem. Holding."
+  send_alert "$detail"
+  finish
+fi
+
+if ! git_c symbolic-ref -q HEAD >/dev/null 2>&1; then
+  # Detached HEAD: if the commit is on the deploy branch's line (no divergent local
+  # work), re-attach at the SAME commit (no tree move) and continue; else hold loudly.
+  if git_c merge-base --is-ancestor HEAD "origin/$DEPLOY_BRANCH" 2>/dev/null; then
+    log "HEAD was detached (on $DEPLOY_BRANCH's line) - re-attaching to $DEPLOY_BRANCH"
+    if ! git_c checkout -B "$DEPLOY_BRANCH" >/dev/null 2>&1; then
+      detail="HEAD was detached on $DEPLOY_BRANCH's line but re-attaching to $DEPLOY_BRANCH failed (dirty tree?). Needs a hand."
+      stamp_health blocked reattach-failed "$detail" "(detached)" "$remote"
+      log "BLOCKED: re-attach to $DEPLOY_BRANCH failed from a detached HEAD."
+      send_alert "$detail"
+      finish
+    fi
+  else
+    detail="HEAD is detached with commits origin/$DEPLOY_BRANCH does not have. I will not auto-move unknown work."
+    stamp_health blocked detached-divergent "$detail" "(detached)" "$remote"
+    log "SKIP: HEAD detached with commits not on origin/$DEPLOY_BRANCH - not auto-moving. Investigate."
+    send_alert "$detail"
+    finish
+  fi
+else
+  branch=$(git_c rev-parse --abbrev-ref HEAD 2>/dev/null) || branch=""
+  if [ "$branch" != "$DEPLOY_BRANCH" ]; then
+    # SELF-HEAL - a session parked the live checkout on a feature branch. Reclaim
+    # ONLY when (a) merge-base shows the parked branch has no unique commits AND
+    # (b) the session registry says nobody is on it. Fail-CLOSED: "can't tell" =
+    # "hands off", and it is reported as its own reason (claim-check-failed), never
+    # disguised as a live session.
+    if git_c merge-base --is-ancestor HEAD "origin/$DEPLOY_BRANCH" 2>/dev/null; then
+      no_unique_work=yes
+    else
+      no_unique_work=no
+    fi
+    claim_raw=$("$PY" "$SCRIPTS_DIR/sentinel.py" --state-dir "$STATE_DIR" --branch-claimed "$branch" 2>/dev/null)
+    claim_exit=$?
+    claim_out=$(printf '%s\\n' "$claim_raw" | tail -n 1 | tr -d '\\r')
+    claim_state=unknown
+    if [ "$claim_exit" -eq 0 ] && { [ "$claim_out" = "free" ] || [ "$claim_out" = "claimed" ]; }; then
+      claim_state=$claim_out
+    fi
+    if [ "$no_unique_work" = "yes" ] && [ "$claim_state" = "free" ]; then
+      log "on '$branch' (nothing origin/$DEPLOY_BRANCH lacks; no live session claims it) - reclaiming $DEPLOY_BRANCH"
+      if ! git_c checkout "$DEPLOY_BRANCH" >/dev/null 2>&1; then
+        detail="On '$branch' and the reclaim of $DEPLOY_BRANCH failed (dirty tree?). Needs a hand."
+        stamp_health blocked checkout-failed "$detail" "$branch" "$remote"
+        log "BLOCKED: reclaim of $DEPLOY_BRANCH failed from '$branch'."
+        send_alert "$detail"
+        finish
+      fi
+    else
+      if [ "$no_unique_work" != "yes" ]; then
+        why="it has commits origin/$DEPLOY_BRANCH lacks"
+      elif [ "$claim_state" = "claimed" ]; then
+        why="a live session is working on it"
+      else
+        why="I couldn't check the session registry - that check is itself broken"
+      fi
+      reason=off-deploy-branch
+      if [ "$claim_state" = "unknown" ] && [ "$no_unique_work" = "yes" ]; then
+        reason=claim-check-failed
+      fi
+      detail="The live checkout is on '$branch', not $DEPLOY_BRANCH, and I left it alone because $why."
+      stamp_health blocked "$reason" "$detail" "$branch" "$remote"
+      log "SKIP: on '$branch', not $DEPLOY_BRANCH ($why) - left alone."
+      send_alert "$detail"
+      finish
+    fi
+  fi
+fi
+
+local_rev=$(git_c rev-parse '@' 2>/dev/null) || local_rev=""
+if [ "$local_rev" = "$remote" ]; then
+  # Up to date - but a prior cycle may have pulled and then failed the dep sync.
+  # Retry the sync until it succeeds, then fire the restart that pull deferred.
+  if [ -f "$PENDING_RESTART" ]; then
+    if sync_deps; then
+      rm -f "$PENDING_RESTART"
+      "$PY" "$SCRIPTS_DIR/request_control.py" --action restart --reason "deferred: deps synced" || true
+      stamp_health ok "" "deps recovered; deferred restart requested" "$DEPLOY_BRANCH" "$local_rev"
+      log "deps recovered - requested the deferred graceful restart"
+    else
+      detail="Code is pulled but 'uv sync --frozen' keeps failing, so I am holding the restart rather than reload onto a half-updated env."
+      stamp_health blocked dep-sync-failed "$detail" "$DEPLOY_BRANCH" "$local_rev"
+      send_alert "$detail"
+    fi
+    finish
+  fi
+  stamp_health ok "" "up to date" "$DEPLOY_BRANCH" "$local_rev"
+  log "up to date ($(printf '%.8s' "$local_rev"))"
+  finish
+fi
+
+log "$DEPLOY_BRANCH advanced ($(printf '%.8s' "$local_rev") -> $(printf '%.8s' "$remote")) - pull --ff-only"
+if ! git_c pull --ff-only origin "$DEPLOY_BRANCH" >/dev/null 2>&1; then
+  detail="$DEPLOY_BRANCH advanced but 'pull --ff-only' failed - usually a tracked file left dirty at a path the merge touches. Run 'git status' in the live checkout."
+  stamp_health blocked pull-failed "$detail" "$DEPLOY_BRANCH" "$remote"
+  log "pull --ff-only FAILED; leaving the daemon on its current code."
+  send_alert "$detail"
+  finish
+fi
+
+# Deps BEFORE the reload: never restart the daemon onto code whose lockfile didn't
+# sync. (The running daemon keeps its old in-memory code, matching the old env.)
+if ! sync_deps; then
+  : > "$PENDING_RESTART"
+  detail="Pulled the new code, but 'uv sync --frozen' failed - holding the restart so I never reload onto a half-updated env. Retrying every cycle."
+  stamp_health blocked dep-sync-failed "$detail" "$DEPLOY_BRANCH" "$remote"
+  log "restart deferred until the dep sync succeeds (retries every Update cycle)"
+  send_alert "$detail"
+  finish
+fi
+rm -f "$PENDING_RESTART"
+
+# Ask the running daemon to reload itself once its warm session is idle (no hard kill).
+"$PY" "$SCRIPTS_DIR/request_control.py" --action restart --reason "merge to $DEPLOY_BRANCH" || true
+stamp_health ok "" "pulled $(printf '%.8s' "$remote"); graceful restart requested" "$DEPLOY_BRANCH" "$remote"
+log "requested graceful restart (applies once the warm session is idle)"
+finish
 """
+
+
+def render_update_sh(repo: Path) -> str:
+    """The POSIX merge-detector — full parity with ``seneschald-control.ps1 -Action
+    Update`` (the ps1 stays the reference implementation): ff-only pull + dep sync +
+    graceful restart request, PLUS the ps1's self-heal (reclaim an abandoned off-branch
+    park only when ``merge-base --is-ancestor`` shows no unique commits AND sentinel's
+    ``--branch-claimed`` says free — fail-closed, with the ps1's ``off-deploy-branch``
+    vs ``claim-check-failed`` reason split), per-cycle health stamping to
+    ``state/seneschald-health.json`` (same fields/merge semantics as
+    ``Set-SeneschaldHealth``), and the rate-limited Telegram alert once a block
+    outlasts 3 cycles (re-alert at most every 6 h; ``last_alert`` recorded only on a
+    verified send). An EXIT trap mirrors the ps1's catch-all: an unexpected crash
+    stamps a blocked ``update-error`` heartbeat rather than freezing at 'ok'.
+    Bash-targeted (the heredoc helpers use python, never jq/pwsh)."""
+    repo_posix = str(repo).replace("\\", "/").rstrip("/")
+    return _UPDATE_SH_TEMPLATE.replace("@STAMP@", _stamp()).replace("@REPO@", repo_posix)
 
 
 # --------------------------------------------------------------------------- windows
