@@ -82,6 +82,7 @@ except ImportError:  # pragma: no cover — behave exactly like the pre-tz_commo
 from sentinel import (  # shared helpers — sentinel is now a helper library
     DEFAULT_STATE_DIR,
     DEFAULT_TELEGRAM_ENV,
+    NO_WINDOW,  # Windows: console children spawn without a visible console (test_windowless_spawns)
     SCRIPT_DIR,
     check_reminders,
     load_json,
@@ -606,6 +607,7 @@ class WarmSession:
             # Force UTF-8 both ways — claude's stream-json output is UTF-8; without this the daemon
             # decodes it with the Windows ANSI codepage (cp1252) and mangles —, emoji, etc. (mojibake).
             text=True, encoding="utf-8", errors="replace", bufsize=1,
+            creationflags=NO_WINDOW,  # a console child of the console-less daemon must not pop a window
         )
 
     def send(self, text: str) -> str | None:
@@ -800,9 +802,10 @@ def maybe_peek(state_dir: str, args, log, children: list | None = None,
                 cmd += ["--mcp-config", args.notion_mcp]
             if args.watch_model:
                 cmd += ["--model", args.watch_model]
-            proc = subprocess.Popen(cmd, cwd=REPO_ROOT, env=child_env())
+            proc = subprocess.Popen(cmd, cwd=REPO_ROOT, env=child_env(), creationflags=NO_WINDOW)
         else:
-            proc = subprocess.Popen(args.watch_cmd, shell=True, cwd=REPO_ROOT, env=child_env())
+            proc = subprocess.Popen(args.watch_cmd, shell=True, cwd=REPO_ROOT, env=child_env(),
+                                    creationflags=NO_WINDOW)
         if children is not None:
             children.append(proc)
         log("• comms peek launched")
@@ -890,7 +893,7 @@ def maybe_run_slots(state_dir: str, args, log, children: list | None = None,
         if model:
             cmd += ["--model", model]
         try:
-            proc = subprocess.Popen(cmd, cwd=REPO_ROOT, env=child_env())
+            proc = subprocess.Popen(cmd, cwd=REPO_ROOT, env=child_env(), creationflags=NO_WINDOW)
             if children is not None:
                 children.append(proc)
             if slot_children is not None:

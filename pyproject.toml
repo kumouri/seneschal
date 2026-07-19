@@ -13,6 +13,11 @@
 # .venv\Scripts\python.exe when present). The daemon must keep WORKING without the venv — code that
 # imports a dependency has to degrade gracefully (the gateway falls back to REST polling; tz math
 # falls back to the machine-local clock).
+#
+# The cockpit web backend is deliberately OUTSIDE that two-dependency rule: fastapi + uvicorn live in
+# the optional `cockpit` extra below, which `uv sync --frozen` (the live daemon's default install)
+# never pulls in — the prod venv stays exactly websockets + tzdata. Install the extra only when
+# working on the cockpit server (`uv sync --extra cockpit`).
 [project]
 name = "seneschal-daemon"
 version = "0.1.0"
@@ -23,6 +28,23 @@ dependencies = [
     "tzdata>=2024.1",
 ]
 
+# The cockpit is its own dependency world — its own optional-dependency group so `uv sync --frozen`
+# (the live daemon's default install) never pulls it in. Install with `uv sync --extra cockpit` when
+# working on the cockpit server.
+[project.optional-dependencies]
+cockpit = [
+    "fastapi>=0.115,<1",
+    "uvicorn>=0.32,<1",
+]
+
 [tool.uv]
 # Not an installable package — just a locked dependency environment for the scripts.
 package = false
+
+[dependency-groups]
+# Dev-only (never installed by --frozen prod syncs): the HTTP transport FastAPI's TestClient needs to
+# exercise the cockpit server's tests. Not part of the `cockpit` extra — that stays exactly what
+# ships (fastapi + uvicorn).
+test = [
+    "httpx",
+]

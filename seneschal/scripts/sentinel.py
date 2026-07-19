@@ -40,6 +40,12 @@ DEFAULT_STATE_DIR = os.path.normpath(os.path.join(SCRIPT_DIR, "..", "state"))
 DEFAULT_TELEGRAM_ENV = os.path.join(SCRIPT_DIR, "telegram.env")
 EXIT_WORK = 10
 
+# Windows: spawn console children (the sibling helper CLIs, `claude`) with no console window of their
+# own — a console-subsystem child of a console-less parent (the detached presence daemon imports these
+# helpers) otherwise pops a fresh visible console on every send/poll. 0 off Windows (a no-op flag).
+# Guarded by test_windowless_spawns.py: every subprocess spawn in the daemon tree must pass it.
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 # Catch-up stagger. When a defer-release (the owner wakes / gets home / stops driving) or a plain backlog lets
 # several nudges come due in one pass, firing them all at once is the "wall of N nudges at 2:12" we
 # retired (reminders-stagger-not-batch — bunching overwhelms an Autistic+ADHD brain). So a NON-piercing
@@ -197,6 +203,7 @@ def send_telegram(text: str, telegram_env: str) -> dict:
             [sys.executable, os.path.join(SCRIPT_DIR, "telegram_send.py"),
              "--text", text, "--env-file", telegram_env],
             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
+            creationflags=NO_WINDOW,
         )
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": "telegram_send.py timed out"}
@@ -216,7 +223,8 @@ def poll_telegram(telegram_env: str, state_dir: str, commit: bool = True, timeou
     if commit:
         cmd.append("--commit")
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 30)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 30,
+                              creationflags=NO_WINDOW)
         return json.loads(proc.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):
         return {"ok": False, "error": proc.stderr.strip() or "telegram_poll.py produced no JSON"}
@@ -238,7 +246,8 @@ def send_call(text: str, call_env: str, escalate: bool = False,
         if max_attempts is not None:
             cmd += ["--max-attempts", str(max_attempts)]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                              timeout=60, creationflags=NO_WINDOW)
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": "push_call.py timed out"}
     try:
@@ -255,6 +264,7 @@ def send_discord(text: str, discord_env: str) -> dict:
             [sys.executable, os.path.join(SCRIPT_DIR, "discord_send.py"),
              "--text", text, "--env-file", discord_env],
             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
+            creationflags=NO_WINDOW,
         )
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": "discord_send.py timed out"}
@@ -273,7 +283,8 @@ def poll_discord(discord_env: str, state_dir: str, commit: bool = True) -> dict:
     if commit:
         cmd.append("--commit")
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=45,
+                              creationflags=NO_WINDOW)
         return json.loads(proc.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):
         return {"ok": False, "error": proc.stderr.strip() or "discord_poll.py produced no JSON"}
@@ -463,7 +474,8 @@ def main() -> int:
     launched = None
     if brain_work and args.launch_cmd:
         try:
-            rc = subprocess.run(args.launch_cmd, shell=True, cwd=os.path.join(SCRIPT_DIR, "..", ".."))
+            rc = subprocess.run(args.launch_cmd, shell=True, cwd=os.path.join(SCRIPT_DIR, "..", ".."),
+                                creationflags=NO_WINDOW)
             launched = {"ran": True, "returncode": rc.returncode}
         except Exception as e:  # noqa: BLE001
             launched = {"ran": False, "error": str(e)}
