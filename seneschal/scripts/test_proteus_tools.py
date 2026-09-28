@@ -13,6 +13,7 @@ import pathlib
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -957,7 +958,10 @@ class TitleAvoidIsADealbreaker(unittest.TestCase):
         # actually carries "product manager".
         profile = dict(PROFILE, title_keywords_avoid=["product manager"])
         job = {"title": "Staff Product Manager, AI Platform", "company": "x", "location": "Remote - US",
-               "remote": True, "posted_at": "2026-07-16", "comp_min": 200000, "comp_max": 260000,
+               # posted "yesterday", not a fixed date: recency decays with wall-clock age, and a
+               # hard-coded date aged this job out of the >60 baseline (a time bomb, not a bug)
+               "remote": True, "posted_at": time.strftime("%Y-%m-%d", time.localtime(time.time() - 86400)),
+               "comp_min": 200000, "comp_max": 260000,
                "description": "java spring llm ai agent " * 40}
         self.assertGreater(score_jobs.score_job(job, dict(profile, title_keywords_avoid=[]))["match_percent"], 60.0)
         scored = score_jobs.score_job(job, profile)   # ...same job, now with the avoid word live
