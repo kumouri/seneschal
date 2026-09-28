@@ -113,6 +113,13 @@ configured store is the durable system of record.
   python -m unittest discover -s seneschal/scripts -p "test_*.py"
   ```
 
+- **Testing `/setup` as a first-time user.** A walk on your own machine inherits *your*
+  global Claude context — `~/.claude/CLAUDE.md`, memory, connectors — so the wizard can
+  "know" things a stranger's run never would (your name, your calendar connector). For a
+  true fresh-user run, use a clean OS user account or a VM, or point Claude Code at an empty
+  config dir for that session (`CLAUDE_CONFIG_DIR=<empty folder> claude`). Run it from a
+  **main checkout**, not a Claude Code worktree — preflight will stop you otherwise.
+
 Operating notes for working *in* the repo are in [`CLAUDE.md`](CLAUDE.md).
 
 ## 🌿 Git Flow

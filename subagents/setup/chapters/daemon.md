@@ -8,7 +8,19 @@ and the wizard never elevates itself** — on Windows the single admin step is a
 script the owner reads, approves, and launches in one `-Verb RunAs` shot; on Linux the one
 `sudo` is `loginctl enable-linger`; on macOS there is none.
 
-On entry: `mark daemon in-progress`, and check the ledger's auth-models summary — if the
+On entry: `mark daemon in-progress`, then the **worktree guard** — registrations pin this
+checkout's absolute paths, so they must never point at a disposable git worktree the owner
+didn't choose:
+
+```
+python seneschal/scripts/setup_checkout.py require
+```
+
+Exit 3 = an unaccepted worktree: say its stderr message verbatim and stop — `mark daemon
+blocked --summary "running in a git worktree; re-run from the main checkout"` — unless the
+owner now types **use this worktree** (then `setup_checkout.py accept` and continue).
+`render_units.py --apply` enforces the same rule on its own, so this cannot be skipped by
+accident. Then check the ledger's auth-models summary — if the
 subscription token is absent (`token absent`), say plainly that the daemon will start but
 its **warm session can't spawn unattended** (Telegram goes quiet); offer a jump to
 `/setup auth-models` or continue eyes-open.

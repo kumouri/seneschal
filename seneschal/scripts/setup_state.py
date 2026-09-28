@@ -27,7 +27,9 @@ Schema (version 1)::
       },
       "features": {},                       # wizard-owned toggles   (W2 writes these)
       "deps": {},                           # wizard-owned dep facts (W2 writes these)
-      "models": {}                          # wizard-owned model facts (W2 writes these)
+      "models": {},                         # wizard-owned model facts (W2 writes these)
+      "checkout": {}                        # preflight's worktree verdict + the owner's
+                                            # explicit acceptance (setup_checkout.py writes it)
     }
 
 Statuses: ``pending`` | ``in-progress`` | ``done`` | ``declined`` | ``blocked`` |
@@ -121,6 +123,7 @@ def fresh() -> dict:
         "features": {},
         "deps": {},
         "models": {},
+        "checkout": {},
     }
 
 
@@ -278,7 +281,10 @@ def board_lines(state: dict) -> list[str]:
     for chapter, ch in chapters.items():
         status = ch.get("status", "pending")
         glyph = GLYPHS.get(status, "[?]")
-        rows.append((chapter, f"{glyph} {status}", ch.get("summary", "")))
+        note = ch.get("summary", "")
+        if status == "in-progress" and ch.get("step"):  # show where a resume will land
+            note = f"at: {ch['step']}" + (f" — {note}" if note else "")
+        rows.append((chapter, f"{glyph} {status}", note))
     w1 = max(len(r[0]) for r in rows)
     w2 = max(len(r[1]) for r in rows)
     return [f"{c:<{w1}}  {s:<{w2}}  {m}".rstrip() for c, s, m in rows]

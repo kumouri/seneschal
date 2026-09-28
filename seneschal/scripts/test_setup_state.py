@@ -305,6 +305,26 @@ class Cli(unittest.TestCase):
         self.assertIn("env:foo", out)
         self.assertIn("[~] in-progress", out)
 
+    def test_owner_interview_resume_lands_on_recorded_section(self):
+        # the chapter re-marks its cursor as each section starts; a crash after §5 began
+        # must resume at §5, not question 1 (owner-interview.md "Resume cursor")
+        for step in ("section 1: name", "section 4: work", "section 5: projects"):
+            rc, _ = self.run_cli("mark", "owner-interview", "in-progress", "--step", step)
+            self.assertEqual(rc, 0)
+        # a fresh process (the resumed session) reads it back — infer never touches it
+        rc, _ = self.run_cli("infer")
+        self.assertEqual(rc, 0)
+        rc, out = self.run_cli("get", "owner-interview")
+        record = json.loads(out)
+        self.assertEqual(record["status"], "in-progress")
+        self.assertEqual(record["step"], "section 5: projects")
+        rc, out = self.run_cli("board")
+        self.assertIn("at: section 5: projects", out)
+        # finishing clears the cursor
+        self.run_cli("mark", "owner-interview", "done", "--summary", "profile written")
+        rc, out = self.run_cli("get", "owner-interview")
+        self.assertNotIn("step", json.loads(out))
+
     def test_get_unknown_chapter_reports_pending(self):
         rc, out = self.run_cli("get", "env:nope")
         self.assertEqual(rc, 0)

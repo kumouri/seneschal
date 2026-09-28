@@ -393,7 +393,7 @@
       "ollama_models": ["nomic-embed-text"],
       "notes": [
         "All vars have safe defaults baked into rag_common.py — rag.env is optional; write it only to override.",
-        "Verify succeeds (exit 0) only once the index has content — run the post steps first; an empty index prints [] and exits non-zero by design (the fallback signal)."
+        "Verify succeeds (exit 0) only once the index has content — run the post steps first; an empty index prints [] and exits non-zero by design (the fallback signal). On day one that's expected, not a failure: verify.pending_data matches it (exit 3 + 'rag index is empty' on stderr) and the chapter closes done, not blocked. An unreachable embedder also exits 3 but with a different stderr line — that one is a real failure."
       ],
       "vars": [
         {
@@ -434,7 +434,12 @@
       ],
       "verify": {
         "cmd": "python seneschal/scripts/rag_query.py \"setup smoke test\" --k 1 --no-record",
-        "expect": "["
+        "expect": "[",
+        "pending_data": {
+          "exit": 3,
+          "stderr": "rag index is empty",
+          "summary": "configured; index builds after first runs"
+        }
       }
     },
     {

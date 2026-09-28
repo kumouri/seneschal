@@ -206,7 +206,9 @@ class HealthDbTests(unittest.TestCase):
         today = health.local_today()
         conn = self._db()
         _insert_workout(conn, "w1", today.isoformat(), 30.0, energy_kcal=300.0)
-        _insert_workout(conn, "w2", (today - timedelta(days=1)).isoformat(), 45.0, energy_kcal=400.0)
+        # "yesterday" is last ISO week on a Monday — stay inside this week (same day on Mondays)
+        earlier_this_week = today - timedelta(days=1 if today.weekday() > 0 else 0)
+        _insert_workout(conn, "w2", earlier_this_week.isoformat(), 45.0, energy_kcal=400.0)
         conn.commit()
         conn.close()
 
