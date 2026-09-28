@@ -99,8 +99,16 @@ which probe is the real reachability check).
   `--hash-artifacts` for env entries on purpose: hand-editing an env file later is a
   documented, supported path — the merge contract — and shouldn't flag the chapter stale;
   the verify command and the doctor are the ground truth for env health.)
+- **Configured, pending data** → when the entry declares `verify.pending_data` and the
+  verify's exit code equals its `exit` **and** its stderr contains its `stderr` text, the
+  configuration is fine and there's simply nothing to show yet (rag: an empty index on day
+  one). That's `mark env:<id> done --artifacts <path> --summary "<pending_data.summary>"`,
+  and say in one line when it'll fill in. A different failure on the same exit code (rag:
+  embedder unreachable) is still a real failure — the stderr match is the discriminator.
 - Failed → show the (secret-safe) error, offer: fix a var and retry / consult the entry's
   `docs` / hold it. Held → `mark env:<id> blocked --summary "<what failed, no secrets>"`.
+  **`blocked` is reserved for a verify that actually failed** — it is not a resume point, so
+  an expected-empty state marked `blocked` reads as a failure the owner can't act on.
 
 ## Close (after the last entry)
 
