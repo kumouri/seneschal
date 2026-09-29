@@ -135,9 +135,20 @@ keep it out of wide parallel bursts (Throughput #1).
      `store-query` whenever an id or a view will do.
    - **Ack by cached page id — skip the query** (below).
 
-**Reuse the baked-in references first.** `schema.md` (ids + schema) and the Dream context digest answer
-most orientation with **zero** Notion calls. Only re-read to confirm a write when it actually matters
-(an ack you're about to claim landed) — don't read-back reflexively.
+**Reuse the baked-in references first.** `schema.md` (ids + schema) answers most orientation with
+**zero** Notion calls. Only re-read to confirm a write when it actually matters (an ack you're about to
+claim landed) — don't read-back reflexively.
+
+**The Brief reads Dream's pre-stage, not a fresh fan-out.** The morning Brief used to fire a full 4-read
+batch (Tasks due/overdue, Active/Carrying-Over Flags, In-Progress Projects, + carry-over) every morning.
+Now Dream (nightly, step 1b) snapshots the three DB reads (Tasks due/overdue **today + tomorrow**, Flags,
+Projects) into the timestamped `../../state/brief-prestage.json` (`scripts/brief_prestage.py` — one
+writer, one reader); the Brief reads that store first (`brief_prestage.py read`) and issues only **delta**
+live-queries (Tasks completed/created since the snapshot stamp; Flags/Projects changed since). The
+snapshot predates the overnight hours, so the light delta check is still required — it is a warm base,
+not the last word; if it reads stale, absent, or corrupt (exit 3), the Brief falls back to the full
+batch. (This replaces the retired `state/context-digest.md` "Brief pre-stage" block — the digest's jobs
+were split into single-purpose stores with one writer each.)
 
 ### Reminders id-cache — ack by cached id, skip the query
 

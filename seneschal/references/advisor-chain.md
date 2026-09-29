@@ -17,7 +17,7 @@ runs earliest inbound, latest outbound). The built-ins tell you what the pattern
 
 | Spring AI advisor | What it does | The assistant's existing analog |
 |-------------------|--------------|-------------------------|
-| `MessageChatMemoryAdvisor` | inject conversation memory | context-digest → carry-over → run-log tail (`memory.md`) |
+| `MessageChatMemoryAdvisor` | inject conversation memory | carry-over (incl. the open-loops projection) → run-log tail (`memory.md`) |
 | `QuestionAnswerAdvisor` / `RetrievalAugmentationAdvisor` | RAG: retrieve + augment | the **Retrieval / Context** advisor — modular RAG over baked refs + Notion/calendar (see below; a local semantic index is phase B) |
 | `SafeGuardAdvisor` | block sensitive content | the **act-low / ask-high** approval gate (`autonomy-policy.md`) |
 | `SimpleLoggerAdvisor` | log the exchange | the **Run Log** "leave a trace" (`memory.md`) |
@@ -37,7 +37,7 @@ the work (outbound), unwound in reverse order.
 |-------|---------|-----------------|-------------------|
 | 0 | **Trace** (`SimpleLoggerAdvisor`) | open a Run Log row early (`Status = Partial`) once past critical path | finalize counts + `Status` + carry-over; mirror to `state/run-log.md`; **emit a metrics line** (Observability, below) |
 | 5 | **Prioritization / ranking** *(out-only)* | — | shape the assembled deliverable before Trace logs it: **pull → rank, show all; push → adaptive vital-few** (see below) |
-| 10 | **Orientation / Memory** (`MessageChatMemoryAdvisor`) | read `context-digest.md` → `carry-over.md` → run-log tail; resolve "today" in the owner's configured timezone | persist updated carry-over / digest deltas |
+| 10 | **Orientation / Memory** (`MessageChatMemoryAdvisor`) | read `carry-over.md` (incl. the open-loops register's projection, `scripts/loops.py`) → run-log tail; resolve "today" in the owner's configured timezone (`state/context-digest.md` is retired — `memory.md`) | persist updated carry-over / open-loops deltas |
 | 15 | **Oikonomos / budget governor** | compute the turn's budget envelope from `governor-config.json` + ledger rollups (see below) | meter actuals into `governor-ledger.jsonl` (+ a metrics line); fire threshold alerts; enforce turn checkpoints |
 | 20 | **Retrieval / Context** (`RetrievalAugmentationAdvisor`) | modular RAG: **query-transform → retrieve → rerank + compress → augment** — baked-in refs first, cap concurrent `notion-*` reads; *fewer, better* reads (see below) | (usually none) |
 | 30 | **Dispatch / Delegate** | pick the mode; load the owning subagent `SKILL.md` (delegate, don't duplicate) | — |
@@ -223,7 +223,7 @@ relevant." The `in:` hook becomes a four-stage pipeline:
    not one guess. *"Catch me up on the website project"* → targeted queries against Projects, open
    Tasks, and Active Flags — instead of a single fuzzy search that misses.
 2. **Route + retrieve** — pick the right source per query: **baked-in refs first** (`databases.md`,
-   `state/context-digest.md`), then **structured** Notion queries (Tasks/Projects/Goals/Flags/People via
+   `carry-over.md`), then **structured** Notion queries (Tasks/Projects/Goals/Flags/People via
    `notion-query-data-sources`) for precise records, `notion-search` for fuzzy/prose, calendar via its
    MCP. Honor the rate-limit rule — **cap concurrent `notion-*` reads**, prefer one broad query over many
    narrow ones (`notion-rate-limits.md`).
@@ -359,7 +359,10 @@ would harden only the *mechanical* advisors the daemon can deterministically enf
 memory load/persist, and a **Gate assertion any outbound script calls before it fires** (`proton_send.py`,
 Slack send, `respond_to_event`) — reusing existing `pending-approvals.json` / `carry-over.md`. The
 *semantic* advisors (retrieval, dispatch, ask-high judgment) stay in the reasoning loop; only the rails
-become code. Do this after A proves the shape.
+become code. Do this after A proves the shape. **The outbound-send piece of the Gate assertion has
+since shipped on its own** as `scripts/send_gate.py` (+ `send_gate_hook.py` for MCP send tools) —
+the outbound scripts refuse a non-owner send without an `approved` row in `pending-approvals.json`
+(`autonomy-policy.md` → *"Where the gate actually lives"*); `advisors.py` itself remains unbuilt.
 
 ## Phased plan
 
