@@ -26,25 +26,21 @@ persona/           who the assistant is + who it works for (see persona/README.m
                    persona.default.md / persona.template.md / identity.example.json; the real
                    persona.md / identity.json / owner-profile.md are gitignored per-install
 seneschal/
-  SKILL.md         the orchestrator — modes (Chat/Brief/Wrap/Triage/Ask/Watch/Dream/Journal/
-                   Reminders/Forge/Archive), execution rules, the Advisor Chain, reference index
+  SKILL.md         the orchestrator — a thin mode router (Chat/Brief/Wrap/Triage/Ask/Reminders/
+                   Watch/Dream/Forge → modes/; Journal/Archive → their subagents), execution rules,
+                   the Advisor Chain, reference index
+  modes/           one self-contained body per dispatchable mode, read imperatively on dispatch —
+                   so an edit here edits a live run (design: docs/grounding-restructure-spec.md)
   store/           the pluggable system of record (see store/README.md): config.json picks the
                    active backend; each store/<backend>/ pair is schema.md (domain map) + mapping.md
                    (the six store verbs → that backend's tools). Ships notion/ (MCP; the reference
                    backend), obsidian/ + markdown/ (filesystem). Skills speak backend-neutral verbs
-  references/      databases (placeholder-id schema registry, Notion backend), calendar/comms mapping,
-                   briefing, reminders-policy, autonomy-policy(+config), memory protocol, advisor-chain,
-                   slack-ssot (template: the pinned fact sheet Slack drafts assert from),
-                   salience, archons, notion-rate-limits (stub → store/notion/mapping.md),
-                   proposed-learnings (Dream's PR target)
-  docs/            asyncio-daemon-design.md + asyncio-daemon-plan.md (the reactive-core design),
-                   cockpit-spec.md (the Seneschal Cockpit design spec — pipe, model dials/Fable
-                   delegation, Oikonomos, health panels; the auth stack documented as deferred),
-                   notion-write-behind-outbox-spec.md (durable act-low Notion writes; Notion
-                   backend only), reminder-exact-time-scheduling-spec.md (the slots→exact-times
-                   rework), telegram-inbound-spec.md (attachments/replies/reactions),
-                   slack-draft-and-hold-spec.md (Slack reply drafting: SSOT + held approvals)
-                   + spec-prompts/ (the historical planning prompts behind specs)
+  references/      the policies and maps every mode reads (databases, calendar/comms mapping,
+                   briefing, reminders-policy, autonomy-policy(+config), memory, advisor-chain,
+                   slack-ssot, salience, archons, proposed-learnings) — router:
+                   seneschal/references/CLAUDE.md
+  docs/            the design record — every spec + its status, grouped — router:
+                   seneschal/docs/CLAUDE.md (spec-prompts/ holds the planning prompts behind specs)
   scripts/         presence.py (resident asyncio daemon), sentinel.py (helper/one-shot),
                    identity_common.py (persona/identity.json reader — never raises, defaults
                    when absent; presence.py renders its grounding/slot prompts from it),
@@ -81,7 +77,7 @@ cockpit/           the Seneschal Cockpit — a local-first web observatory over 
                    stack + setup walkthrough), breakglass/ (the stdlib-only emergency-recovery
                    supervisor + its 3-rung ladder), and decoy/ (the public honeypot chat —
                    separate process, zero tools/data). test_parity.py is the CI tripwire
-                   for its hand-duplicated model_config/governor copies
+                   for its hand-duplicated model_config/governor copies. Router: cockpit/CLAUDE.md
 subagents/         morning-briefing, eod-wrap, email-triage, slack-triage, calendar-steward,
                    store-qa, reminders, message-archivist, journal-steward (generic core),
                    archon-forge, persona-wizard, store-setup, setup (the unified /setup
@@ -92,7 +88,7 @@ phone/             the voice call-screener (Cloudflare Workers + Twilio; deploys
                    (com.kumouri.seneschal, committed Gradle project) feeding presence/health
 archons/           Archon staff data (Forge mode) — the shipped `proteus/` job-application
                    example (profile.example.json + stdlib tools); real needs/stables/profiles
-                   are gitignored on installs
+                   are gitignored on installs. Router: archons/CLAUDE.md
 ```
 
 First-run setup is `/setup` — the unified, **resumable** wizard (`subagents/setup/SKILL.md` +
