@@ -153,6 +153,30 @@ def append_audit(state_dir, action: str, detail: dict) -> None:
         pass
 
 
+def record_assertion(state_dir, text: str) -> bool:
+    """Append this rung notification to the assistant's assertions log (the "mouth" — every outbound
+    message the assistant asserts, recorded in one place). This is a **bypass mouth**: it exists to
+    speak when the daemon is dead, so it keeps sending directly and only appends here best-effort. A
+    failed append costs the append, never the alert.
+
+    `seneschal/scripts/mouth.py` is imported lazily and by path rather than at module scope,
+    deliberately: this process is stdlib-only precisely so that a broken checkout, a broken venv or a
+    broken daemon cannot take the rescuer down with it. mouth.py is itself stdlib, but the import is
+    still guarded — the alerting path must not acquire a dependency on anything it might have to report
+    as broken, and an install without mouth.py simply skips the append. Duplicating the writer here
+    instead would let the schema drift between the two, which is worse."""
+    try:
+        scripts = Path(__file__).resolve().parent.parent.parent / "seneschal" / "scripts"
+        if str(scripts) not in sys.path:
+            sys.path.append(str(scripts))
+        import mouth  # noqa: PLC0415 — lazy on purpose, see the docstring
+
+        return mouth.record_assertion(str(state_dir), surface="telegram", kind="alert",
+                                      speaker="breakglass", text=text)
+    except Exception:  # noqa: BLE001 — see the docstring
+        return False
+
+
 def telegram_notify(telegram_env: Optional[Path], text: str) -> bool:
     """Best-effort Telegram push via `telegram_send.py` (subprocess — this process never touches
     Telegram credentials directly). `False` (never raises) on any failure; the audit line is the
@@ -231,7 +255,10 @@ class Handler(BaseHTTPRequestHandler):
         return data if isinstance(data, dict) else None
 
     def _telegram(self, text: str) -> bool:
-        return telegram_notify(self.telegram_env, text)
+        landed = telegram_notify(self.telegram_env, text)
+        if landed:
+            record_assertion(self.cfg.state_dir, text)
+        return landed
 
     def do_GET(self):  # noqa: N802
         if self.path.rstrip("/") in ("", "/health"):

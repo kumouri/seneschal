@@ -57,6 +57,7 @@ try:
     from fastapi.testclient import TestClient
 
     from cockpit.breakglass import assertion as bg_assertion
+    from cockpit.server import model_config as model_config_module
     from cockpit.server import oidc as oidc_module
     from cockpit.server._fake_oidc_server import FakeOIDCServer
     from cockpit.server.app import app
@@ -314,8 +315,10 @@ class CockpitAppTests(unittest.TestCase):
         self._allow()
         path = self.state_dir / "metrics.jsonl"
         with open(path, "w", encoding="utf-8") as fh:
-            fh.write(json.dumps({"ts": "2026-07-06T13:31:00Z", "model": "opus"}) + "\n")
-            fh.write(json.dumps({"ts": "2026-07-06T18:30:00Z", "model": "haiku"}) + "\n")
+            fh.write(json.dumps(
+                {"ts": "2026-07-06T13:31:00Z", "model": "opus", "writer": "daemon"}) + "\n")
+            fh.write(json.dumps(
+                {"ts": "2026-07-06T18:30:00Z", "model": "haiku", "writer": "daemon"}) + "\n")
             fh.write("garbage\n")
         resp = self.client.get("/api/usage")
         body = resp.json()
@@ -329,7 +332,9 @@ class CockpitAppTests(unittest.TestCase):
         self._allow()
         path = self.state_dir / "metrics.jsonl"
         with open(path, "w", encoding="utf-8") as fh:
-            fh.write(json.dumps({"ts": "2026-07-06T13:31:00Z", "model": "opus", "tokens": 500}) + "\n")
+            fh.write(json.dumps(
+                {"ts": "2026-07-06T13:31:00Z", "model": "opus", "tokens": 500,
+                 "writer": "daemon"}) + "\n")
         resp = self.client.get("/api/usage")
         body = resp.json()
         self.assertTrue(body["tokens_available"])
@@ -342,12 +347,107 @@ class CockpitAppTests(unittest.TestCase):
         self.assertEqual(body["totals"], {"turns": 0, "tokens": 0})
         self.assertEqual(body["days"], [])
 
+    def test_usage_excludes_non_daemon_rows(self):
+        """metrics.jsonl can have two writers (state/README.md) — the Observability advisor's
+        prompt-side rows carry no `writer: "daemon"` and must not inflate the turn count the Usage panel
+        displays."""
+        self._allow()
+        path = self.state_dir / "metrics.jsonl"
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(
+                {"ts": "2026-07-06T13:31:00Z", "model": "opus", "writer": "daemon"}) + "\n")
+            fh.write(json.dumps(
+                {"ts": "2026-07-06T14:00:00Z", "mode": "Triage", "model": "opus"}) + "\n")
+        resp = self.client.get("/api/usage")
+        body = resp.json()
+        self.assertEqual(body["totals"]["turns"], 1)
+        self.assertEqual(len(body["days"]), 1)
+        self.assertEqual(body["days"][0]["by_model"], {"opus": 1})
+
     # --- status ------------------------------------------------------------------------------------
 
     def test_status_no_daemon_entry(self):
         self._allow()
         resp = self.client.get("/api/status")
         self.assertFalse(resp.json()["available"])
+
+    def test_fallback_notes_do_not_promise_a_shipped_phase(self):
+        """Regression guard on stale wording: the registry-fallback notes must not advertise the daemon
+        pipe (v2) as future work — it shipped, and a note naming an unbuilt phase in a panel whose own
+        badge says the pipe is UP is a false claim."""
+        self._allow()
+        empty = self.client.get("/api/status").json()
+        self.assertNotIn("v2", empty["note"])
+        self._write_session("daemon.json", source="daemon",
+                            last_seen=datetime.now(timezone.utc).isoformat())
+        populated = self.client.get("/api/status").json()
+        self.assertNotIn("v2", populated["note"])
+
+    def test_pipe_connect_asks_the_daemon_for_a_status_snapshot(self):
+        """The daemon only PUSHES status at its own state-change points, so an idle daemon with no
+        warm session never volunteers one — leaving /api/status on the registry fallback indefinitely
+        while the pipe pill read "up". Connecting has to ASK."""
+        from cockpit.server import app as app_module
+
+        class _FakeClient:
+            connected = True
+
+            def __init__(self):
+                self.sent: list[dict] = []
+
+            def send(self, frame):
+                self.sent.append(frame)
+                return True
+
+        fake = _FakeClient()
+        old = app_module._state.pipe_client
+        app_module._state.pipe_client = fake
+        try:
+            app_module._on_pipe_connect()
+        finally:
+            app_module._state.pipe_client = old
+        self.assertEqual(fake.sent, [{"type": "status.get"}])
+
+    def test_pipe_connect_without_a_client_is_a_no_op(self):
+        """Same fail-open discipline as every other pipe callback: never raise into the reconnect
+        loop."""
+        from cockpit.server import app as app_module
+
+        old = app_module._state.pipe_client
+        app_module._state.pipe_client = None
+        try:
+            app_module._on_pipe_connect()
+        finally:
+            app_module._state.pipe_client = old
+
+    def test_live_status_passes_the_warm_session_lifetime_block_through(self):
+        """The daemon's status snapshot reaches the browser with NO backend filtering: /api/status
+        returns the live pipe frame verbatim. This is the regression guard on that pass-through, so a
+        future filter/allowlist here can't silently drop the warm-session gauge fields."""
+        self._allow()
+        from cockpit.server import app as app_module
+
+        app_module._state.last_status = {
+            "type": "status", "session_up": True, "turn_in_flight": False,
+            "model": "claude-opus-5", "queue_depth": 0,
+            "session_age_sec": 725.0, "turns_served": 4, "context_tokens": 120_702,
+            "context_pct": 60.4, "context_window_tokens": 200_000, "context_estimated": True,
+            "session_cost_usd": 1.24, "last_respawn_reason": "idle_winddown",
+            "spawn_fallback_used": False,
+        }
+        try:
+            body = self.client.get("/api/status").json()
+            self.assertEqual(body["context_tokens"], 120_702)
+            self.assertEqual(body["context_pct"], 60.4)
+            self.assertEqual(body["context_window_tokens"], 200_000)
+            self.assertTrue(body["context_estimated"])
+            self.assertEqual(body["turns_served"], 4)
+            self.assertEqual(body["session_age_sec"], 725.0)
+            self.assertEqual(body["session_cost_usd"], 1.24)
+            self.assertEqual(body["last_respawn_reason"], "idle_winddown")
+            self.assertIn(body["pipe"], ("up", "down"))
+        finally:
+            app_module._state.last_status = None
 
     def test_status_with_daemon_entry(self):
         self._allow()
@@ -467,7 +567,29 @@ class CockpitAppTests(unittest.TestCase):
         self._allow()
         resp = self.client.get("/api/model-config")
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.json(), {"warm_model": None, "max_routable_model": None, "updated_at": None})
+        body = resp.json()
+        self.assertEqual({k: body[k] for k in ("warm_model", "max_routable_model", "updated_at")},
+                         {"warm_model": None, "max_routable_model": None, "updated_at": None})
+
+    def test_model_config_get_serves_the_dial_options(self):
+        """The frontend must not have to know the model list: a browser-side copy drifts, and a
+        <select> whose value matches no option renders the FIRST one — the panel then shows the wrong
+        model, and a save writes it back."""
+        self._allow()
+        body = self.client.get("/api/model-config").json()
+        self.assertEqual([m["id"] for m in body["known_models"]], model_config_module.RANK["claude-cli"])
+        labels = {m["id"]: m["label"] for m in body["known_models"]}
+        self.assertIn("claude-opus-5", labels)
+        self.assertNotEqual(labels["claude-opus-5"], labels["claude-opus-4-8"])
+
+    def test_model_config_get_can_represent_whatever_is_stored(self):
+        """Belt-and-braces on the same bug: anything the PUT will accept must be selectable in the GET."""
+        self._allow()
+        for model in model_config_module.RANK["claude-cli"]:
+            self.client.put("/api/model-config",
+                            json={"warm_model": model, "max_routable_model": "claude-fable-5-1"})
+            body = self.client.get("/api/model-config").json()
+            self.assertIn(body["warm_model"], [m["id"] for m in body["known_models"]], model)
 
     def test_model_config_put_writes_validated_and_audits(self):
         self._allow()
@@ -514,6 +636,95 @@ class CockpitAppTests(unittest.TestCase):
         self._allow()
         resp = self.client.put("/api/model-config", json={"warm_model": "opus"})
         self.assertEqual(resp.status_code, 422)  # pydantic validation, not our ValueError path
+
+    # --- model-config backend axis ------------------------------------------------------------------
+
+    def test_model_config_get_serves_known_backends(self):
+        self._allow()
+        body = self.client.get("/api/model-config").json()
+        self.assertEqual(body["backend"], "claude-cli")  # default, unforced
+        ids = {b["id"] for b in body["known_backends"]}
+        self.assertEqual(ids, {"claude-cli", "codex-cli"})
+
+    def test_model_config_put_can_switch_backend(self):
+        self._allow()
+        resp = self.client.put("/api/model-config",
+                              json={"warm_model": "gpt-5.5", "max_routable_model": "gpt-6-astra",
+                                    "backend": "codex-cli"})
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["backend"], "codex-cli")
+        self.assertEqual(body["warm_model"], "gpt-5.5")
+
+    def test_model_config_put_without_backend_preserves_stored_backend(self):
+        self._allow()
+        self.client.put("/api/model-config",
+                        json={"warm_model": "gpt-5.5", "max_routable_model": "gpt-6-astra",
+                              "backend": "codex-cli"})
+        resp = self.client.put("/api/model-config",
+                              json={"warm_model": "gpt-5.6-sol", "max_routable_model": "gpt-6-astra"})
+        self.assertEqual(resp.json()["backend"], "codex-cli")
+
+    def test_model_config_put_rejects_unrecognized_backend(self):
+        self._allow()
+        resp = self.client.put("/api/model-config",
+                              json={"warm_model": "opus", "max_routable_model": "fable",
+                                    "backend": "not-a-real-backend"})
+        self.assertEqual(resp.status_code, 400)
+
+    # --- session trace + open-spec ledger -----------------------------------------------------------
+
+    def _write_jsonl(self, name, rows):
+        with open(self.state_dir / name, "w", encoding="utf-8") as fh:
+            for r in rows:
+                fh.write(json.dumps(r) + "\n")
+
+    def test_trace_requires_auth(self):
+        self.assertEqual(self.client.get("/api/trace/sessions").status_code, 503)
+        self.assertEqual(self.client.get("/api/trace/sessions/abc").status_code, 503)
+
+    def test_trace_missing_metrics_is_tolerant(self):
+        self._allow()
+        resp = self.client.get("/api/trace/sessions")
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.json()["available"])
+
+    def test_trace_lists_sessions_and_serves_one(self):
+        self._allow()
+        self._write_jsonl("metrics.jsonl", [
+            {"session_id": "sess-a", "turn_id": "t1", "ts": "2026-08-06T01:00:00Z",
+             "cost_usd": 1.25, "context_tokens": 90_000},
+        ])
+        self._write_jsonl("warm-transcript.jsonl", [
+            {"ts": "2026-08-06T01:00:01Z", "kind": "assistant_output", "session_id": "sess-a",
+             "tool_uses": [{"name": "Bash"}]},
+        ])
+        listing = self.client.get("/api/trace/sessions").json()
+        self.assertTrue(listing["available"])
+        self.assertEqual(listing["sessions"][0]["session_id"], "sess-a")
+        detail = self.client.get("/api/trace/sessions/sess-a").json()
+        self.assertEqual(detail["tool_calls"], 1)
+
+    def test_trace_session_id_is_a_path_segment_and_stays_harmless(self):
+        # The id lands in a path; the reader only ever compares it as a string and never builds a
+        # path from it, so traversal has nowhere to go. Asserted rather than assumed.
+        self._allow()
+        self._write_jsonl("metrics.jsonl", [{"session_id": "sess-a", "turn_id": "t"}])
+        resp = self.client.get("/api/trace/sessions/..%2F..%2Fetc%2Fpasswd")
+        self.assertIn(resp.status_code, (200, 404))
+        if resp.status_code == 200:
+            self.assertEqual(resp.json()["events"], [])
+
+    def test_doc_status_requires_auth(self):
+        self.assertEqual(self.client.get("/api/doc-status").status_code, 503)
+
+    def test_doc_status_serves_the_derived_ledger(self):
+        self._allow()
+        body = self.client.get("/api/doc-status").json()
+        self.assertTrue(body["available"], body.get("reason"))
+        self.assertGreater(body["total"], 0)
+        for key in ("documents", "counts", "order", "gloss", "open_tokens", "open_count"):
+            self.assertIn(key, body)
 
     # --- router-stats (v3) -------------------------------------------------------------------------
 
@@ -928,6 +1139,93 @@ class CockpitAppTests(unittest.TestCase):
         finally:
             server.shutdown()
             server.server_close()
+
+    # --- daemon-supervised archon sites: per-archon restart control ---------------------------------
+
+    def _with_registry(self, data: dict):
+        """Writes `data` to a throwaway registry file and points COCKPIT_ARCHON_REGISTRY_PATH at it for
+        the duration of the `with` block."""
+        import contextlib
+
+        @contextlib.contextmanager
+        def _cm():
+            old = os.environ.get("COCKPIT_ARCHON_REGISTRY_PATH")
+            registry_path = self.state_dir / "archon-registry.json"
+            with open(registry_path, "w", encoding="utf-8") as fh:
+                json.dump(data, fh)
+            os.environ["COCKPIT_ARCHON_REGISTRY_PATH"] = str(registry_path)
+            try:
+                yield
+            finally:
+                if old is None:
+                    os.environ.pop("COCKPIT_ARCHON_REGISTRY_PATH", None)
+                else:
+                    os.environ["COCKPIT_ARCHON_REGISTRY_PATH"] = old
+
+        return _cm()
+
+    def test_archon_restart_requires_auth(self):
+        resp = self.client.post("/api/archons/example-archon/restart")
+        self.assertEqual(resp.status_code, 503)
+
+    def test_archon_restart_unknown_id_404(self):
+        self._allow()
+        with self._with_registry({"example-archon": {"title": "Example", "status": "live"}}):
+            resp = self.client.post("/api/archons/nope/restart")
+        self.assertEqual(resp.status_code, 404)
+        # a rejected id must never reach the control queue or the audit log
+        self.assertFalse((self.state_dir / "control-queue.json").exists())
+        self.assertFalse((self.state_dir / "cockpit-audit.jsonl").exists())
+
+    def test_archon_restart_enqueues_and_audits(self):
+        self._allow()
+        with self._with_registry({"example-archon": {"title": "Example", "status": "live"}}):
+            resp = self.client.post("/api/archons/example-archon/restart")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertTrue(body["ok"])
+        self.assertFalse(body["already_queued"])
+
+        queue = json.loads((self.state_dir / "control-queue.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(queue), 1)
+        self.assertEqual(queue[0]["action"], "restart-site")
+        self.assertEqual(queue[0]["target"], "example-archon")
+        self.assertFalse(queue[0]["defer_until_idle"])  # a site restart never waits on chat idle
+
+        audit_lines = (
+            (self.state_dir / "cockpit-audit.jsonl").read_text(encoding="utf-8").strip().splitlines()
+        )
+        self.assertEqual(len(audit_lines), 1)
+        audit = json.loads(audit_lines[0])
+        self.assertEqual(audit["action"], "control.restart_site")
+        self.assertEqual(audit["detail"]["archon_id"], "example-archon")
+
+    def test_archon_restart_dedupes_by_target_but_still_audits_the_call(self):
+        self._allow()
+        with self._with_registry({"example-archon": {"title": "Example", "status": "live"}}):
+            self.client.post("/api/archons/example-archon/restart")
+            resp = self.client.post("/api/archons/example-archon/restart")
+        self.assertTrue(resp.json()["already_queued"])
+
+        queue = json.loads((self.state_dir / "control-queue.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(queue), 1)  # still just the one queued restart-site
+
+        audit_lines = (
+            (self.state_dir / "cockpit-audit.jsonl").read_text(encoding="utf-8").strip().splitlines()
+        )
+        self.assertEqual(len(audit_lines), 2)  # every mutating CALL is audited, dedupe or not
+
+    def test_archon_restart_does_not_dedupe_across_different_archons(self):
+        self._allow()
+        with self._with_registry({
+            "example-archon": {"title": "Example", "status": "live"},
+            "second-archon": {"title": "Second", "status": "reserved"},
+        }):
+            self.client.post("/api/archons/example-archon/restart")
+            resp = self.client.post("/api/archons/second-archon/restart")
+        self.assertFalse(resp.json()["already_queued"])
+        queue = json.loads((self.state_dir / "control-queue.json").read_text(encoding="utf-8"))
+        self.assertEqual({q["target"] for q in queue}, {"example-archon", "second-archon"})
 
     # --- v5: /api/ws auth gate (unconfigured mode; oidc mode is covered in CockpitOidcAuthTests) ---
 

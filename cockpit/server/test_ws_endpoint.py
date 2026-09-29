@@ -76,6 +76,12 @@ class CockpitWsFallbackTests(unittest.TestCase):
         app_module._state.pipe_client = None
         app_module._state.last_status = None
 
+    def _ws(self):
+        """`dev` mode requires an allowlisted `Origin` on the handshake (app.py's
+        `_ALLOWED_DEV_WS_ORIGINS`); supply one so these tests keep exercising fan-out/fallback.
+        `CockpitWsDevModeOriginGateTests` covers the gate itself."""
+        return self.client.websocket_connect("/api/ws", headers={"origin": "http://testserver"})
+
     def test_ws_closes_without_dev_auth(self):
         os.environ.pop("COCKPIT_DEV_NO_AUTH", None)
         with self.assertRaises(Exception):
@@ -83,7 +89,7 @@ class CockpitWsFallbackTests(unittest.TestCase):
                 ws.receive_json()  # the server closed immediately; nothing to receive
 
     def test_chat_send_falls_back_to_inbox_file_when_pipe_down(self):
-        with self.client.websocket_connect("/api/ws") as ws:
+        with self._ws() as ws:
             ws.send_json({"type": "chat.send", "id": "c1", "text": "hello from a tab",
                           "force_fable": True})
             ack = ws.receive_json()
@@ -97,7 +103,7 @@ class CockpitWsFallbackTests(unittest.TestCase):
         self.assertIn("ts", item)
 
     def test_blank_text_chat_send_is_dropped_silently(self):
-        with self.client.websocket_connect("/api/ws") as ws:
+        with self._ws() as ws:
             ws.send_json({"type": "chat.send", "id": "c2", "text": "   "})
             ws.send_json({"type": "status.get"})  # a second frame proves the connection is still alive
             frame = ws.receive_json()
@@ -105,14 +111,14 @@ class CockpitWsFallbackTests(unittest.TestCase):
         self.assertFalse((self.state_dir / "cockpit-inbox.jsonl").exists())
 
     def test_status_get_falls_back_to_synthesized_pipe_down(self):
-        with self.client.websocket_connect("/api/ws") as ws:
+        with self._ws() as ws:
             ws.send_json({"type": "status.get"})
             frame = ws.receive_json()
         self.assertEqual(frame["type"], "status")
         self.assertEqual(frame["pipe"], "down")
 
     def test_control_restart_enqueues_and_audits_via_ws(self):
-        with self.client.websocket_connect("/api/ws") as ws:
+        with self._ws() as ws:
             ws.send_json({"type": "control.restart"})
             ack = ws.receive_json()
         self.assertEqual(ack["type"], "control.ack")
@@ -131,15 +137,14 @@ class CockpitWsFallbackTests(unittest.TestCase):
         self.assertEqual(audit["detail"]["via"], "ws")
 
     def test_a_frame_broadcasts_to_every_connected_tab(self):
-        with self.client.websocket_connect("/api/ws") as ws1, \
-                self.client.websocket_connect("/api/ws") as ws2:
+        with self._ws() as ws1, self._ws() as ws2:
             ws1.send_json({"type": "status.get"})
             f1 = ws1.receive_json()
             f2 = ws2.receive_json()  # the SAME synthesized status also reached the other tab
         self.assertEqual(f1, f2)
 
     def test_unknown_frame_type_is_ignored_not_fatal(self):
-        with self.client.websocket_connect("/api/ws") as ws:
+        with self._ws() as ws:
             ws.send_json({"type": "something.weird"})
             ws.send_json({"type": "status.get"})
             frame = ws.receive_json()
@@ -239,7 +244,7 @@ class CockpitWsFullPipeWiring(unittest.TestCase):
                             self.fail("pipe client never reported connected against the fake transport")
                         time.sleep(0.02)
 
-                    with client.websocket_connect("/api/ws") as ws:
+                    with client.websocket_connect("/api/ws", headers={"origin": "http://testserver"}) as ws:
                         frame = ws.receive_json()
                 self.assertEqual(frame["type"], "status")
                 self.assertTrue(frame["session_up"])
@@ -260,6 +265,83 @@ class CockpitWsFullPipeWiring(unittest.TestCase):
             app_module._state.last_status = None
             tmp.cleanup()
 
+
+@unittest.skipUnless(_FASTAPI_AVAILABLE, "fastapi/websockets not installed (uv sync --extra cockpit)")
+class CockpitWsDevModeOriginGateTests(unittest.TestCase):
+    """`dev` mode sets no cookie, and a WebSocket handshake is exempt from the Same-Origin Policy — so
+    without an Origin gate any page open in the owner's browser could drive the assistant over
+    ws://127.0.0.1:8760/api/ws. These pin the gate from the outside."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._old_state = os.environ.get("SENESCHAL_STATE_DIR")
+        self._old_auth = os.environ.get("COCKPIT_DEV_NO_AUTH")
+        os.environ["SENESCHAL_STATE_DIR"] = self._tmp.name
+        os.environ["COCKPIT_DEV_NO_AUTH"] = "1"
+        app_module._state.pipe_client = None
+        app_module._state.last_status = None
+        self.client = TestClient(app)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+        for key, old in (("SENESCHAL_STATE_DIR", self._old_state), ("COCKPIT_DEV_NO_AUTH", self._old_auth)):
+            if old is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old
+
+    def _status(self, headers):
+        with self.client.websocket_connect("/api/ws", headers=headers) as ws:
+            ws.send_json({"type": "status.get"})
+            return ws.receive_json()
+
+    def _refused(self, headers):
+        with self.assertRaises(Exception):
+            self._status(headers)
+
+    def test_no_origin_header_is_refused(self):
+        self._refused({})
+
+    def test_a_foreign_origin_is_refused(self):
+        self._refused({"origin": "http://evil.example"})
+
+    def test_the_built_frontend_origin_is_accepted(self):
+        self.assertEqual(self._status({"origin": "http://127.0.0.1:8760"})["type"], "status")
+
+    def test_the_vite_dev_server_origin_is_accepted(self):
+        self.assertEqual(self._status({"origin": "http://localhost:5173"})["type"], "status")
+
+    def test_a_reverse_proxied_origin_matching_the_host_is_accepted(self):
+        headers = {"origin": "http://cockpit.lan", "host": "cockpit.lan"}
+        self.assertEqual(self._status(headers)["type"], "status")
+
+    def test_a_foreign_origin_with_the_proxied_host_is_refused(self):
+        self._refused({"origin": "http://evil.example", "host": "cockpit.lan"})
+
+    def test_a_scheme_mismatch_is_refused(self):
+        self._refused({"origin": "https://cockpit.lan", "host": "cockpit.lan"})
+
+
+@unittest.skipUnless(_FASTAPI_AVAILABLE, "fastapi/websockets not installed (uv sync --extra cockpit)")
+class DevWsOriginSameHostHelperTests(unittest.TestCase):
+    def test_matches_same_scheme_and_host(self):
+        self.assertTrue(app_module._dev_ws_origin_same_host("http://cockpit.lan", "cockpit.lan", False))
+
+    def test_matches_with_an_explicit_port_on_both_sides(self):
+        self.assertTrue(app_module._dev_ws_origin_same_host("http://cockpit.lan:8080", "cockpit.lan:8080", False))
+
+    def test_rejects_a_foreign_origin(self):
+        self.assertFalse(app_module._dev_ws_origin_same_host("http://evil.example", "cockpit.lan", False))
+
+    def test_scheme_must_match_the_connection(self):
+        self.assertFalse(app_module._dev_ws_origin_same_host("https://cockpit.lan", "cockpit.lan", False))
+        self.assertTrue(app_module._dev_ws_origin_same_host("https://cockpit.lan", "cockpit.lan", True))
+
+    def test_rejects_missing_or_malformed_values(self):
+        self.assertFalse(app_module._dev_ws_origin_same_host(None, "cockpit.lan", False))
+        self.assertFalse(app_module._dev_ws_origin_same_host("http://cockpit.lan", None, False))
+        self.assertFalse(app_module._dev_ws_origin_same_host("not-a-url", "cockpit.lan", False))
+        self.assertFalse(app_module._dev_ws_origin_same_host("http://", "cockpit.lan", False))
 
 if __name__ == "__main__":
     unittest.main()

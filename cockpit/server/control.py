@@ -1,10 +1,16 @@
-"""The cockpit backend's ONLY writes: the graceful-restart enqueue + the audit log.
+"""The cockpit backend's writes: the graceful-restart enqueue, the per-archon-site restart enqueue, and
+the audit log.
 
 Everything else in this app is read-only (readers.py). `enqueue_restart` replicates
 seneschal/scripts/request_control.py's `enqueue_control(state_dir, "restart", defer=True)` byte-for-byte
 (same file, same key names, same action-dedupe rule) rather than importing it, so the cockpit stays
 its own dependency world (cockpit-spec.md ruling 3) and never needs the daemon's script package on its
 import path. If request_control.py's queue shape ever changes, mirror the change here too.
+
+`enqueue_restart_site` is the same control-queue file, a different `action` (`"restart-site"`, carrying
+a `target` archon id) — the daemon's control task drains it into the restart requests
+`seneschal/scripts/archon_sites.py`'s reconcile loop picks up, independent of the daemon's own
+restart/shutdown flow.
 """
 from __future__ import annotations
 
@@ -45,6 +51,34 @@ def enqueue_restart(state_dir: Path, reason: str = "") -> tuple[Path, bool]:
     items.append({
         "action": "restart",
         "defer_until_idle": True,
+        "reason": reason,
+        "requested_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    })
+    _save_json(path, items)
+    return path, False
+
+
+def enqueue_restart_site(state_dir: Path, archon_id: str, reason: str = "") -> tuple[Path, bool]:
+    """Append a `restart-site` control entry for ONE archon's human-facing site (the Archons panel's
+    per-site Restart button — the daemon's control task hands it to `seneschal/scripts/archon_sites.py`'s
+    reconcile loop). Unlike `enqueue_restart` above this is never deferred — a site restart is
+    independent of the warm chat session, never a whole-daemon stop, so `defer_until_idle` is always
+    `False`.
+
+    Deduped by `(action, target)`, NOT by action alone — `enqueue_restart`'s plain action-only dedupe
+    would let one archon's pending restart silently swallow a second archon's request. Returns
+    `(queue_path, already_queued)`."""
+    path = state_dir / CONTROL_QUEUE_FILE
+    items = _load_json(path, [])
+    if not isinstance(items, list):
+        items = []
+    if any(isinstance(i, dict) and i.get("action") == "restart-site" and i.get("target") == archon_id
+           for i in items):
+        return path, True
+    items.append({
+        "action": "restart-site",
+        "target": archon_id,
+        "defer_until_idle": False,
         "reason": reason,
         "requested_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     })

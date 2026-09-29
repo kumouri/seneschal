@@ -196,7 +196,12 @@ def _extract_tokens(rec: dict) -> int | None:
 
 def read_usage(state_dir: Path) -> dict:
     """Best-effort plan-usage estimate aggregated from metrics.jsonl: turns (+ tokens where
-    derivable) per day, per model. Always labeled `estimated` — there's no official quota API."""
+    derivable) per day, per model. Always labeled `estimated` — there's no official quota API.
+
+    **Filtered to `writer == "daemon"`, matching `seneschal/scripts/usage_activity.py`'s `warm_block`.**
+    `metrics.jsonl` can have two writers (`seneschal/state/README.md`): the daemon's per-warm-turn rows,
+    and the Observability advisor's own prompt-side rows for Dream's weekly graduation rollup. An
+    advisor row is not a turn, and counting it would inflate this panel's turn/day count."""
     lines = _read_lines(state_dir / "metrics.jsonl")
     by_day: dict[str, dict] = {}
     totals = {"turns": 0, "tokens": 0}
@@ -211,6 +216,8 @@ def read_usage(state_dir: Path) -> dict:
         except json.JSONDecodeError:
             continue
         if not isinstance(rec, dict):
+            continue
+        if rec.get("writer") != "daemon":
             continue
         ts = _parse_iso(rec.get("ts"))
         day = ts.date().isoformat() if ts else "unknown"
@@ -276,14 +283,20 @@ def read_router_stats(state_dir: Path, limit: int = 20) -> dict:
 
 
 def read_status(state_dir: Path) -> dict:
-    """Warm-session status derived from the registry's `daemon` entry — a placeholder until the
-    daemon pipe (v2) lands live turn-in-flight / model / queue-depth data."""
+    """Warm-session status derived from the registry's `daemon` entry — the FALLBACK shape.
+
+    The daemon pipe (v2) is the real source: `app.py::api_status` prefers the live status frame
+    whenever one has arrived this backend process's lifetime, and the backend asks for one on every
+    pipe connect. So this reader is only reached when the daemon hasn't answered yet — the pipe is
+    down, the daemon isn't running, or a fresh backend is racing its first `status.get`. It says
+    nothing about whether a WARM SESSION exists; "no warm session" is a thing only the live frame can
+    report."""
     sessions = read_sessions(state_dir)["sessions"]
     daemon = next((s for s in sessions if s.get("source") == "daemon"), None)
     if daemon is None:
         return {
             "available": False,
-            "note": "no daemon session-registry entry found; placeholder until the daemon pipe (v2)",
+            "note": "the daemon hasn't sent a status frame, and no daemon session-registry entry was found",
         }
     return {
         "available": True,
@@ -291,5 +304,5 @@ def read_status(state_dir: Path) -> dict:
         "working_on": daemon.get("working_on"),
         "last_seen": daemon.get("last_seen"),
         "live": daemon.get("live"),
-        "note": "derived from the session registry; placeholder until the daemon pipe (v2)",
+        "note": "derived from the session registry — the daemon hasn't sent a status frame yet",
     }

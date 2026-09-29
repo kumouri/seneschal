@@ -8,10 +8,12 @@ Every route under /api except /api/health and /api/auth/status is gated behind `
 (`auth.py`) — a real OIDC session cookie once `COCKPIT_OIDC_CLIENT_ID` is configured (v5), else the
 COCKPIT_DEV_NO_AUTH=1 dev stub, else 503 (see `auth.auth_mode`'s precedence). Every mutating route
 ALSO depends on `require_csrf` (a no-op outside real-auth mode). The writes in this app are the
-restart enqueue, the model-config PUT (v3), the governor-config PUT (v3.5), their audit-log lines
-(control.py), the chat-fallback inbox append (_append_inbox_fallback, below), and — v5 — the session/
-pending-login cookies auth.py's login/callback/logout routes set — everything else is a tolerant read
-over `seneschal/state/*` (readers.py, transcript.py, governor.py, archons.py).
+daemon restart enqueue, the per-archon-site restart enqueue (`POST /api/archons/{id}/restart`, below),
+the model-config PUT (v3), the governor-config PUT (v3.5), their audit-log lines (control.py), the
+chat-fallback inbox append (_append_inbox_fallback, below), and — v5 — the session/pending-login
+cookies auth.py's login/callback/logout routes set — everything else is a tolerant read over
+`seneschal/state/*` (readers.py, transcript.py, governor.py, archons.py, trace.py) or the docs tree
+(doc_status.py).
 
 **v2 (daemon pipe):** a `PipeClient` (pipe_client.py) holds the ONE outbound connection to the daemon's
 cockpit pipe as a lifespan-managed background task, reconnecting with backoff. `GET /api/ws` fans every
@@ -19,14 +21,19 @@ relayed frame out to N browser tabs (ws_hub.py) and forwards browser-originated 
 control.restart back — falling back to the `cockpit-inbox.jsonl` file queue (and an honest `pipe:
 "down"` status) whenever the pipe is unreachable. Note: `@app.middleware("http")` does not run for
 websocket connections (Starlette limitation) — `/api/ws` re-checks `auth.auth_mode()` (and, in `oidc`
-mode, the session cookie) itself; the uvicorn-level 127.0.0.1 bind still covers it regardless of route
-type.
+mode, the session cookie; in `dev` mode, an `Origin` allowlist — a WebSocket handshake is exempt from
+the Same-Origin Policy, so `dev` mode's usual "every gated route open, nothing to hijack" reasoning
+doesn't hold here) itself; the uvicorn-level 127.0.0.1 bind still covers it regardless of route type.
+The backend asks the daemon for a status frame the moment the pipe connects (`_on_pipe_connect`), so a
+connected daemon reaches the live status shape without waiting for its next state change.
 
 **v3 (model dials + Fable delegation, cockpit-spec.md):** `GET`/`PUT /api/model-config` read/write
 `state/model-config.json` (via `model_config.py`, this app's own duplicated rank/coherence table — the
 same one `seneschal/scripts/model_config.py` enforces daemon-side, ruling 3); the PUT validates before
-writing and audits every call. `GET /api/router-stats` summarizes `state/router-log.jsonl` (both the
-pre-existing triage arm and the v3 fable arm, distinguished by `arm`). The chat composer's `force_fable`
+writing and audits every call. The GET also serves `known_models`/`known_backends` — the dial pickers'
+option lists — so the frontend never keeps its own copy of the model list. `GET /api/router-stats`
+summarizes `state/router-log.jsonl` (both the pre-existing triage arm and the v3 fable arm,
+distinguished by `arm`). The chat composer's `force_fable`
 field (already threaded through `_append_inbox_fallback`/the pipe) now actually forces, daemon-side.
 
 **v3.5 (Oikonomos, the budget governor, cockpit-spec.md "Oikonomos — the budget governor"):**
@@ -44,6 +51,13 @@ read-only endpoints over `<state dir>/health.db` (via `health.py`, over the same
 500s, it returns an honest `"available": false`. `GET /api/meals` reads the Dream-staged meal-plan
 snapshot at `<state dir>/meals.json` — same tolerance.
 
+**Session trace (`seneschal/docs/session-trace-spec.md` phase 1):** `GET /api/trace/sessions` (one row
+per warm session, from `metrics.jsonl`) and `GET /api/trace/sessions/{id}` (that session's events,
+chronological) via `trace.py` — an independent reader of the on-disk shape that honours the `!private`
+tombstone itself. **Open-spec ledger:** `GET /api/doc-status` serves every `seneschal/docs/` document's
+`**Status:**` header, derived by `seneschal/scripts/check_doc_status.py` (the same parser CI enforces)
+via `doc_status.py` — read-only; a status changes by editing its document.
+
 **v5 (real OIDC auth + archon SSO tiles/proxy + break-glass, cockpit-spec.md "Auth (Zitadel) & the
 archon SSO portal" / "Archon SSO tiles + proxy" / "Break-glass"):** `GET /auth/login` /
 `GET /auth/callback` / `GET /auth/logout` are the authorization-code + PKCE round trip against the
@@ -52,7 +66,10 @@ reasoning — no local JWT/JWKS verification). `GET /api/auth/status` is PUBLIC 
 and reports auth mode + whether THIS request is authenticated, so the frontend can show a login
 screen instead of a wall of 401s. `GET /api/archons` + the `GET /archons/{id}/{path:path}` reverse
 proxy (`archons.py`) expose a live archon's own UI through this SAME server — archons never face the
-internet directly. The break-glass ladder's rungs 1-2 (a fresh IdP re-auth) are `GET
+internet directly. `POST /api/archons/{id}/restart` enqueues a `restart-site` control the daemon's
+archon-site supervisor (`seneschal/scripts/archon_sites.py`) applies on its next reconcile pass —
+CSRF-guarded and audited like the daemon restart button, 404s on an id the registry doesn't know. The
+break-glass ladder's rungs 1-2 (a fresh IdP re-auth) are `GET
 /api/breakglass/reauth/start` + a `bg`-flagged `/auth/callback`, which mint a short-lived signed
 assertion (`cockpit/breakglass/assertion.py`) the frontend hands to the SEPARATE break-glass
 supervisor (`cockpit/breakglass/supervisor.py`, deliberately stdlib-only — see its module docstring)
@@ -70,6 +87,7 @@ Run (dev): see ../README.md. Serves the built frontend (cockpit/web/dist) as sta
 from __future__ import annotations
 
 import json
+import urllib.parse
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -81,6 +99,7 @@ from pydantic import BaseModel
 
 from . import archons as archons_mod
 from . import auth, control, emotes, governor, health, jobs, model_config, oidc, readers, transcript
+from . import doc_status, trace
 from . import session as session_mod
 from .auth import require_auth
 from .config import (
@@ -140,6 +159,20 @@ async def _on_pipe_frame(frame: dict) -> None:
     browser_hub.broadcast(frame)
 
 
+def _on_pipe_connect() -> None:
+    """Fired the instant the outbound connection comes up — ask the daemon for a status snapshot at
+    once, rather than waiting to be told.
+
+    The daemon only PUSHES status at its own state-change points, so a backend that waited passively
+    could sit on the registry fallback indefinitely whenever nothing happened to change — and "daemon
+    up, pipe up, no warm session, nothing going on" is exactly that case, which would show a pipe-up
+    panel still claiming there was no daemon at all. `send` is a non-blocking enqueue and PipeClient
+    starts its writer immediately after this callback returns, so the frame goes out on connect."""
+    client = _state.pipe_client
+    if client is not None:
+        client.send({"type": TYPE_STATUS_GET})
+
+
 def _on_pipe_disconnect() -> None:
     """Fired the instant the outbound connection drops — broadcast an honest degraded status
     immediately rather than waiting for a browser tab to poll and find out the hard way."""
@@ -151,7 +184,8 @@ def _on_pipe_disconnect() -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     client = PipeClient(get_pipe_host(), get_pipe_port(), get_pipe_token_path(),
-                        on_frame=_on_pipe_frame, on_disconnect=_on_pipe_disconnect)
+                        on_frame=_on_pipe_frame, on_connect=_on_pipe_connect,
+                        on_disconnect=_on_pipe_disconnect)
     _state.pipe_client = client
     client.start()
     try:
@@ -166,6 +200,44 @@ app = FastAPI(title="Seneschal Cockpit", version="0.1.0", lifespan=lifespan)
 # Starlette's TestClient reports its synthetic client as ("testclient", ...) — allow it alongside the
 # real loopback hosts so the unit tests exercise this middleware instead of needing to bypass it.
 _ALLOWED_CLIENT_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "testclient"})
+
+# `dev` mode (COCKPIT_DEV_NO_AUTH=1) sets no cookie at all, so SameSite=Strict protects nothing there.
+# A WebSocket handshake is exempt from the Same-Origin Policy — unlike fetch/XHR, ANY page a browser on
+# this machine has open can open one, and it reaches the loopback bind regardless. So in `dev` mode the
+# handshake's `Origin` (set by the browser itself; page JS cannot forge it) is the only signal left to
+# gate on. `http://testserver` is Starlette TestClient's synthetic default host, parallel to
+# "testclient" above.
+_ALLOWED_DEV_WS_ORIGINS = frozenset({
+    "http://127.0.0.1:8760", "http://localhost:8760",  # the built frontend, served directly (README.md)
+    "http://127.0.0.1:5173", "http://localhost:5173",  # `npm run dev`'s Vite dev server (vite.config.ts)
+    "http://testserver",
+})
+
+
+def _dev_ws_origin_same_host(origin: Optional[str], host_header: Optional[str], is_secure: bool) -> bool:
+    """Second `dev`-mode WS gate, beside `_ALLOWED_DEV_WS_ORIGINS`: accept an `Origin` naming the SAME
+    host the browser sent in its `Host` header on this very handshake, with a matching scheme.
+
+    This covers a reverse proxy on a LAN hostname (e.g. `http://cockpit.lan` -> 127.0.0.1:8760) without
+    a per-hostname allowlist: the proxy forwards the client's `Host` unchanged, so a page loaded from
+    that hostname sends `Origin: http://cockpit.lan` + `Host: cockpit.lan`. It compares two
+    client-supplied values against EACH OTHER and never treats either alone as a credential: a hostile
+    page's `Origin` is pinned by the browser to its own origin, so aiming `new WebSocket(...)` at the
+    proxied host yields a mismatch and is refused. `oidc` mode never reaches this (it gates on the
+    session cookie).
+
+    Known limit: `is_secure` is the scheme of THIS hop, so a TLS-terminating proxy in front of plain
+    HTTP uvicorn needs proxy-header handling before an `https://` Origin would match."""
+    if not origin or not host_header:
+        return False
+    try:
+        parsed = urllib.parse.urlsplit(origin)
+    except ValueError:
+        return False
+    expected_scheme = "https" if is_secure else "http"
+    if parsed.scheme != expected_scheme or not parsed.netloc:
+        return False
+    return parsed.netloc == host_header
 
 
 @app.middleware("http")
@@ -246,9 +318,11 @@ def api_usage():
 
 @app.get("/api/status", dependencies=[Depends(require_auth)])
 def api_status():
-    """v1's registry-derived placeholder, now honestly labeled with the pipe's live state — and, once
-    at least one status frame has arrived from the daemon over the pipe, that live snapshot instead
-    (turn-in-flight, model, queue depth — v1's placeholder never had these)."""
+    """v1's registry-derived fallback, honestly labeled with the pipe's live state — and, once at
+    least one status frame has arrived from the daemon over the pipe, that live snapshot instead
+    (turn-in-flight, model, queue depth — v1's fallback never had these). `_on_pipe_connect` asks for
+    a frame the moment the pipe comes up, so a connected daemon reaches the live shape without waiting
+    for its next state change."""
     pipe_up = _pipe_up()
     if _state.last_status is not None:
         return {**_state.last_status, "pipe": "up" if pipe_up else "down"}
@@ -288,29 +362,45 @@ def api_control_restart():
 class ModelConfigUpdate(BaseModel):
     warm_model: str
     max_routable_model: str
+    # Optional and None by default — `model_config.save` PRESERVES the currently-stored backend when
+    # this is omitted, so an older client (or a request that only means to change the model, not the
+    # backend) can never silently reset it back to claude-cli. Switching backend is the owner's own
+    # explicit choice in this panel, never inferred.
+    backend: str | None = None
 
 
 @app.get("/api/model-config", dependencies=[Depends(require_auth)])
 def api_get_model_config():
-    """The two dials (cockpit-spec.md "Model dials & Fable delegation") — a tolerant passthrough of
-    `state/model-config.json` (missing/corrupt -> both fields null, matching `model_config.load`)."""
-    return model_config.load(get_state_dir())
+    """The dials (cockpit-spec.md "Model dials & Fable delegation", plus the `backend` axis) — a
+    tolerant passthrough of `state/model-config.json` (missing/corrupt -> every field null/default,
+    matching `model_config.load`), PLUS `known_models` (the CURRENTLY STORED backend's dial options, for
+    a client that only reads that key) and `known_backends` (every backend's id/label/model list, so
+    the panel's backend selector never needs its own copy of the backend list either).
+
+    Serving the option list closes a silent-downgrade bug class: a frontend that keeps its own copy of
+    the model list drifts, and a `<select>` whose value matches no option renders the FIRST one — the
+    panel then shows the wrong model and a save writes that wrong model back."""
+    cfg = model_config.load(get_state_dir())
+    return {**cfg, "known_models": model_config.known_models(cfg["backend"]),
+            "known_backends": model_config.known_backends()}
 
 
 @app.put("/api/model-config", dependencies=[Depends(require_auth), Depends(require_csrf)])
 def api_put_model_config(body: ModelConfigUpdate):
-    """Validated write of both dials together (same rank/coherence rules `seneschal/scripts/model_config.py`
-    enforces — duplicated here per cockpit-spec.md ruling 3). An unrecognized id or an incoherent pair
-    (warm outranking the ceiling) 400s instead of writing a bad config. Audited like the restart
-    control — every mutating call gets a `cockpit-audit.jsonl` line, this is the one other write this
-    app makes."""
+    """Validated write of the dials together (same rank/coherence rules `seneschal/scripts/model_config.py`
+    enforces — duplicated here per cockpit-spec.md ruling 3). An unrecognized id, an unrecognized
+    backend, or an incoherent pair (warm outranking the ceiling, within the resolved backend) 400s
+    instead of writing a bad config. Audited like the restart control — every mutating call gets a
+    `cockpit-audit.jsonl` line."""
     state_dir = get_state_dir()
     try:
-        data = model_config.save(state_dir, body.warm_model, body.max_routable_model)
+        data = model_config.save(state_dir, body.warm_model, body.max_routable_model,
+                                 backend=body.backend)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     control.append_audit(state_dir, "model_config.update", {
-        "warm_model": data["warm_model"], "max_routable_model": data["max_routable_model"],
+        "backend": data["backend"], "warm_model": data["warm_model"],
+        "max_routable_model": data["max_routable_model"],
     })
     return data
 
@@ -366,7 +456,7 @@ def api_put_governor_config(body: GovernorConfigUpdate):
 @app.get("/api/health/sleep", dependencies=[Depends(require_auth)])
 def api_health_sleep(days: int = 14):
     """Recent nights (default 14) from `state/health.db`'s `sleep_session` table, grouped per
-    Chicago-local calendar night. See `health.read_sleep` for the tolerance contract."""
+    sleep night (`sleep_day`). See `health.read_sleep` for the tolerance contract."""
     return health.read_sleep(get_state_dir(), days)
 
 
@@ -395,6 +485,39 @@ def api_meals():
     """The Dream-staged meal-plan/meal-idea snapshot (`state/meals.json` — written when Dream stages
     meal plans from the active store) — absent/corrupt -> `{"available": false, "plans": []}`."""
     return health.read_meals(get_state_dir())
+
+
+# --------------------------------------------------------------------- session trace + open-spec ledger
+
+@app.get("/api/doc-status", dependencies=[Depends(require_auth)])
+def api_doc_status():
+    """The **open-spec ledger** — the build status of every document in `seneschal/docs/`.
+
+    **Entirely DERIVED, with no second copy.** Every row is computed from the documents' own
+    `**Status:** `TOKEN`` headers by `seneschal/scripts/check_doc_status.py` — the same parser CI
+    enforces — so a status cannot be right here and wrong there. There is no route to edit one: a
+    status changes by editing the document that declares it, in the PR that changes the thing.
+
+    Unreachable parser or unreadable tree -> `{"available": false}` with a reason, never a 500."""
+    return doc_status.read_status()
+
+
+@app.get("/api/trace/sessions", dependencies=[Depends(require_auth)])
+def api_trace_sessions(limit: int = trace.DEFAULT_LIMIT):
+    """The session trace's sessions list (`seneschal/docs/session-trace-spec.md` phase 1) — one row
+    per warm session, newest first, with turns / cost / context peak / errors and why it started the
+    way it did. Built from `metrics.jsonl`, deliberately NOT the transcript ring: a session that has
+    aged out of a capped buffer still happened. No metrics log at all -> `{"available": false}`."""
+    return trace.read_sessions(get_state_dir(), limit)
+
+
+@app.get("/api/trace/sessions/{session_id}", dependencies=[Depends(require_auth)])
+def api_trace_session(session_id: str, limit: int = trace.DEFAULT_EVENT_LIMIT):
+    """One session's events, chronological — the Logs view. Carries tool calls, per-turn usage, the
+    spawn decision, and the verbatim conversation from `turns.jsonl` when present. A turn marked
+    `!private` comes back `redacted: true` with **no text and no preview** — the tombstone is honoured
+    in this reader, not only by the writer."""
+    return trace.read_session(get_state_dir(), session_id, limit)
 
 
 # --------------------------------------------------------------------- v5: real OIDC auth (cockpit-spec.md
@@ -527,6 +650,24 @@ def api_archons():
     return archons_mod.list_archons()
 
 
+@app.post("/api/archons/{archon_id}/restart", dependencies=[Depends(require_auth), Depends(require_csrf)])
+def api_archon_restart(archon_id: str):
+    """Per-site archon restart — the Archons panel's confirm-gated Restart button. Validates `archon_id`
+    against the registry FIRST (unknown ids 404 instead of silently queuing a restart nobody will ever
+    apply — the daemon's archon-site supervisor only acts on ids its own discovery actually finds), then
+    enqueues a `restart-site` control that `seneschal/scripts/archon_sites.py` picks up on its next
+    reconcile pass. Mirrors `/api/control/restart`'s CSRF + audit conventions exactly."""
+    if archon_id not in archons_mod.load_registry():
+        raise HTTPException(status_code=404, detail=f"unknown archon {archon_id!r}")
+    state_dir = get_state_dir()
+    reason = "cockpit archon restart button"
+    path, already_queued = control.enqueue_restart_site(state_dir, archon_id, reason=reason)
+    control.append_audit(state_dir, "control.restart_site", {
+        "archon_id": archon_id, "reason": reason, "already_queued": already_queued,
+    })
+    return {"ok": True, "queued": True, "already_queued": already_queued, "path": str(path)}
+
+
 @app.get("/archons/{archon_id}/{path:path}", dependencies=[Depends(require_auth)])
 def archon_proxy(archon_id: str, path: str, request: Request):
     try:
@@ -613,13 +754,23 @@ async def ws_endpoint(websocket: WebSocket):
     chat.send/status.get/control.restart back (see _handle_browser_frame). Gated by the same auth mode
     every REST route uses (v5: a real session cookie in `oidc` mode, the dev stub in `dev` mode) —
     `@app.middleware("http")` does not run for websocket connections (Starlette limitation), so this
-    re-checks explicitly; the uvicorn 127.0.0.1 bind still covers exposure regardless of route type.
-    SameSite=Strict means a cross-site page can't even get this cookie attached to its handshake
-    request, so no separate CSRF check is needed here (see auth.py's module docstring)."""
+    re-checks explicitly. In `oidc` mode SameSite=Strict keeps a cross-site page from getting the
+    session cookie attached to its handshake. In `dev` mode there is no cookie, and the loopback bind
+    does NOT help — a WebSocket handshake is exempt from the Same-Origin Policy, so any page open in
+    the owner's browser could otherwise connect — so `dev` requires an allowlisted `Origin`
+    (`_ALLOWED_DEV_WS_ORIGINS`, or `_dev_ws_origin_same_host` for a reverse-proxied hostname) and
+    closes 4403 otherwise."""
     mode = auth.auth_mode()
     if mode == "unconfigured":
         await websocket.close(code=4401)
         return
+    if mode == "dev":
+        origin = websocket.headers.get("origin")
+        if origin not in _ALLOWED_DEV_WS_ORIGINS and not _dev_ws_origin_same_host(
+            origin, websocket.headers.get("host"), websocket.url.scheme == "wss"
+        ):
+            await websocket.close(code=4403)
+            return
     if mode == "oidc":
         cookie = websocket.cookies.get(session_mod.SESSION_COOKIE_NAME)
         if auth.current_session_from_cookie(cookie) is None:
