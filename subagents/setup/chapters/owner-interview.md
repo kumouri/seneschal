@@ -89,7 +89,8 @@ python seneschal/scripts/setup_state.py mark owner-interview in-progress --step 
    and current beats exhaustive; the template's section headings, one owner. Show it. One
    approval → write (in the turn *after* the approval, so no question ever has a file card
    under it).
-2. Merge `owner.*` (name / nameSpoken / pronouns / email / emails / timezone / dayBoundaryHour) into
+2. Merge `owner.*` (name / nameSpoken / pronouns / email / emails / timezone / dayBoundaryHour, and
+   `nightCurfew` only if the owner asked for a different overnight window than 01:00–07:00) into
    `persona/identity.json` — read-modify-write, preserving `assistant.*` untouched. Create
    the file from `persona/identity.example.json` if it doesn't exist yet.
 3. Never write on a skipped confirmation; a fully-skipped interview marks the chapter

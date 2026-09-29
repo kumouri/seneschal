@@ -5,10 +5,12 @@ One class per instrumented site. `failures.record` is called from inside an alre
 ``except`` branch, so the only way to know a site is wired is to force that branch and read the row
 back. Sites covered here:
 
+  * `sentinel.check_reminders` — a reminder send that comes back not-ok (not a Python raise: the
+    send itself failed, so the row is written beside the `reminder_send_failed` signal)
   * `jobs.cancel_job` — a `save_job` claim write that raises (the cancel itself must still land)
 
-The same shape extends to the other fail-open sites as their modules land (the sentinel's reminder
-send, the daemon's outbox backlog read, the Telegram picker store): add one class per site.
+The same shape extends to the other fail-open sites as their modules land (the daemon's outbox
+backlog read, the Telegram picker store): add one class per site.
 
 No live network, no live store, no live `claude`. Stdlib ``unittest`` only.
 
@@ -20,22 +22,66 @@ import os
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
+import clock  # noqa: E402
 import failures  # noqa: E402
+import identity_common  # noqa: E402
 import jobs  # noqa: E402
+import sentinel as sn  # noqa: E402
 import stateio  # noqa: E402
+import tz_common  # noqa: E402
 
 NOW = datetime(2026, 9, 2, 12, 0, 0, tzinfo=timezone.utc)
 
 
 def _rows(state_dir):
     return list(stateio.iter_jsonl(os.path.join(state_dir, failures.FAILURES_FILENAME)))
+
+
+class SentinelReminderSendFailed(unittest.TestCase):
+    """`sentinel.check_reminders`'s `reminder_send_failed` signal is also a failure row."""
+
+    def setUp(self):
+        # Pin the owner zone + identity so the curfew/staleness gates can't depend on the runner's zone.
+        for p in (mock.patch.object(tz_common, "_zone", return_value=timezone(timedelta(hours=-5))),
+                  mock.patch.object(clock, "load_identity", return_value={}),
+                  mock.patch.object(identity_common, "load_identity", return_value={})):
+            p.start()
+            self.addCleanup(p.stop)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = self.tmp.name
+        self._orig = sn._deliver_reminder
+        sn._deliver_reminder = lambda ch, raw, *a, **k: (
+            {"ok": False, "error": "telegram 500"}, "telegram")
+        self.addCleanup(setattr, sn, "_deliver_reminder", self._orig)
+
+    def _queue(self, rid):
+        sn.save_json(os.path.join(self.dir, "reminders.json"),
+                     [{"id": rid, "text": "Water the plants.",
+                       "due_at": NOW.isoformat().replace("+00:00", "Z")}])
+
+    def test_a_failed_send_writes_a_failure_row(self):
+        self._queue("r1")
+        signals = sn.check_reminders(self.dir, NOW, fire=True, telegram_env="x")
+        self.assertIn("reminder_send_failed", {s.get("kind") for s in signals})
+        rows = _rows(self.dir)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["site"], "sentinel.check_reminders")
+        self.assertEqual(rows[0]["kind"], "reminder_send_failed")
+        self.assertIn("r1", rows[0]["detail"])
+
+    def test_a_successful_send_writes_no_row(self):
+        sn._deliver_reminder = lambda ch, raw, *a, **k: ({"ok": True}, "telegram")
+        self._queue("r2")
+        sn.check_reminders(self.dir, NOW, fire=True, telegram_env="x")
+        self.assertEqual(_rows(self.dir), [])
 
 
 class JobsCancelSaveFailed(unittest.TestCase):

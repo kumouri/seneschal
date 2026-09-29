@@ -3361,8 +3361,6 @@ class AssistantSurfaceNonDemotionTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
 
-    @unittest.skipUnless(hasattr(sentinel, "ASSISTANT_SURFACES"),
-                         "sentinel's non-demotion rule lands with the sentinel port")
     def test_a_build_stamp_does_not_demote_a_desktop_entry(self):
         """The machine-wide hook fires on UserPromptSubmit and Stop — twice a turn — so without this
         it would overwrite the desktop marker within seconds of the chat setting it, every turn."""
