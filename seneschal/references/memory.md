@@ -236,10 +236,11 @@ its **act-low Notion-backend writes don't get lost** *within* the failure window
 turn via MCP, retried until they land. This closes the chat→store ack write-through gap (acks that
 reached `state/acks.json` but never flipped the store row, silently desyncing the system of record).
 
-**Two of the four ops have a producer; two do not.** `outbox_common.OPS` declares four —
-`ack_reminder` · `med_log` · `run_log_finalize` · `reminder_status` — and the store, the idempotency
-keys and the drain handle all four. But only the first two have a dedicated CLI verb (`outbox.py
-ack`, `outbox.py medlog`) and a caller. **`run_log_finalize` and `reminder_status` are reachable only
+**Three of the five ops have a producer; two do not.** `outbox_common.OPS` declares five —
+`ack_reminder` · `med_log` · `run_log_finalize` · `reminder_status` · `task_status` — and the store, the
+idempotency keys and the drain handle all five. `ack_reminder` and `med_log` have a dedicated CLI verb
+(`outbox.py ack`, `outbox.py medlog`) and a caller; `task_status` is enqueued only by `loops.py`'s
+register → Notion Tasks projection. **`run_log_finalize` and `reminder_status` are reachable only
 through the generic `outbox.py enqueue` escape hatch and nothing enqueues them today**, so a run-log
 finalize is still an in-turn MCP write with **no durable journal** — if the turn dies between the
 work and the finalize, the row stays `Partial`. That is the designed phase-2 gap, not a defect; it is

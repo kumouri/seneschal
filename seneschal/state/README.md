@@ -228,8 +228,10 @@ switch to a REST-drainer). Fail-**closed**: an entry retries until Notion confir
 outbox (
     id               TEXT PRIMARY KEY,     -- enqueue-time uuid4; FIFO tiebreak with created_at
     idempotency_key  TEXT NOT NULL UNIQUE, -- dedup: a repeat enqueue is a no-op; ack:<row>:<date>,
-                                           --   medlog:<intent>, runlog-final:<row>, rstatus:<row>:<date>
+                                           --   medlog:<intent>, runlog-final:<row>, rstatus:<row>:<date>,
+                                           --   task_status:<page>:<status>
     op               TEXT NOT NULL,        -- ack_reminder | med_log | run_log_finalize | reminder_status
+                                           --   | task_status
     target_kind      TEXT NOT NULL,        -- 'page' (update a row) | 'db' (create a row in a collection)
     target_id        TEXT NOT NULL,        -- ⏰/Run-Log page id, or the collection id to create in
     payload          TEXT NOT NULL,        -- JSON: the logical fields for this op (not raw API JSON)
@@ -239,15 +241,26 @@ outbox (
     created_at       TEXT NOT NULL,        -- ISO-UTC
     last_attempt_at  TEXT,
     last_error       TEXT,                 -- trimmed message from the most recent failure
-    notion_page_id   TEXT                  -- written back on success (esp. for creates)
+    notion_page_id   TEXT,                 -- written back on success (esp. for creates)
+    resolution       TEXT,                 -- NULL = landed normally | superseded | retracted (no write)
+    revived_from     TEXT,                 -- the pre-revival created_at, kept when a revival resets it
+    dead_letter_kind TEXT                  -- caller_error_suspected | permanent | retries_exhausted |
+                                           --   unclassified (NULL on rows dead-lettered before it existed)
 )
 ```
+
+The last three columns are added by an idempotent, additive migration in `connect()`, so an older
+store upgrades in place without touching any row.
 
 **Lifecycle:** `pending` → (drain claims → `inflight`, attempts++) → `done` on Notion-confirm, or back to
 `pending` with a future `not_before` on a transient failure, or `failed` (dead-letter) after
 `MAX_ATTEMPTS` (8) or a permanent 4xx. A crashed drainer's stale `inflight` claim is reclaimed to
-`pending` after 5 min. Dead-letters persist until a human resolves them; Dream prunes `done` older than
-14 days (`outbox.py prune`). Idempotency: updates (acks/status/finalize) converge to the same target
+`pending` after 5 min. Two write-free resolutions also rest in `done`: `superseded` (a newer ack for the
+same ⏰ row is already the truth — swept by `outbox.py pull`/`resolve`) and `retracted` (cancelled on
+purpose — `outbox.py retract`, reason required). Neither counts as landed. Re-enqueueing a `failed` or
+`retracted` key **revives** it as a fresh intent (`created_at` reset, old value in `revived_from`).
+Dead-letters persist until a human resolves them; Dream prunes `done` older than 14 days
+(`outbox.py prune`). Idempotency: updates (acks/status/finalize) converge to the same target
 state, so replay is safe; creates (med rows) use a per-dose intent key + same-txn `notion_page_id`
 write-back to shrink the crash-after-create window. Inspect with `python ../scripts/outbox.py status`.
 

@@ -8,8 +8,9 @@ observation-gate-spec.md)`
 (`seneschal/store/config.json`'s `active`, or a legacy `scripts/notion-mcp.json`). On the Obsidian or
 Markdown backends there is no separate Tasks database to project into — the register and the store are
 both local files — and every call below is a no-op. It also **requires the outbox's task-status op**
-(`outbox_common.task_status_key` + the `task_status` op); while `outbox_common` lacks it, the forward
-is a no-op and the register write proceeds untouched.
+(`outbox_common.task_status_key` + the `task_status` op), which `outbox_common` ships; the forward
+keeps a defensive check, so an `outbox_common` without it makes the forward a no-op and the register
+write proceeds untouched.
 
 A register status change made through `loops.py` itself — `resolve`, `drop`, `hold`, `start`,
 `observe`, an owner-abandon tap — must reach the Notion Tasks row it points at. A read-back in the
