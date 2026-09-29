@@ -67,11 +67,6 @@ def _slurp(path: str, mode: str = "r", **kwargs):
 
 LOOPS_SOURCE = _slurp(loops.__file__)
 
-#: The `task_status` outbox op (and `task_status_key`) lands in wave 26; until then the projection is
-#: a no-op and every test that asserts an enqueue skips.
-HAS_TASK_STATUS = hasattr(ob, "task_status_key")
-TASK_STATUS_SEAM = "the task_status outbox op lands in wave 26"
-
 HAND_WRITTEN = (
     "# Carry-over — the assistant's running open loops\n"
     "\n"
@@ -434,7 +429,6 @@ class StartMovesALiveRecordToInProgress(Base):
         got = loops.start(self.state, item_id=item["id"])
         self.assertEqual(got["status"], "in_progress")
 
-    @unittest.skipUnless(HAS_TASK_STATUS, TASK_STATUS_SEAM)
     def test_start_forwards_in_progress(self):
         item = self.add()
         self.seed_tasks_pointer(item["id"], "page-1")
@@ -507,7 +501,6 @@ class ObserveRequiresAGate(Base):
                           requires=[{"type": "min_elapsed", "days": 1}])
         self.assertIn("terminal", str(ctx.exception))
 
-    @unittest.skipUnless(HAS_TASK_STATUS, TASK_STATUS_SEAM)
     def test_observe_forwards_observation(self):
         item = self.add()
         self.seed_tasks_pointer(item["id"], "page-1")
@@ -610,7 +603,6 @@ class MarkObservationComplete(Base):
         got = loops.mark_observation_complete(self.state, item_id=item["id"])
         self.assertEqual(got["last_touched"], got["gate"]["met_at"])
 
-    @unittest.skipUnless(HAS_TASK_STATUS, TASK_STATUS_SEAM)
     def test_forwards_observation_complete(self):
         item = self._observed()
         self.seed_tasks_pointer(item["id"], "page-1")
@@ -1812,7 +1804,6 @@ class TheProjectionIsGated(Base):
             self.assertIsNone(loops.store_backend())
 
 
-@unittest.skipUnless(HAS_TASK_STATUS, TASK_STATUS_SEAM)
 class ForwardTaskStatus(Base):
     """`forward_task_status` — the enqueue, and everything that makes it a safe no-op."""
 
@@ -1886,28 +1877,24 @@ class VerbsForwardOnStatusChange(Base):
     """`resolve`/`drop`/`hold`/`owner_abandon` — each calls `forward_task_status` on success, and
     each accepts `forward=False` for an importer relaying a status Notion already carries."""
 
-    @unittest.skipUnless(HAS_TASK_STATUS, TASK_STATUS_SEAM)
     def test_resolve_forwards_done(self):
         item = self.add()
         self.seed_tasks_pointer(item["id"], "page-1")
         loops.resolve(self.state, item_id=item["id"], because="shipped")
         self.assertIsNotNone(self.outbox_entry("page-1", "Done"))
 
-    @unittest.skipUnless(HAS_TASK_STATUS, TASK_STATUS_SEAM)
     def test_drop_forwards_archived(self):
         item = self.add()
         self.seed_tasks_pointer(item["id"], "page-1")
         loops.drop(self.state, item_id=item["id"], because="no longer relevant")
         self.assertIsNotNone(self.outbox_entry("page-1", "Archived"))
 
-    @unittest.skipUnless(HAS_TASK_STATUS, TASK_STATUS_SEAM)
     def test_hold_forwards_paused(self):
         item = self.add()
         self.seed_tasks_pointer(item["id"], "page-1")
         loops.hold(self.state, item_id=item["id"])
         self.assertIsNotNone(self.outbox_entry("page-1", "Paused"))
 
-    @unittest.skipUnless(HAS_TASK_STATUS, TASK_STATUS_SEAM)
     def test_owner_abandon_forwards_archived(self):
         item = self.add()
         self.seed_tasks_pointer(item["id"], "page-1")
@@ -1928,7 +1915,6 @@ class VerbsForwardOnStatusChange(Base):
         self.assertEqual(got["status"], "done")
 
 
-@unittest.skipUnless(HAS_TASK_STATUS, TASK_STATUS_SEAM)
 class ProjectTaskStatus(Base):
     """`project_task_status` / CLI `project-status` — the read-only backlog report."""
 

@@ -52,11 +52,6 @@ RID = "00000000-0000-0000-0000-00000000a1b2"
 #: test that calls it directly is skipped rather than removed, so it activates the moment it exists.
 HAS_PREDICATE = hasattr(ra, "reaction_ack_fully_landed") and hasattr(ra, "reminder_acked_today")
 NEEDS_PREDICATE = unittest.skipUnless(HAS_PREDICATE, "wave-24 reminders_acks predicate")
-#: A LANDED verdict also needs the outbox's record of what it actually wrote
-#: (`outbox_common.latest_landed_ack`, Notion backend only), which arrives with the outbox port.
-#: Without it the store arm has no opinion and every verdict relays — the fail-open direction.
-NEEDS_LANDED_READER = unittest.skipUnless(hasattr(ob, "latest_landed_ack"),
-                                          "outbox_common.latest_landed_ack (outbox port)")
 
 
 def _midday() -> datetime:
@@ -123,7 +118,6 @@ class TheLedgerArmMayNeverDecideIt(OutboxFixture):
         self.assertFalse(ts.verdict(self.dir, RID, NOW)["suppress"])
 
     @NEEDS_PREDICATE
-    @NEEDS_LANDED_READER
     def test_a_landed_outbox_ack_does(self):
         self.seed_ack(landed=True)
         verdict = ra.reaction_ack_fully_landed(self.dir, RID, NOW)
@@ -142,7 +136,6 @@ class AFailedOrPendingWriteAlwaysSpeaks(OutboxFixture):
         self.assertFalse(ra.reaction_ack_fully_landed(self.dir, RID, NOW)["landed"])
 
     @NEEDS_PREDICATE
-    @unittest.skipUnless(hasattr(ob, "mark_superseded"), "wave-24 outbox_common.mark_superseded")
     def test_a_superseded_ack_relays(self):
         """A `superseded` row never reached Notion at all. `latest_landed_ack` already excludes it;
         this asserts the exclusion survives into the suppression path, where treating it as landed

@@ -75,7 +75,9 @@ This is the assistant's primary interactive surface — an ongoing conversation,
    owner-local>` first (idempotent), then the direct write, then `mark --done` on success (leave it on
    failure — the drain retries). Opportunistically drain any backlog at a natural point in a turn:
    `outbox.py pull --json` → replay each entry via the matching store write, **on `target_id` directly,
-   never a search/query** → `mark --id <id> --done` (or `--retry`/`--dead-letter`). **A queue still
+   never a search/query** → `mark --id <id> --done` (or `--retry`, or `--dead-letter --status-code
+   <http status>`). A write that must *not* happen is `outbox.py retract --id <id> --reason …`, never
+   a dead-letter. **A queue still
    `pending` seconds later is the design working, not a failed drain** — the daemon's own backstop gives a
    live session first refusal before draining anyway; inside that window the fix is still to finish the
    write yourself, never to wait on the backstop. Full mechanism: `docs/notion-write-behind-outbox-spec.md`

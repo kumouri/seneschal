@@ -5,7 +5,8 @@ recompute ``state/presence-context.json``.
 This is the desktop end of the presence feed's transport — a sibling of ``health_import.import_ndjson``.
 It lands events in one shape whatever their source and refreshes the derived context snapshot, so the
 daemon's next loop sees the new level-state. **Idempotent:** each event carries a stable id (an explicit
-``uuid``, else one derived from ``kind:label:transition:ts_ms``), so re-POSTing a batch never duplicates.
+``uuid``, else one derived from ``source:kind:label:transition:ts_ms``), so re-POSTing a batch never
+duplicates.
 
 Wire format — one JSON object per line, ``t`` = type. Unknown ``t`` is skipped, not fatal, so the format
 can grow without breaking older importers:
@@ -14,6 +15,10 @@ can grow without breaking older importers:
   {"t":"activity","activity":"in_vehicle"|"still"|"walking"|"running"|"on_bicycle"|"unknown",
                   "transition":"enter"|"exit","ts_ms":..,"offset_min":-300,"confidence":opt,"uuid":opt}
   {"t":"sleep","state":"asleep"|"awake","ts_ms":..,"offset_min":-300,"confidence":opt,"uuid":opt}
+
+Every event may also carry ``"source":"phone"|"watch"`` (default ``phone``) — which device observed it.
+It is recorded per row and surfaced as ``activity_source``/``sleep_source`` in the context snapshot;
+it is provenance only (the rollup still takes the newest reading). Unknown values degrade to ``phone``.
 
 Coordinates never appear here: the phone resolves geofences on-device and sends only the place name.
 Stdlib only.
@@ -27,28 +32,39 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from presence_common import (  # noqa: E402
-    DEFAULT_DB, DEFAULT_STATE_DIR, connect, epoch_ms_to_utc, iso, now_iso,
+    DEFAULT_DB, DEFAULT_STATE_DIR, SOURCE_PHONE, SOURCES, connect, epoch_ms_to_utc, iso, now_iso,
     prune_events, read_context, recompute_context, write_context,
 )
 
 _TRANSITIONS = {"enter", "exit"}
 
 
-def _event_id(rec: dict, kind: str, label: str, transition: str, ts_ms: int) -> str:
+def _source(rec: dict) -> str:
+    """Which device observed this event. Unknown values fall back to ``phone`` rather than being
+    rejected — a device naming itself something new must not cost the event."""
+    src = str(rec.get("source", SOURCE_PHONE)).strip().lower()
+    return src if src in SOURCES else SOURCE_PHONE
+
+
+def _event_id(rec: dict, kind: str, label: str, transition: str, ts_ms: int, source: str) -> str:
+    """Stable id. ``source`` is part of the derived key so two devices reporting the SAME transition at
+    the SAME millisecond stay two rows — collapsing them would silently drop whichever arrived second,
+    and which one that is depends on network timing."""
     uuid = rec.get("uuid")
-    return str(uuid) if uuid else f"{kind}:{label}:{transition}:{ts_ms}"
+    return str(uuid) if uuid else f"{source}:{kind}:{label}:{transition}:{ts_ms}"
 
 
 def _insert(conn, rec, kind, label, transition, ts_ms, off, confidence) -> int:
     ts_ms = int(ts_ms)
     utc = epoch_ms_to_utc(ts_ms)
-    eid = _event_id(rec, kind, label, transition, ts_ms)
+    source = _source(rec)
+    eid = _event_id(rec, kind, label, transition, ts_ms, source)
     conn.execute(
         "INSERT OR REPLACE INTO events "
-        "(event_id, kind, label, transition, ts_utc, ts_ms, tz_offset_min, confidence, ingested_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?)",
+        "(event_id, kind, label, transition, ts_utc, ts_ms, tz_offset_min, confidence, ingested_at, "
+        "source) VALUES (?,?,?,?,?,?,?,?,?,?)",
         (eid, kind, label, transition, iso(utc), ts_ms, int(off),
-         None if confidence is None else int(confidence), now_iso()))
+         None if confidence is None else int(confidence), now_iso(), source))
     return 1
 
 

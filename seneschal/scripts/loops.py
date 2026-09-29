@@ -130,8 +130,8 @@ write uses. `TASK_STATUS_FORWARD_MAP` is the mapping; `open` is deliberately abs
 backend must be `notion` (`store_backend()` — `seneschal/store/config.json`'s `active`, or a legacy
 `scripts/notion-mcp.json` meaning notion; never raises), since filesystem backends have no Tasks
 database and no outbox; and (b) `outbox_common` must provide the `task_status` op
-(`task_status_key`) — until it does, forwarding enqueues nothing and `project-status` reports empty
-buckets. A row resolves to a Tasks page only through `state/owi-migration-map.json`
+(`task_status_key`, shipped; the check is defensive) — without it, forwarding enqueues nothing and
+`project-status` reports empty buckets. A row resolves to a Tasks page only through `state/owi-migration-map.json`
 (`tasks:<page-id>` -> `{"loop_id": …}`), which an importer writes; the `renders_elsewhere` URL itself
 is never parsed. On an install with no such map the projection is inert.
 
@@ -1033,7 +1033,7 @@ def cadence_verdict(item: dict, now: datetime | None = None) -> dict:
 # `../docs/register-notion-projection-spec.md`. A status change on a record that resolves to a Notion
 # Tasks row is forwarded to that row's `Status` through the durable outbox (`outbox_common.py`), with
 # NO approval prompt — an act-low projection of a decision already made through the register, not a
-# new outbound ask. NOTION BACKEND ONLY, and inert until `outbox_common` provides the `task_status` op
+# new outbound ask. NOTION BACKEND ONLY, and inert if `outbox_common` lacks the `task_status` op
 # (see the module docstring and `_projection_gate()`).
 
 #: The correlation map an importer writes — the ONLY place a register item id is tied to the Notion

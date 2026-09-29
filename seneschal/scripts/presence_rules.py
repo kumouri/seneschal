@@ -16,7 +16,10 @@ owner from an idle phone — an owner can leave theirs sitting for hours while w
 "asleep" at confidence 73–92 through a Monday afternoon, holding their daytime nudges. The context snapshot
 still *carries* ``asleep`` (the phone keeps sending sleep events; informational only) but this gate no
 longer reads it. Bring the rule back only with a wearable-grade signal — heart rate + wrist motion from a
-watch can distinguish "the owner is asleep" from "their phone is bored"; the phone alone cannot.
+watch can distinguish "the owner is asleep" from "their phone is bored"; the phone alone cannot. Events
+may now name their observing device (``source``, surfaced as ``sleep_source`` in the snapshot), which is
+the provenance such a rule would need — **but this gate still does not read it**; re-enabling the asleep
+rule off a wearable signal is an unbuilt reminder-behaviour change, for the owner to decide.
 
 **This module is pure** — no I/O. The daemon (``sentinel.check_reminders``) reads
 ``presence-context.json`` (``presence_common.read_context``), only trusts it when *fresh*

@@ -25,6 +25,18 @@ free; a transient failure backs off, a permanent one or an exhausted retry budge
 wedges the queue). Unlike the ack *ledger* (which is fail-**open** — a broken ledger fires the nudge), the
 outbox is fail-**closed**: an entry keeps retrying until Notion confirms.
 
+**Three terminal resolutions, not one.** Besides the ordinary landed write, a ``done`` row may carry
+``resolution = superseded`` (a newer ack for the same ⏰ row is already the truth — machine-decided,
+:func:`resolve_superseded`) or ``resolution = retracted`` (the intent was cancelled on purpose before it
+flushed — :func:`mark_retracted`). Neither ever reached Notion, so :func:`latest_landed_ack` — the
+"what has actually been written?" reader the reaction-relay predicate and the supersession guard both
+use — counts only ``resolution IS NULL`` rows.
+
+**A dead-letter is not one bucket.** ``dead_letter_kind`` splits ``DEAD_LETTER_CALLER_SUSPECT`` (a 4xx
+shaped like a caller bug — wrong id, wrong parent type) from ``DEAD_LETTER_PERMANENT`` /
+``DEAD_LETTER_RETRY_EXHAUSTED`` / ``DEAD_LETTER_UNCLASSIFIED`` — see :func:`mark_failed` /
+:func:`classify_dead_letter`. All of them stop retrying; only the framing the owner sees differs.
+
 Stdlib only (``sqlite3``). WAL mode + a busy timeout let the three accessors — the enqueuing LLM turn, the
 drain loop, the status CLI — share the file without the hand-rolled lock ``acks.json`` needs.
 
@@ -50,9 +62,45 @@ DONE = "done"            # Notion confirmed; pruned after a retention window
 FAILED = "failed"        # dead-letter — retries exhausted or a permanent error; surfaced, never auto-dropped
 STATUSES = (PENDING, INFLIGHT, DONE, FAILED)
 
+MED_LOG = "med_log"
+
+# The register → Notion Tasks projection (`loops.py`'s `forward_task_status`) — an update on an
+# existing Tasks row's own page id, never a create. Enqueued only by that forwarder, one entry per
+# `(page, target Status)` via :func:`task_status_key`.
+TASK_STATUS = "task_status"
+
 # --- the closed set of write intents this outbox carries (§4 of the spec) ---
-OPS = ("ack_reminder", "med_log", "run_log_finalize", "reminder_status")
+OPS = ("ack_reminder", MED_LOG, "run_log_finalize", "reminder_status", TASK_STATUS)
 TARGET_KINDS = ("page", "db")  # 'page' = update an existing row; 'db' = create a row in a collection
+# A 'db' target_id is a Notion DATA SOURCE id (a `collection://…` URL), never a database_id. The MCP
+# `notion-create-pages` tool's parent union has three shapes (`page_id`/`database_id`/
+# `data_source_id`); passing a data-source id as `database_id` 404s every time — it names the wrong
+# object type, not a missing target. The drain prompt must say so explicitly rather than leave the
+# flushing turn to infer the parent shape from `target_kind`'s name alone.
+
+# The ops whose payload carries a DATED ⏰ row state (`last_acknowledged`). These are the only ones that
+# can go *stale in a harmful direction*: replaying yesterday's ack over today's would move
+# `Last Acknowledged` BACKWARDS, and that field is what the re-fire and interval logic read. See
+# `superseding_date` and §6.1 of the spec.
+DATED_ACK_OPS = ("ack_reminder", "reminder_status")
+
+# `resolution` values. NULL = the ordinary path (a drainer wrote it to Notion). The others resolve an
+# entry WITHOUT a write:
+#   SUPERSEDED — a newer ack for the same row is already the truth (machine-decided; `resolve_superseded`).
+#   RETRACTED  — the intent was CANCELLED before it ever flushed, on purpose (operator-decided).
+#
+# RETRACTED exists because the outbox had no verb for "correctly cancelled". A write that must not
+# happen could only be parked in `done` (claiming a Notion write that never occurred) or in `failed`
+# (which means *permanent failure, come look* and nudges the owner once a day, forever). Both are lies,
+# and the second is worse: a daily false alarm is how a real dead-letter gets ignored. The motivating
+# shape: a report about one meal auto-acks the reminder for a different one; the ack is caught before
+# it reaches Notion, and the only honest resting place available was a dead-letter.
+RETRACTED = "retracted"
+SUPERSEDED = "superseded"
+# Resolutions that mean "this never reached Notion". Anything that reads the store for what has LANDED
+# must exclude these — see `latest_landed_ack`, which asks for `resolution IS NULL` rather than naming
+# them, so a future no-write resolution is excluded by default instead of by remembering to add it.
+NO_WRITE_RESOLUTIONS = (SUPERSEDED, RETRACTED)
 
 # --- retry policy (§6 of the spec; overridable per call for tests) ---
 MAX_ATTEMPTS = 8            # attempts before dead-letter (~a few hours of backoff)
@@ -60,6 +108,36 @@ BACKOFF_BASE_SEC = 5.0      # first-failure base delay
 BACKOFF_CAP_SEC = 3600.0    # never wait more than an hour between tries
 STALE_INFLIGHT_SEC = 300.0  # a claim older than this is assumed dead → reclaimed to PENDING
 ERROR_MAX_CHARS = 500       # last_error is trimmed to keep the row small
+
+# --- dead-letter classification ---
+# A 4xx is not on its own evidence that the TARGET is permanently unwritable — it is equally, and in
+# this closed set of writes more commonly, evidence that the CALLER sent the wrong id/shape (the
+# data-source-id-as-database_id parent above 404s every time, forever, regardless of the target). Both
+# used to collapse into one undifferentiated `failed` row, so a batch of dead-lettered creates caused
+# by a caller bug read exactly like an unfixable Notion-side condition and got no more attention than
+# one. The flush is done by a headless LLM turn forbidden from querying Notion to check (a query is the
+# one thing that gets rate-limited), so it cannot conclusively tell the two apart either; the fix is to
+# stop assuming "4xx with no status code" means permanent, and instead default the ambiguous,
+# common-caller-bug codes to a distinct, more visible resting state (`DEAD_LETTER_CALLER_SUSPECT`)
+# rather than silently pooling them with genuinely permanent failures (`DEAD_LETTER_PERMANENT`) or an
+# exhausted retry budget (`DEAD_LETTER_RETRY_EXHAUSTED`). All of them still stop retrying — dead-letter
+# still means dead-letter.
+CALLER_SUSPECT_STATUS_CODES = frozenset({400, 404})  # bad shape / wrong id — a caller bug, not Notion's
+DEAD_LETTER_CALLER_SUSPECT = "caller_error_suspected"
+DEAD_LETTER_PERMANENT = "permanent"
+DEAD_LETTER_RETRY_EXHAUSTED = "retries_exhausted"
+DEAD_LETTER_UNCLASSIFIED = "unclassified"  # dead-lettered with no status code at all — never assumed permanent
+
+
+def classify_dead_letter(status_code: int | None) -> str:
+    """A 4xx status code → which dead-letter bucket it belongs in. No code at all (a caller that never
+    parsed one out of the error text) is ``UNCLASSIFIED``, never quietly promoted to ``PERMANENT`` —
+    that promotion is exactly the bug this classification exists to stop."""
+    if status_code in CALLER_SUSPECT_STATUS_CODES:
+        return DEAD_LETTER_CALLER_SUSPECT
+    if status_code is not None:
+        return DEAD_LETTER_PERMANENT
+    return DEAD_LETTER_UNCLASSIFIED
 
 
 # --------------------------------------------------------------------------- time helpers
@@ -127,6 +205,14 @@ def new_intent() -> str:
     return uuid.uuid4().hex
 
 
+def task_status_key(page_id: str, status: str) -> str:
+    """Idempotency key for a Tasks-row ``Status`` forward (``loops.py forward_task_status``) — one key
+    per ``(page, target status)``: a repeat forward of the SAME status for the SAME page is a no-op, and
+    a LATER, DIFFERENT status (a row that moves ``held`` → ``done``) mints its own key and enqueues
+    fresh, replaying in order behind the first."""
+    return f"task_status:{_norm(page_id)}:{status}"
+
+
 # --------------------------------------------------------------------------- store
 def db_path(state_dir: str) -> str:
     return os.path.join(state_dir, DB_FILE)
@@ -137,6 +223,17 @@ def connect(state_dir: str = DEFAULT_STATE_DIR) -> sqlite3.Connection:
     accessors coexist without a lockfile. Safe to call repeatedly."""
     os.makedirs(state_dir, exist_ok=True)
     conn = sqlite3.connect(db_path(state_dir), timeout=5.0)
+    try:
+        return _prepare(conn)
+    except Exception:
+        # A corrupt/unreadable file raises out of the first PRAGMA — and the handle it raised past is
+        # still open. That used to leak one connection per call, which is invisible until something
+        # opens the store on a cadence; the daemon's tick now does, once a minute, forever.
+        conn.close()
+        raise
+
+
+def _prepare(conn: sqlite3.Connection) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
@@ -160,8 +257,47 @@ def connect(state_dir: str = DEFAULT_STATE_DIR) -> sqlite3.Connection:
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS outbox_ready ON outbox(status, not_before)")
+    _migrate_resolution(conn)
+    _migrate_revived_from(conn)
+    _migrate_dead_letter_kind(conn)
     conn.commit()
     return conn
+
+
+def _migrate_resolution(conn: sqlite3.Connection) -> None:
+    """Add the ``resolution`` column to an outbox created before supersession existed.
+
+    Idempotent and additive: an existing row reads NULL, which means "the ordinary path", so nothing
+    about an already-populated store changes. It exists so a ``done`` entry can say *how* it became
+    done — landed in Notion, or resolved without a write because a newer ack superseded it. A drain
+    that silently marks work done with no trace is the failure mode this whole file is about."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(outbox)")}
+    if "resolution" not in cols:
+        conn.execute("ALTER TABLE outbox ADD COLUMN resolution TEXT")
+
+
+def _migrate_revived_from(conn: sqlite3.Connection) -> None:
+    """Add the ``revived_from`` column to a store created before revival reset ``created_at``.
+
+    Idempotent and additive, same shape as :func:`_migrate_resolution`. It holds the *previous*
+    ``created_at`` the one time an entry is revived (see :func:`enqueue`), so the fact that a row
+    is older than its current ``created_at`` suggests isn't lost even though the backlog-age math
+    must measure from the revival, not the original create."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(outbox)")}
+    if "revived_from" not in cols:
+        conn.execute("ALTER TABLE outbox ADD COLUMN revived_from TEXT")
+
+
+def _migrate_dead_letter_kind(conn: sqlite3.Connection) -> None:
+    """Add the ``dead_letter_kind`` column to a store created before the caller-bug-vs-permanent
+    distinction existed.
+
+    Idempotent and additive, same shape as :func:`_migrate_resolution`. An already-dead-lettered row
+    reads NULL here — it was classified under the old undifferentiated rule and there is no error
+    text left to re-derive a status code from, so it is left alone rather than guessed at."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(outbox)")}
+    if "dead_letter_kind" not in cols:
+        conn.execute("ALTER TABLE outbox ADD COLUMN dead_letter_kind TEXT")
 
 
 def _row_to_dict(row: sqlite3.Row) -> dict:
@@ -190,10 +326,24 @@ def enqueue(conn: sqlite3.Connection, op: str, target_kind: str, target_id: str,
 
     Idempotent by ``idempotency_key``:
       * key absent           → insert a fresh PENDING entry (``created: True``).
-      * key present, live     → no-op; return the existing entry (``created: False``).
-      * key present, DONE     → no-op; return it (already landed — nothing to do).
-      * key present, FAILED   → **revive** it (reset to PENDING, attempts 0, clear backoff/error) so a
-                                fresh intent re-arms a dead-letter (``revived: True``).
+      * key present, live       → no-op; return the existing entry (``created: False``).
+      * key present, DONE       → no-op; return it (already landed — nothing to do).
+      * key present, FAILED     → **revive** it (reset to PENDING, attempts 0, clear backoff/error) so a
+                                  fresh intent re-arms a dead-letter (``revived: True``).
+      * key present, RETRACTED  → **revive** it too, for the same reason and one more. A retraction
+                                  cancels *that* intent, not the key forever, and the keys here are
+                                  day-scoped (``ack:<row>:<date>``): retracting an ack wrongly raised in
+                                  the morning must not swallow the real one that afternoon. Leaving it
+                                  inert would turn a correct cancellation into a silently lost write —
+                                  the exact failure this whole file exists to prevent.
+
+    **A revival also resets ``created_at`` to ``now`` (the old value is kept in ``revived_from``).**
+    A revived entry is a *new* intent — the RETRACTED bullet above says so directly — and the backlog-
+    age math (``stats``'s ``oldest_pending_age_sec``, which ``presence.py``'s outbox-backlog nudge
+    reads against its ~3 h threshold) reads ``created_at``. Leaving the original timestamp in place
+    makes a seconds-old revived ack measure as hours old and fire a false backlog nudge: the
+    retraction correctly zeroed the intent, but its ``created_at`` survived the revival and was still
+    what ``stats`` measured age from.
 
     Raises ``ValueError`` on an unknown ``op``/``target_kind`` — a typo must fail loudly, not queue junk.
     """
@@ -207,14 +357,15 @@ def enqueue(conn: sqlite3.Connection, op: str, target_kind: str, target_id: str,
     payload_json = json.dumps(payload, sort_keys=True, ensure_ascii=False)
 
     existing = conn.execute(
-        "SELECT id, status FROM outbox WHERE idempotency_key=?", (idempotency_key,)
+        "SELECT id, status, resolution, created_at FROM outbox WHERE idempotency_key=?",
+        (idempotency_key,),
     ).fetchone()
     if existing is not None:
-        if existing["status"] == FAILED:
+        if existing["status"] == FAILED or existing["resolution"] == RETRACTED:
             conn.execute(
                 "UPDATE outbox SET status=?, attempts=0, not_before=NULL, last_error=NULL, "
-                "payload=? WHERE id=?",
-                (PENDING, payload_json, existing["id"]),
+                "resolution=NULL, payload=?, created_at=?, revived_from=? WHERE id=?",
+                (PENDING, payload_json, iso(now), existing["created_at"], existing["id"]),
             )
             conn.commit()
             return {"ok": True, "id": existing["id"], "created": False, "revived": True,
@@ -317,7 +468,8 @@ def mark_retry(conn: sqlite3.Connection, entry_id: str, error, now: datetime | N
     if row is None:
         return None
     if row["attempts"] >= max_attempts:
-        return mark_failed(conn, entry_id, f"retry budget exhausted ({max_attempts}); last: {error}", now)
+        return mark_failed(conn, entry_id, f"retry budget exhausted ({max_attempts}); last: {error}", now,
+                           kind=DEAD_LETTER_RETRY_EXHAUSTED)
     delay = next_backoff(row["attempts"], base, cap, retry_after, rand)
     nb = iso(now + timedelta(seconds=delay))
     conn.execute(
@@ -328,25 +480,181 @@ def mark_retry(conn: sqlite3.Connection, entry_id: str, error, now: datetime | N
     return get(conn, entry_id)
 
 
-def mark_failed(conn: sqlite3.Connection, entry_id: str, error, now: datetime | None = None) -> dict | None:
-    """Dead-letter an entry (a **permanent** error, or retries exhausted). It stops retrying, stays in the
-    table, and is surfaced (§7) — never silently dropped."""
+def mark_failed(conn: sqlite3.Connection, entry_id: str, error, now: datetime | None = None,
+                 status_code: int | None = None, kind: str | None = None) -> dict | None:
+    """Dead-letter an entry. It stops retrying, stays in the table, and is surfaced (§7) — never
+    silently dropped.
+
+    A bare "this failed permanently" used to be the only shape available, so a caller-side bug
+    (wrong id, wrong parent shape — see ``TARGET_KINDS``' note) read identically to
+    a genuinely unwritable target once dead-lettered, and the daily nudge gave both the same "come
+    look, Notion won't take this" framing. ``kind`` names the bucket explicitly (an exhausted retry
+    budget passes :data:`DEAD_LETTER_RETRY_EXHAUSTED`); absent that, ``status_code`` — the HTTP status
+    the failed write actually returned, when the caller has one — is classified via
+    :func:`classify_dead_letter`. Neither is required: an old-style call with just ``error`` still
+    dead-letters exactly as before, only now tagged :data:`DEAD_LETTER_UNCLASSIFIED` instead of being
+    assumed permanent."""
     now = now or _utcnow()
+    dead_letter_kind = kind or classify_dead_letter(status_code)
     cur = conn.execute(
-        "UPDATE outbox SET status=?, last_error=?, last_attempt_at=? WHERE id=?",
-        (FAILED, _trim(error), iso(now), entry_id),
+        "UPDATE outbox SET status=?, last_error=?, last_attempt_at=?, dead_letter_kind=? WHERE id=?",
+        (FAILED, _trim(error), iso(now), dead_letter_kind, entry_id),
     )
     conn.commit()
     return get(conn, entry_id) if cur.rowcount else None
 
 
+# --------------------------------------------------------------------------- supersession
+def entry_ack_date(entry: dict) -> str | None:
+    """The local ``YYYY-MM-DD`` a dated-ack entry would stamp on its ⏰ row, or ``None`` if this entry
+    isn't one (wrong op, missing/!str payload field). Total — never raises on a malformed row."""
+    if not isinstance(entry, dict) or entry.get("op") not in DATED_ACK_OPS:
+        return None
+    payload = entry.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    date = payload.get("last_acknowledged")
+    return date if isinstance(date, str) and date else None
+
+
+def latest_landed_ack(conn: sqlite3.Connection, target_id: str) -> str | None:
+    """The newest ``last_acknowledged`` this store has already **landed** in Notion for one ⏰ row.
+
+    Only ``done`` rows count, and only ones that actually **wrote**: a ``pending`` newer sibling proves
+    nothing has landed yet (and needs no special handling anyway — FIFO drains the older one first and
+    the newer one right after, converging on the correct date), and a ``superseded`` or ``retracted``
+    row never reached Notion at all, so treating its date as landed would be the same lie in miniature.
+    The filter is ``resolution IS NULL`` — the whitelist, not a blacklist of the no-write resolutions,
+    so adding another one can never accidentally start counting as landed. The table is small
+    (``prune`` keeps 14 days), so this filters in Python rather than teaching sqlite the
+    id-normalization rule that lives in ``_norm``."""
+    want = _norm(target_id)
+    if not want:
+        return None
+    best = None
+    for r in conn.execute("SELECT * FROM outbox WHERE status=? AND resolution IS NULL", (DONE,)):
+        row = _row_to_dict(r)
+        if _norm(row.get("target_id")) != want:
+            continue
+        date = entry_ack_date(row)
+        if date and (best is None or date > best):
+            best = date
+    return best
+
+
+def superseding_date(conn: sqlite3.Connection, entry: dict, ledger: dict | None = None) -> str | None:
+    """The strictly-newer ack date that makes ``entry`` stale, or ``None`` to replay it normally.
+
+    **This is the ordering guard, and it is not hypothetical.** An outbox that stops draining for a
+    day accumulates un-landed ``ack_reminder`` entries dated yesterday while the ⏰ rows themselves have
+    since been acked *by hand in chat* for today. A naive replay writes yesterday's ``Last
+    Acknowledged`` over today's — and that field is exactly what the re-fire and interval logic read,
+    so the "repair" re-arms reminders the owner has already answered.
+
+    Two sources of "what is already true", both local and both cheap:
+      * the durable ack ledger ``state/acks.json`` (``reminders_acks.load_acks`` — normalized id → the
+        row's most recent ack date), which the chat *and* reaction ack paths both stamp; and
+      * this store's own landed (``done``) entries for the same row.
+
+    Neither source knowing anything means **replay** — the same behaviour as before this existed. A
+    missing ledger must never *block* a flush; it only ever vetoes one it can prove is backwards."""
+    mine = entry_ack_date(entry)
+    if not mine:
+        return None  # not a dated ack — nothing to be stale against
+    candidates = [latest_landed_ack(conn, entry.get("target_id") or "")]
+    if isinstance(ledger, dict):
+        seen = ledger.get(_norm(entry.get("target_id") or ""))
+        candidates.append(seen if isinstance(seen, str) else None)
+    newer = [c for c in candidates if c and c > mine]
+    return max(newer) if newer else None
+
+
+def mark_superseded(conn: sqlite3.Connection, entry_id: str, newer_date: str,
+                    now: datetime | None = None) -> dict | None:
+    """Resolve an entry **without writing to Notion** because a newer ack already is the truth.
+
+    It lands in ``done`` (the queue must not wedge on it) but carries ``resolution='superseded'`` and a
+    ``last_error`` naming the date that beat it, so "why did this never reach Notion?" has an answer in
+    the row itself rather than in someone's memory of a drain."""
+    now = now or _utcnow()
+    cur = conn.execute(
+        "UPDATE outbox SET status=?, resolution=?, last_error=?, last_attempt_at=? WHERE id=?",
+        (DONE, SUPERSEDED, _trim(f"superseded by a newer ack ({newer_date})"), iso(now), entry_id),
+    )
+    conn.commit()
+    return get(conn, entry_id) if cur.rowcount else None
+
+
+def mark_retracted(conn: sqlite3.Connection, entry_id: str, reason: str,
+                   now: datetime | None = None) -> dict | None:
+    """Cancel a queued intent **deliberately**, without writing to Notion. The third terminal state.
+
+    Like :func:`mark_superseded` it rests in ``done`` (the queue must not wedge) carrying
+    ``resolution='retracted'`` and the ``reason`` in ``last_error``, so the row itself answers "why did
+    this never reach Notion?". Unlike it, the decision came from a person, not from a newer ack.
+
+    ``reason`` is **required and must be non-empty** — a retraction with no stated reason is
+    indistinguishable from a write that was quietly dropped, and the whole value of this state is that
+    it is the *honest* resting place. Raises ``ValueError`` rather than accepting a blank.
+
+    Refuses a row that has already **landed** (``done`` with no resolution): that write is in Notion and
+    calling it retracted here would make this store disagree with the system of record. Returns ``None``
+    for an unknown id, and is idempotent on an already-retracted row (the reason is refreshed).
+    """
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("a retraction requires a non-empty reason")
+    now = now or _utcnow()
+    row = conn.execute("SELECT status, resolution FROM outbox WHERE id=?", (entry_id,)).fetchone()
+    if row is None:
+        return None
+    if row["status"] == DONE and row["resolution"] is None:
+        raise ValueError(f"entry {entry_id!r} already landed in Notion; it cannot be retracted")
+    conn.execute(
+        "UPDATE outbox SET status=?, resolution=?, not_before=NULL, last_error=?, last_attempt_at=? "
+        "WHERE id=?",
+        (DONE, RETRACTED, _trim(f"retracted: {reason.strip()}"), iso(now), entry_id),
+    )
+    conn.commit()
+    return get(conn, entry_id)
+
+
+def resolve_superseded(conn: sqlite3.Connection, ledger: dict | None = None,
+                       now: datetime | None = None) -> list[dict]:
+    """Sweep every ``pending`` entry a newer ack has overtaken and resolve it write-free. Returns the
+    resolved entries (oldest first), so a caller can log what it retired.
+
+    Deliberately ``pending``-only: an ``inflight`` entry is claimed by a drainer that may be mid-write,
+    and stealing it would race the very write we're trying to reason about. It comes back to ``pending``
+    on the stale-claim reclaim if that drainer died, and this sweep catches it on the next pass.
+
+    Pure-local — no network, no Notion, no spawn — so it is safe to run on every daemon tick that finds
+    a backlog, and it is the cheap half of the drain: in the stuck-queue case above it is the half that
+    retires the stale entries entirely on its own."""
+    resolved = []
+    rows = [_row_to_dict(r) for r in
+            conn.execute("SELECT * FROM outbox WHERE status=? ORDER BY created_at, id", (PENDING,))]
+    for row in rows:
+        newer = superseding_date(conn, row, ledger)
+        if newer:
+            done = mark_superseded(conn, row["id"], newer, now)
+            if done is not None:
+                resolved.append(done)
+    return resolved
+
+
 def stats(conn: sqlite3.Connection, now: datetime | None = None) -> dict:
     """Observability snapshot (§7): counts by status, the age of the oldest un-landed entry, and the full
-    dead-letter list. The one call behind ``outbox.py status``."""
+    dead-letter list. The one call behind ``outbox.py status``.
+
+    ``retracted`` is reported separately but is a **subset of ``done``**, not a fifth status — it is a
+    resolution. It is here so the status line can say a cancellation happened without inflating the
+    landed-write count, and so nothing has to infer it from a ``last_error`` string."""
     now = now or _utcnow()
     counts = {s: 0 for s in STATUSES}
     for r in conn.execute("SELECT status, COUNT(*) AS c FROM outbox GROUP BY status"):
         counts[r["status"]] = r["c"]
+    retracted = conn.execute(
+        "SELECT COUNT(*) AS c FROM outbox WHERE resolution=?", (RETRACTED,)).fetchone()["c"]
     oldest = conn.execute(
         "SELECT MIN(created_at) AS m FROM outbox WHERE status IN (?, ?)", (PENDING, INFLIGHT)
     ).fetchone()["m"]
@@ -355,6 +663,7 @@ def stats(conn: sqlite3.Connection, now: datetime | None = None) -> dict:
             conn.execute("SELECT id FROM outbox WHERE status=? ORDER BY created_at", (FAILED,))]
     return {
         "counts": counts,
+        "retracted": retracted,
         "backlog": counts[PENDING] + counts[INFLIGHT],
         "oldest_pending_age_sec": oldest_age,
         "dead_letters": dead,

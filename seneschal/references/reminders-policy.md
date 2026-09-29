@@ -996,9 +996,9 @@ field is the opt-out from piercing, not a hint.
   API cannot tell a sleeping owner from an idle phone: it has classified "asleep" at high confidence
   straight through a weekday afternoon and held daytime nudges. The context snapshot still *carries*
   `asleep` (the phone keeps sending sleep events) but the gate no longer reads it — **informational
-  only**. Even where a wearable-grade signal (watch heart rate + wrist motion) outranks the phone for
-  `activity`/`sleep` in `presence-context.json`, **the gate still does not read `asleep`** — reviving it
-  is a reminder-behavior change, unbuilt, and the owner's to call.
+  only**. Even where an event names a wearable as its observing device (`source`, surfaced as
+  `sleep_source` in `presence-context.json` — provenance, not precedence), **the gate still does not read
+  `asleep`** — reviving it is a reminder-behavior change, unbuilt, and the owner's to call.
 - **Held time is netted out of the staleness cutoff**, which is what preserves NO DROPS: the entry gets a
   bookkeeping `presence_deferred_since` stamp on hold and a `presence_held_sec` accumulator on release,
   and `entry_lateness_sec` subtracts it. A presence-held nudge also `continue`s *before* the staleness
