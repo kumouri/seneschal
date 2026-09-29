@@ -52,6 +52,11 @@ jobs:
         # stdlib unittest only — no pip install.
         run: python -m unittest discover -s seneschal/scripts -p "test_*.py"
 
+      - name: Run the shipped archon's tool tests
+        # archons/proteus/tools carries its own test_*.py beside the tools (stdlib only, neutral
+        # fixtures); the seneschal/scripts discover above does not reach them.
+        run: python -m unittest discover -s archons/proteus/tools -p "test_*.py"
+
       - name: Check uv lockfile consistency
         # uv.lock must stay in step with pyproject.toml — the live daemon's update flow
         # runs `uv sync --frozen` before every graceful reload, and a stale lockfile
@@ -179,7 +184,7 @@ jobs:
         run: uv run python -m unittest discover -s cockpit/breakglass -p "test_*.py"
 
   cockpit-web:
-    name: Cockpit frontend typecheck + build
+    name: Cockpit frontend typecheck + build + test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -192,5 +197,8 @@ jobs:
         run: npm ci
       - working-directory: cockpit/web
         run: npm run typecheck
+      - working-directory: cockpit/web
+        # The pure view helpers' *.test.ts suites (node's built-in test runner, no extra deps).
+        run: npm test
       - working-directory: cockpit/web
         run: npm run build

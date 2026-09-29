@@ -62,7 +62,11 @@ seneschal/
                    docs/background-jobs-spec.md), loops.py + cadence_chain/owi_*/
                    observation_gate/standing_safety/brief_prestage/carryover_region (the
                    open-work register and its satellites — state/README.md),
-                   rag_* (local semantic index), router.py, salience tooling, health/presence
+                   rag_* (local semantic index), router.py, salience tooling,
+                   usage_probe/_activity/_health + spend_levers + trace + record_search +
+                   transcript_archive/_size_watch (plan-meter, spend and session-trace
+                   observability — docs/usage-telemetry-spec.md, docs/session-trace-spec.md),
+                   cockpit_site + archon_sites (daemon-supervised web UIs), health/presence
                    pipelines, archive_common.py + telegram_ingest.py + discord_export_ingest.py
                    + sms_ingest.py + archive_aggregate.py (message archiver),
                    setup_state.py + setup_env.py + setup_doctor.py + settings_merge.py +
@@ -205,7 +209,8 @@ ancient Greek — "oh-NAY-roy" — script/file names are unchanged).
 `.github/workflows/ci.yml` runs on push/PR to `main` and `develop`. The `python` job (full-history
 checkout — three gates diff against `origin/develop`) byte-compiles every tracked `.py`, measures
 the suites (`count_tests.py --check`: the total is published to the job summary and must never be
-typed into this file or the README), runs the unittest suite under `seneschal/scripts/`, checks
+typed into this file or the README), runs the unittest suites under `seneschal/scripts/` and
+`archons/proteus/tools/`, checks
 uv.lock, runs the UUID placeholder guard, then the context/doc gates — **blocking**:
 `check_context_pointers` (dangling pointers), `check_doc_status` (every `seneschal/docs/` file
 declares a status), `check_state_writes` (no truncating `state/` write), `check_wall_clock` (no
@@ -218,7 +223,7 @@ docstring is its spec. `Reference data check` validates every tracked `.json`
 (`uv sync --extra cockpit --group test`, then unittest discover over `cockpit/server/`,
 `cockpit/decoy/`, and `cockpit/breakglass/` — including `test_parity.py`, the tripwire for the
 cockpit's hand-duplicated model_config/governor tables) and `cockpit-web` (Node 22, `npm ci` +
-`npm run typecheck` + `npm run build` in `cockpit/web/`). `android.yml` builds the Call Shield app
+`npm run typecheck` + `npm test` + `npm run build` in `cockpit/web/`). `android.yml` builds the Call Shield app
 on `phone/android/**` changes. The phone Worker has its own npm gates (`cd phone && npm run
 typecheck && npm test`). Run every gate CI runs, locally, before pushing:
 
