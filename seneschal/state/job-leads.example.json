@@ -1,0 +1,26 @@
+{
+  "schema": "seneschal.job-leads/1",
+  "job_id": "20260730-104247-4312",
+  "analyst": "warm",
+  "produced_at": "2026-07-30T19:02:11Z",
+  "contamination_present": false,
+  "leads": [
+    {
+      "rank": 1,
+      "location": "seneschal/scripts/rag_projects.py:212",
+      "evidence": "The succeeding run 20260729-023525 logged 41 'indexed' lines here; this run logged none, and the loop's only exit before that point is the roots read at :188.",
+      "basis": "established",
+      "cited": [
+        "state/jobs/20260730-104247-4312.log",
+        "state/jobs/20260729-023525-1abb.log"
+      ]
+    },
+    {
+      "rank": 2,
+      "location": "state/project-roots.json",
+      "evidence": "The roots file is what :188 reads, and nothing in this run's log names a root at all.",
+      "basis": "conjecture"
+    }
+  ],
+  "notes": ""
+}

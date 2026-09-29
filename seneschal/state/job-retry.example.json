@@ -1,0 +1,90 @@
+{
+  "schema": "seneschal.job/1",
+  "id": "20260730-013217-6e39",
+  "title": "research: transient-retry demo",
+  "argv": [
+    "python",
+    "-c",
+    "..."
+  ],
+  "cwd": "/path/to/seneschal",
+  "log_path": "/path/to/seneschal/seneschal/state/jobs/20260730-013217-6e39.log",
+  "status": "done",
+  "pid": 31488,
+  "child_pid": 31572,
+  "created_at": "2026-07-30T06:32:17Z",
+  "started_at": "2026-07-30T06:33:17Z",
+  "ended_at": "2026-07-30T06:33:17Z",
+  "exit_code": 0,
+  "deadline_sec": 21600,
+  "lease": false,
+  "wake": false,
+  "notify": {
+    "channel": "telegram"
+  },
+  "notified_at": "2026-07-30T06:33:22Z",
+  "origin": {
+    "source": "warm"
+  },
+  "retry": {
+    "max_retries": 3,
+    "backoff": false,
+    "window_sec": 300,
+    "base_sec": 30,
+    "cap_sec": 600
+  },
+  "attempt": 3,
+  "next_attempt_at": null,
+  "retry_outcome": "succeeded-after-retry",
+  "attempts": [
+    {
+      "attempt": 1,
+      "started_at": "2026-07-30T06:32:17Z",
+      "ended_at": "2026-07-30T06:32:17Z",
+      "duration_sec": 0.163,
+      "exit_code": 1,
+      "outcome": "failed",
+      "retry_enabled": true,
+      "classification": "transient",
+      "signature": "api-5xx",
+      "fast_fail": true,
+      "confidence": "high",
+      "decision": "transient-signature",
+      "log_offset": 54,
+      "next_attempt_at": "2026-07-30T06:32:45Z"
+    },
+    {
+      "attempt": 2,
+      "started_at": "2026-07-30T06:32:50Z",
+      "ended_at": "2026-07-30T06:32:50Z",
+      "duration_sec": 0.187,
+      "exit_code": 1,
+      "outcome": "failed",
+      "retry_enabled": true,
+      "classification": "transient",
+      "signature": "api-5xx",
+      "fast_fail": true,
+      "confidence": "high",
+      "decision": "transient-signature",
+      "log_offset": 224,
+      "next_attempt_at": "2026-07-30T06:33:17Z"
+    },
+    {
+      "attempt": 3,
+      "started_at": "2026-07-30T06:33:17Z",
+      "ended_at": "2026-07-30T06:33:17Z",
+      "duration_sec": 0.156,
+      "exit_code": 0,
+      "outcome": "done",
+      "retry_enabled": true,
+      "classification": "success",
+      "signature": null,
+      "fast_fail": true,
+      "confidence": "none",
+      "decision": "succeeded",
+      "log_offset": 394,
+      "next_attempt_at": null
+    }
+  ],
+  "notify_delivery": "landed"
+}
