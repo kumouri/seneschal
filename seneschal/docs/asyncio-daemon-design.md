@@ -302,7 +302,9 @@ The repo gains `pyproject.toml` + `uv.lock` (uv on the host) with the sanctioned
 
 - **Exact-time reminder timers** (sleep-until-next-due instead of the 5 s tick) — the tick already beats
   the old worst case by minutes; a timer wheel is polish.
-- **Mid-turn interleaving** (surfacing a "cancel that" to the in-flight turn) — needs product thinking
-  about conversation semantics, not just plumbing.
+- **Mid-turn interleaving** — designed in [`mid-turn-interleave-spec.md`](mid-turn-interleave-spec.md).
+  The motivating case turned out to be *additive context* ("oh, and also X"), not the "cancel that"
+  this bullet first imagined; the serialization invariant survives it (one consumer, one turn in
+  flight, one reply per delivery).
 - **Native `asyncio.subprocess` warm session**, HA/Signal/health-listener tasks — the substrate is ready
   for them; they are their own projects.

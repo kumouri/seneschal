@@ -40,9 +40,8 @@ specs and carry no status.
   alive on the wrong account.
 - `stacked-pr-branch-deletion-spec.md` — **BUILT** — deleting a branch used to close every PR stacked
   on it.
-- `mid-turn-interleave-spec.md` — **PARTIAL(phases 0+1 BUILT; phase 2 BUILT behind
-  `--interleave-mode live`, shipped OFF)** — no true in-turn injection exists on this CLI; the
-  classifier isn't reliable enough yet, so `live` stays off.
+- `mid-turn-interleave-spec.md` — **PARTIAL(gate module BUILT; daemon wiring pending)** — no true
+  in-turn injection exists on this CLI; `live` (interrupt, then continue) ships off.
 - `state-durability-spec.md` — **PARTIAL(core BUILT)** — zero-byte `state/` losses; `write_text` now
   refuses an empty overwrite.
 - `log-rotation-spec.md` — **BUILT** — rotates a log around Windows's held-open-file rename limit.
