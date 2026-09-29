@@ -59,7 +59,8 @@ assistant's voice and tuned to the owner.
   counts as the prior day.
 - **Backend mechanics & gotchas** (dates, relations, status-vs-select, callouts/toggles, throttles) live
   in the active backend's `store/<backend>/mapping.md` — on Notion, `store/notion/mapping.md` (the
-  journal-steward's `references/notion-mcp-mapping.md` remains the detailed Notion-AI-primitive map).
+  journal-steward's `subagents/journal-steward/daily-journal-steward/references/notion-mcp-mapping.md`
+  remains the detailed Notion-AI-primitive map).
 
 ## Modes — pick one, then read its file
 

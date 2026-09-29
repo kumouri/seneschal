@@ -72,10 +72,14 @@ seneschal/
                    (the outbound approval gate, its one approval store, the non-content send
                    ledger — SEND_GATE_SETUP.md; _owner_fixture.py is their test fixture),
                    provenance_guard.py (the RAG index's writer-provenance registry),
-                   check_placeholders.py (CI guard), *_SETUP.md guides + INTEGRATIONS.md (index),
+                   the CI gate set — check_*.py (each docstring is its spec) + count_tests.py +
+                   ci_local.py (runs every CI gate locally) + check_placeholders.py —
+                   *_SETUP.md guides + INTEGRATIONS.md,
                    seneschald-control.ps1 + run-*.cmd (Windows scheduled-task wrappers)
   setup/           env-manifest.json — the machine-readable manifest of every configurable env
                    surface, which the /setup wizard's env walker + the doctor read
+  *.json           the CI gates' tracked config: context-budget.json, context-pointers.json,
+                   context-stores.json, state-write-allowlist.json, wall-clock-allowlist.json
   state/           local-first runtime cache — gitignored except README + *.example.*
 cockpit/           the Seneschal Cockpit — a local-first web observatory over the daemon
                    (see cockpit/README.md): server/ is a FastAPI backend (127.0.0.1:8760; the
@@ -183,18 +187,27 @@ ancient Greek — "oh-NAY-roy" — script/file names are unchanged).
 
 ## CI
 
-`.github/workflows/ci.yml` runs on push/PR to `main` and `develop`: byte-compiles every
-tracked `.py`, runs the unittest suite under `seneschal/scripts/`, checks uv.lock consistency,
-validates autonomy-config.json, and runs the UUID placeholder guard. Two cockpit jobs cover the
-web observatory: `cockpit-server` (`uv sync --extra cockpit --group test`, then unittest discover
-over `cockpit/server/`, `cockpit/decoy/`, and `cockpit/breakglass/` — including `test_parity.py`,
-the tripwire for the cockpit's hand-duplicated model_config/governor tables) and `cockpit-web`
-(Node 22, `npm ci` + `npm run typecheck` + `npm run build` in `cockpit/web/`). `android.yml` builds the
-Call Shield app on `phone/android/**` changes. The phone Worker has its own npm gates
-(`cd phone && npm run typecheck && npm test`). Reproduce the Python checks locally:
+`.github/workflows/ci.yml` runs on push/PR to `main` and `develop`. The `python` job (full-history
+checkout — three gates diff against `origin/develop`) byte-compiles every tracked `.py`, measures
+the suites (`count_tests.py --check`: the total is published to the job summary and must never be
+typed into this file or the README), runs the unittest suite under `seneschal/scripts/`, checks
+uv.lock, runs the UUID placeholder guard, then the context/doc gates — **blocking**:
+`check_context_pointers` (dangling pointers), `check_doc_status` (every `seneschal/docs/` file
+declares a status), `check_state_writes` (no truncating `state/` write), `check_wall_clock` (no
+zone-less clock read in checkers/tests), `check_rulings` (new ruling language needs a
+`seneschal/docs/rulings.md` row), and `check_context_budget --enforce-headroom`; **report-only**:
+the byte budget itself, `check_no_utcnow`, `check_context_stores --venue ci`,
+`check_carryover_prose`, `check_grounding_dates` — and AST-parses every `.ps1`. Each gate's
+docstring is its spec. `Reference data check` validates every tracked `.json`
+(`check_json_files.py`). Two cockpit jobs cover the web observatory: `cockpit-server`
+(`uv sync --extra cockpit --group test`, then unittest discover over `cockpit/server/`,
+`cockpit/decoy/`, and `cockpit/breakglass/` — including `test_parity.py`, the tripwire for the
+cockpit's hand-duplicated model_config/governor tables) and `cockpit-web` (Node 22, `npm ci` +
+`npm run typecheck` + `npm run build` in `cockpit/web/`). `android.yml` builds the Call Shield app
+on `phone/android/**` changes. The phone Worker has its own npm gates (`cd phone && npm run
+typecheck && npm test`). Run every gate CI runs, locally, before pushing:
 
 ```
-git ls-files '*.py' | xargs python -m py_compile
-python -m unittest discover -s seneschal/scripts -p "test_*.py"  # from the repo root
-python seneschal/scripts/check_placeholders.py
+python seneschal/scripts/ci_local.py            # every CI step, ci.yml order; --list / --only <step>
+python seneschal/scripts/check_docs.py          # just the doc-side gates, every finding in one pass
 ```

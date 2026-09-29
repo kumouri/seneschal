@@ -1,6 +1,7 @@
 # Notion write-behind outbox — design (durability)
 
-**Status:** approved direction (owner sign-off) · **Owner:** the assistant · **Scope:** a new durable
+**Status:** `PARTIAL(§11 steps 1-3 BUILT; step 4 producer wiring in progress)` — approved direction
+(owner sign-off) · **Owner:** the assistant · **Scope:** a new durable
 local write queue for the assistant's **act-low Notion writes** (reminder acks, med-intake rows; run-log
 finalize in phase 2), plus the flush mechanism that lands them. **Decisions locked (§10): flush = (a)
 opportunistic first; store = sqlite; v1 scope = acks + med-logs; happy-path = belt-and-suspenders (direct

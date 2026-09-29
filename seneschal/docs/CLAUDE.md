@@ -16,6 +16,9 @@ specs and carry no status.
 
 ## Whole-repo designs
 
+- `rulings.md` — REFERENCE — the dated design-decision ledger (starts empty); `check_rulings.py`
+  requires a row whenever a change narrates a new decision.
+
 - `pluggable-backend-spec.md` — **PARTIAL(Phase 2 BUILT — the `Backend` contract
   (`seneschal/scripts/backends/`), `CodexWarmSession` over `codex exec --json`, the cockpit's third
   `backend` dial, all behind a config flag defaulting to claude-cli; Phases 3-5 and §4's
@@ -27,7 +30,7 @@ specs and carry no status.
 
 ## The daemon and its lifecycle
 
-- `asyncio-daemon-design.md` + `asyncio-daemon-plan.md` — **PARTIAL(phases 0-2 BUILT)** — the
+- `asyncio-daemon-design.md` + `asyncio-daemon-plan.md` — **PARTIAL(phases 0-3 BUILT)** — the
   reactive core: supervised tasks under one `asyncio.gather`, each behind `_supervise`.
 - `how-to-add-a-daemon-task.md` — REFERENCE — the explicit gather-and-`_supervise` mechanism, the
   steps, and what not to do.

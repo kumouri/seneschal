@@ -1,7 +1,8 @@
 # Asyncio reactive daemon — implementation plan
 
-> **Status: phases 0–3 all shipped and live.** Phase 0 = packaging; phase 1 = the core port (incl. an
-> adversarial-review fix commit — notably the cross-process `reminders.json` writer lock); phase 2 =
+**Status:** `PARTIAL(phases 0-3 BUILT; deferred phase-3+ items open)` — phases 0–3 all shipped and live.
+
+> Phase 0 = packaging; phase 1 = the core port (incl. an adversarial-review fix commit — notably the cross-process `reminders.json` writer lock); phase 2 =
 > the Discord gateway; phase 3 = the docs-sync PR. The daemon reloads onto each merged phase via the
 > automatic update flow. Discord's gateway stays dark until `discord.env` exists. Deferred phase-3+
 > items live in the design doc's last section.

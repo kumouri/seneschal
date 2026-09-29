@@ -67,6 +67,7 @@ HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
+import memory_write  # noqa: E402
 import model_config  # noqa: E402
 import setup_checkout  # noqa: E402
 import setup_state  # noqa: E402
@@ -829,8 +830,9 @@ def enable_commands(platform: str, home: Path | None = None) -> list[str]:
 
 
 def _write(path: Path, text: str, executable: bool) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8", newline="\n")
+    # Atomic (build-then-replace), forced to LF: a unit file or launcher is useless half-written,
+    # and a torn re-render must leave the previous working copy in place.
+    memory_write.write_text(str(path), text, newline="\n")
     if executable and os.name == "posix":
         mode = os.stat(path).st_mode
         os.chmod(path, mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)

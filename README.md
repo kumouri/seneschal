@@ -109,14 +109,17 @@ configured store is the durable system of record.
   PRs merge with **merge commits**; never merge red CI.
 - **Stdlib-first Python**, two sanctioned deps (`websockets`, `tzdata`) — everything degrades
   gracefully without the venv.
-- **CI** byte-compiles every `.py`, runs the unittest suite, checks the uv lockfile, validates
-  config, enforces that no real identifiers ship (all UUIDs must be `00000000-…`
-  placeholders), and gates the cockpit (backend + decoy + break-glass unit tests incl. the
-  duplicated-table parity tripwire; frontend typecheck + build). Reproduce locally:
+- **CI** byte-compiles every `.py`, measures and runs the unittest suite, checks the uv
+  lockfile, validates every tracked JSON file, enforces that no real identifiers ship (all
+  UUIDs must be `00000000-…` placeholders), runs the docs-and-grounding gates (no dangling
+  pointers, a readable status on every design doc, no truncating state writes, no zone-less
+  clock reads in tests, a ledger row for every new decision; byte budget and a few others
+  report-only), and gates the cockpit (backend + decoy + break-glass unit tests incl. the
+  duplicated-table parity tripwire; frontend typecheck + build). Reproduce locally — every
+  step CI runs, in order:
 
   ```bash
-  git ls-files '*.py' | xargs python -m py_compile
-  python -m unittest discover -s seneschal/scripts -p "test_*.py"
+  python seneschal/scripts/ci_local.py        # --list shows the steps; --only <step> runs one
   ```
 
 - **Testing `/setup` as a first-time user.** A walk on your own machine inherits *your*
