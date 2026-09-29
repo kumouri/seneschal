@@ -1,9 +1,15 @@
 # Telegram inbound enhancements — spec
 
-**Status:** `BUILT(Phase C §3.4 deferred, the only open item)` — §2 attachment intake (PR 1), §4 reply-context (PR 2), §3 reactions Phase A+B (PR 3), §5
-backlog-ack (PR 4), and §3.6 custom-emoji resolution (PR 5) are all **built** — see §7. **Phase C (§3.4)
-remains ask-high and unbuilt**, the only deferred item.
-**Author:** the assistant, on the owner's ask (2026-07-16)
+**Status:** `PARTIAL(§2-§5 and §3.6 BUILT; §6a edits, §6b the question picker and §6c albums BUILT in telegram_poll.py and telegram_ask.py, their presence.py wiring pending; Phase C §3.4 deferred)` —
+§2 attachment intake (PR 1), §4 reply-context (PR 2), §3 reactions Phase A+B (PR 3), §5 backlog-ack
+(PR 4) and §3.6 custom-emoji resolution (PR 5) are all **built** end to end — see §7. For §6a message
+edits (PR 6), §6b the question picker (PR 7) and §6c albums (PR 8), the poller half
+(`telegram_poll.py`: `edited_message`, `callback_query`, `media_group_id`) and the picker module
+(`telegram_ask.py`) are built; the daemon half (`presence.py`: the edit/queue rewrite, callback
+resolution and the album hold) lands with the daemon-wiring port, and until it does those inbound
+kinds are extracted but not acted on. **Phase C (§3.4) remains ask-high and unbuilt** by decision.
+**Author:** the assistant, on the owner's ask (2026-07-16); §6a-§6c added later, also on the owner's
+ask.
 **Scope:** the Telegram *inbound* path only. Outbound (`send_telegram`) is untouched.
 **Autonomy:** every feature here is **act-low** to *build* (local ETL over the owner's own bot's inbound); the
 only ask-high surface is if a reaction is ever wired to *approve an outbound draft* (see §3.4).
@@ -72,7 +78,7 @@ must stay inside that already-committed batch so a message is never fetched-then
 An inbound `document` / `photo` / `voice` / `audio` / `video` is downloaded to a local inbox and the warm
 session is handed **the local path + any caption**, so the assistant can respond to the file in context.
 
-**General-purpose, no per-type special-casing** (owner ruling, 2026-07-16 — Q1 resolved). This is *not*
+**General-purpose, no per-type special-casing** (owner decision, 2026-07-16 — Q1 resolved). This is *not*
 built around the health-zip flow (big data doesn't come this way — see the 20 MB cap in §2.4). The feature
 is simply: **any attachment becomes something the assistant can see and respond to.** The warm session decides what
 to do with it conversationally (open it, summarize, run a tool, or just acknowledge) — the daemon never
@@ -157,7 +163,7 @@ bot, the user's own reactions are delivered without admin rights.
   - ❔ → **elaborate** — explain / tell me more / ask me more.
   - any other emoji → **note** — thread as context, no action.
 
-  > **Amended 2026-07-16 (owner ruling, after the constraint below surfaced): in-set aliases added, originals
+  > **Amended 2026-07-16 (owner decision, after the constraint below surfaced): in-set aliases added, originals
   > kept.** ⏰ / 🤚 / ❔ are **not** in Telegram's allowed reaction set — verified against the Bot API's
   > `ReactionTypeEmoji` list — so the picker never offers them and those three can never fire. They stay
   > mapped (they record the intended meaning, and cost nothing), and each gains **in-set aliases that
@@ -173,7 +179,7 @@ bot, the user's own reactions are delivered without admin rights.
 ### 3.4 Wiring (staged — start read-only)
 - **Phase A (observe):** thread the reaction into the warm session as context
   (*"[the owner reacted 👍 to your last message]"*) — no automated action. Ships first; zero risk.
-- **Phase B (ack + affirm):** two act-low cases (owner ruling, 2026-07-16 — Q3 resolved: *reminders **and**
+- **Phase B (ack + affirm):** two act-low cases (owner decision, 2026-07-16 — Q3 resolved: *reminders **and**
   "👍 a question = yes"*):
   - **Nudge ack** — a 👍 on a **reminder nudge** runs the normal ack path (the store `done` write +
     `reminders_dequeue.py`). Needs the daemon to remember which `message_id` was which nudge (a small
@@ -275,6 +281,19 @@ worker thread; a failure logs and the line goes through unacked rather than taki
 When it fires, the threaded line **says so** (*"— I've already run the ack for you … no need to repeat
 it"*), so the assistant acknowledges the owner rather than re-acking.
 
+**The threaded line must say exactly how far the automated half got, and no further.** Neither call
+above writes the store row itself — the dequeue records the local ack and the outbox (Notion backend
+only) *journals* the `done` write for a later flush. A line that claims *"row marked Done"* at that
+moment is not merely cosmetic: it is what makes the warm session stand down, so the one turn holding
+the row id — the cheapest place to do the write — is told not to, and the row can stay un-Done for
+days while the journal grows with no owner. The corrected shape names what landed and what is still
+owed — *"I've dropped the re-nudges and journalled the ack, but the row's store write has NOT happened
+yet: please write it through now"* — with the backend's own drain as the backstop if the turn doesn't.
+On a filesystem backend (no outbox) the line says the row write is owed to the warm session's
+`store-update`. A test that the acked line **never claims the row is done** pins the distinction;
+that assertion is anti-regression, not wording taste. *(In this repository `presence.py` still
+carries the older wording until the daemon-wiring port lands.)*
+
 **Still ask-high, unchanged:** nothing here can send. Phase C (a reaction approving an outbound draft)
 remains unbuilt.
 
@@ -351,13 +370,364 @@ them in order. One extra send, only on a burst, only right after a cold start.
 
 ---
 
+## 6a. Feature — Message edits
+
+**The defect.** `allowed_updates` named `["message", "message_reaction"]`, and naming any subset is an
+implicit *"and nothing else"* — so `edited_message` was never delivered. Reactions were wired up
+deliberately (§3.2); edits were simply never considered. The owner sends a fragment, edits it into
+the full sentence a moment later, and the assistant only ever sees the fragment.
+
+**Why it is worse than it sounds.** The failure is silent *and* asymmetric. On the owner's screen the
+message reads as corrected; the assistant answers the uncorrected text; neither side can see the
+divergence. A typo fix, a changed time, a retracted sentence — all invisible, and the resulting
+confusion looks like the assistant misreading the owner rather than like a missing update type.
+
+### 6a.1 The two cases, which are NOT the same thing
+
+An `edited_message` carries the whole Message again — same `message_id`, the new text in full, never a
+diff and never the text it replaced. What to do with it turns entirely on how far the original got:
+
+| The original is… | Behavior | Why |
+|---|---|---|
+| **still un-answered** (in this poll batch, or sitting in the daemon's durable queue) | **replace the queued text in place** — one item in, one item out | The owner fixed a typo before the assistant got to it. The assistant should simply see the corrected message; enqueuing a second item would make one message read as two. |
+| **already answered** | arrives as a new inbound: `[the owner edited an earlier message to: "…"]` | It cannot be un-answered. The assistant has to be able to react to the *correction*, and without the annotation the corrected text reads as the owner saying nearly the same thing twice. |
+
+**The third case, decided explicitly: an edit that lands mid-turn is case 2.** The drainer takes
+`pending[0]` into local variables and, on a delivered turn, pops index 0 *by position* — it never
+re-reads the text. So rewriting the entry it is mid-turn on would answer the old text and then
+discard the correction, silently: strictly worse than not handling edits at all. An in-flight marker
+(set where the head is claimed, reset at the top of every drainer iteration) makes the replacement
+refuse, and case 2 is the honest description of what is happening anyway — a turn is being spent on
+the uncorrected text right now. The refusal is keyed on the **text**, not the index: a "session busy"
+flag alone would not do, because the drainer awaits a session spawn between claiming the head and
+setting that flag.
+
+**A fourth outcome, silent by design:** an edit whose text is *unchanged* is absorbed as a no-op.
+Telegram emits an `edited_message` for things the owner did not do — a link preview attaching is the
+common one — and "the owner edited that to exactly what it already said" is a line that could only
+ever be noise.
+
+### 6a.2 As built
+
+- **`telegram_poll.py`** (built): `allowed_updates` is now
+  `["message", "edited_message", "message_reaction", "callback_query"]`; `message_payload()` picks the
+  Message out of either key and reports its `kind`; an edit is extracted through the **same** path as
+  a new message (text, caption, reply-to, media, allowlist) and marked `kind: "edit"` with
+  `edit_date`. `message_id` is on **every** item, not just edits and reactions — the original has to
+  be findable before its edit shows up. Malformed/partial payloads yield `(None, "")` and contribute
+  nothing rather than raising through `main`'s un-caught loop.
+- **Offset accounting is unchanged**, and that is load-bearing: an edit advances the cursor exactly
+  like any other update, inside the same fetched-and-committed batch (§6). Tested explicitly across a
+  mixed `message` / `edited_message` / `message_reaction` batch, because a regression here is a
+  message-loss bug rather than a cosmetic one.
+- **`presence.py`** (pending the daemon-wiring port): `apply_inbound_edit()` decides between the two
+  cases; `replace_queued_inbound()` is the pure queue rewrite (mid-turn refusal, `attempts` carried
+  over — an edit is not evidence the poison is gone); `_edit_line()` builds the annotation, in the
+  same bracketed style as reactions and swipe-replies, **deliberately un-truncated** (unlike the
+  reaction line's quote, the quoted text *is* the message here, so clipping it would drop the words
+  the edit exists to deliver).
+- **The id window.** The daemon maps `message_id` → *the line as it was enqueued*, bounded (200) like
+  the outbound map, and recorded **after** the force-route transform — the queue holds post-transform
+  text, so a key recorded before it would never match, and a replacement that skipped it would strip a
+  `!fable` message's delegation directive on the way back in.
+- **Not persisted, deliberately.** The queue survives a restart; this window doesn't, so an edit to a
+  message queued before a reload is handled as case 2. Losing the window costs an annotation; a
+  *wrong* match would cost the message, and that asymmetry is what decides it.
+- **The continuity cache is amended too**, so a cold spawn's thread tail doesn't show the typo'd line
+  and the corrected one as two separate things the owner said. Fail-open — it's a cache; the durable
+  record (`turns.jsonl`) is written by the drainer at answer time and gets the corrected text with no
+  help from here.
+- **Media on an edit is re-fetched**, because an edit runs the identical extraction path: editing the
+  *caption* on a photo re-downloads the photo. Named rather than special-cased — the duplicate costs
+  one local copy of a file the owner already sent (the inbox is swept nightly), and a media-only
+  branch here would be a second extraction path that could drift from the first, which is exactly
+  what §1 warned about.
+- **Tests:** `../scripts/test_telegram_edits.py` (the poller half here; the daemon half arrives with
+  the wiring).
+
+---
+
+## 6b. Feature — The question picker
+
+**The ask:** Telegram bots can carry buttons — can the assistant ask questions over Telegram the way
+Claude Code's `AskUserQuestion` does, even if each question has to come as a separate message?
+
+**Why it exists** is the standing picker rule, which *is* the requirement rather than context for it:
+**a picker is one tap; a prose list is a writing assignment.** Reading several questions, holding
+them all in working memory, and composing a reply that answers each in order is exactly the overhead
+that makes a decision get deferred — and a half-answered question set is worse than an unasked one,
+because work proceeds on the half that was answered.
+
+Claude Code has `AskUserQuestion`, which renders selectable options. **Telegram had no equivalent, so
+every decision the assistant needed over Telegram arrived as a prose list** — the exact friction the
+rule exists to remove.
+
+### 6b.1 The rule is the shape, not a comment
+
+The rule has three clauses, and two of them are things a caller can simply forget. So
+`telegram_ask.py` makes them structural:
+
+| The clause | How it is enforced |
+|---|---|
+| *Give each option a real description of what it means and what it costs* | An option with no description is **refused** (exit 2, with the reason). There is no way to ask a bare-labels question through this CLI. |
+| *Put the recommendation first and mark it `(Recommended)`* | The **first option IS the recommendation** and is marked automatically. `--no-recommendation` exists for a genuinely open pick and has to be typed. |
+| *Use multi-select when the choices aren't mutually exclusive* | `--multi` — toggling checkbox buttons plus a Done row (§6b.3). |
+
+**Where the descriptions live, and why the buttons don't carry them.** A Telegram inline-button label
+is a phone-width string that truncates *silently*, so a real description cannot ride on the button —
+it would be cut off exactly where the cost half of the sentence lives. So the **message body** carries
+the numbered options with their full descriptions and the `(Recommended)` mark, and the **keyboard is
+only the selector**, one numbered button per option, one per row. The number is what ties a truncated
+button back to its description. This is the one place the design deviates from `AskUserQuestion`'s
+look, and it is deliberate: the alternative is a picker that renders the rule unreadable.
+
+**One question per message** — N questions = N messages. There is no paginated wizard here, and
+adding one would be against the ask.
+
+### 6b.2 Mechanism
+
+- `sendMessage` with `reply_markup.inline_keyboard`.
+- A tap arrives as a **`callback_query`** update, which must be **named in `allowed_updates`** — the
+  same switch one update type further over (§6a). Without naming it, the keyboard renders and every
+  tap on it is a no-op that spins forever.
+- **`answerCallbackQuery` must be called or the client spins**, so it is called on **every** path,
+  including the ones that cannot record an answer.
+- `editMessageText` folds the choice back into the question's own message (`✓ <label>`, keyboard
+  removed), so the question becomes its own record in the scrollback instead of leaving a dead
+  keyboard behind. `editMessageReplyMarkup` does the same job for a multi-select toggle.
+- **`callback_data` is capped at 64 bytes**, so it carries `q:<8-hex question id>:<index>` — an id and
+  an index, **never the option text**. ~13 bytes; the cap is checked as a backstop.
+
+### 6b.3 Multi-select
+
+Built, not deferred: the durable store the feature needs anyway is what makes it cheap. A tap on an
+option toggles it (`☑`/`☐` on the button) and `editMessageReplyMarkup` redraws the keyboard; **nothing
+is delivered until Done.** Two consequences worth naming:
+
+- **A toggle wakes nobody.** The assistant is not woken once per checkbox, and never reads a half-made
+  selection as the final one — the half-answered-set rule at the level of a single question.
+- **An accidental tap is free**, because it is undone by tapping again rather than by explaining.
+
+Done with nothing selected is a real answer and is said plainly (`✓ (nothing selected)`), not treated
+as a mistake.
+
+### 6b.4 Durability, and the ordering that makes a tap safe
+
+The pending question lives in **`state/telegram-questions.json`** (gitignored). It has to: the daemon
+reloads on every merge — i.e. constantly — and a question must outlive that.
+
+**The record is written BEFORE the send, with the `message_id` stamped in afterwards.**
+`callback_data` carries the question id, so *the record* is what makes a tap resolvable; the
+`message_id` only fuels the fold-the-answer-back edit. A crash between the two therefore costs the
+message edit and never the answer. The reverse order would have made a lost write cost the answer
+itself.
+
+Within `resolve`, the same principle one level down: **decide → persist → answer the query → edit the
+message.** A failed toast leaves the answer recorded and delivered; the reverse would leave the owner
+told the tap landed with nothing on disk to show for it.
+
+### 6b.5 A tap is never a silent no-op
+
+The requirement, and the thing most of the branch count in this feature is spent on. Every tap the
+daemon cannot honour still (a) answers the callback query so the button stops spinning, and (b) hands
+the warm session a line so the assistant follows it up in words:
+
+| What went wrong | The owner sees | The assistant receives |
+|---|---|---|
+| The question expired or was never known | An alert naming the question if a tombstone survives (§6b.6) | `[the owner tapped an answer button on a question I no longer have a record of ("…") — … ask them to say it in words]` |
+| The payload is unreadable / not our button | An alert | `[the owner tapped a button whose payload I couldn't read — …]` |
+| The option index is off the end of the question | An alert | `[the owner tapped an option I can't match to that question — …]` |
+| The whole resolve failed — subprocess died, no token, unreadable store | **Nothing** (the API was never reached) | a fixed "callback unresolved" line — *the owner's app may still be showing it as pending; ask what they picked* |
+
+The last row is the only one where the client keeps spinning, and it is precisely why the line names
+that fact: the assistant can then say so rather than leaving the owner looking at a button that never
+resolved.
+
+Two **non**-failures deliver no line, and neither is silent from the owner's side because both produce
+a popup: a multi-select toggle (nothing is decided yet) and a re-tap of a question already answered
+(*"Already answered — <choice>"*).
+
+### 6b.6 Expiry — 7 days, lazily, with a tombstone
+
+A question nobody ever taps must not sit pending forever. **`QUESTION_TTL_DAYS = 7`**, and the defence
+is the shape of a week rather than a round number: seven days spans a full weekday/weekend cycle, so a
+question asked Monday can still be answered the following Sunday. Past a week the decision's context
+has almost certainly moved, and answering it as if fresh is worse than asking the owner to restate.
+
+Two details do the real work:
+
+- **The sweep is lazy** — every load-modify-save of the store runs it. There is therefore no
+  scheduled task and no Dream step to forget to wire up; a step nothing runs reads exactly like a step
+  that ran, and this avoids the category rather than joining it.
+- **An expired question leaves a tombstone** — its *text*, not its options, capped at `TOMBSTONE_CAP`
+  (50). So a late tap can say **which** question expired instead of shrugging. A record that cannot be
+  dated is retired too: an undateable question is one we can never prove is current, and the tombstone
+  path is honest about that where keeping it forever silently would not be.
+
+### 6b.7 As built
+
+- **`telegram_ask.py`** (built, stdlib): `ask` / `resolve` / `list` / `prune` (plus the settle verbs
+  `picker-state-marking-spec.md` adds). It reuses `telegram_send.py`'s env loader and API call rather
+  than re-implementing them, so there is one HTTP path to the Bot API and one env loader. Both entry
+  points take an injectable `api=` seam, so no test can reach the wire without saying so.
+- **`telegram_poll.py`** (built): `callback_query` is in `allowed_updates`; `extract_callback()` emits
+  `kind: "callback"` carrying `callback_id`, `data` and the question message's id. A query with **no
+  `id`** is dropped — the id is the whole obligation, and with nothing to answer there is nothing to
+  do. The allowlist gates it like every other kind, which deliberately leaves a *stranger's* button
+  spinning rather than talking back to them (our keyboards only ever go into an allowlisted chat).
+- **`presence.py`** (pending the daemon-wiring port): `resolve_callback()` is a thin subprocess
+  wrapper in the shape of `sentinel.send_telegram` / `poll_telegram`, so a question's whole Bot API
+  lifecycle lives in one module, and `_callback_line()` turns the result into inbound. Resolution runs
+  in a thread — it makes up to three API calls — and a batch of pure taps skips loading the reaction
+  context. **`--stub-send` refuses to resolve at all**: `answerCallbackQuery` is every bit as much a
+  real send as a message, and a stub-brain run with a live `telegram.env` must not reach the owner.
+- **The answer routes back as ordinary inbound**, `[the owner answered "…" → "…"]` — the same
+  bracketed style as reactions and edits, so everything in brackets is still the daemon describing and
+  never the owner speaking. The question is quoted short (`QUESTION_QUOTE_CHARS`); **the chosen labels
+  never are**, for the same reason §6a leaves an edit's text un-truncated: they are the answer.
+- **A tap contributes no id to the edit window.** A callback's `message_id` names one of the
+  *assistant's* messages, so keying the edit window to it would aim a later edit lookup at the wrong
+  entry. The same rule tightens the reaction case, which was latent-only (the owner cannot edit the
+  assistant's messages, so no edit update could ever carry that id).
+- **Offset accounting is unchanged** and tested across a mixed `message`/`edited_message`/
+  `callback_query` batch — a regression there is a message-loss bug, not a cosmetic one.
+- **Tests:** `../scripts/test_telegram_questions.py`.
+
+### 6b.8 Deliberately NOT built — `setMyCommands`
+
+Slash-command autocomplete was offered as a secondary *"only if it lands cleanly."* It doesn't, and the
+reason is a question rather than an effort estimate: **the bot's existing directives use a `!` prefix**
+(`!status`, `!fable`, `!private`) and `setMyCommands` registers `/`-prefixed ones. Whether slash
+commands are a **parallel surface** (two vocabularies for one bot, and `!status` vs `/status`
+diverging the first time one gains a flag) or a **rename** (every reference in `presence.py`,
+`../modes/chat.md` and the owner's own muscle memory) is the owner's call, not an implementation
+detail. It is left out entirely rather than guessed at. (`telegram-capability-map.md` §2.3 corrects
+one premise here: registration does not gate delivery, so the real choice is whether the Menu Button
+offers anything at all.)
+
+---
+
+## 6c. Feature — Albums: N updates, ONE turn
+
+### 6c.1 The defect, and why it is plumbing
+
+**Telegram has no "album" update.** Nine screenshots sent from one tap of Send arrive as **nine
+`message` updates**, each carrying one photo, all sharing one `Message.media_group_id` (Bot API 3.5),
+with the caption on exactly one of them. Enqueuing one entry per update, with the drainer answering
+`pending[0]` **one entry per turn**, turns one message from the owner into up to nine turns, each one
+an answer to a slice.
+
+The observed shape: nine screenshots of one conversation, answered after the 1st, again after the 4th
+and again after the 9th — the first reply mischaracterising a situation the later images explained,
+the second recommending something a later image showed had already been postponed. **Chronic, not an
+incident.**
+
+**It was already found and named** — `telegram-capability-map.md` §2.3's `media_group_id` entry
+predicted exactly this, contradicting the reading rule "several attachments sent together are ONE
+message." That is the point: **a reading rule is written down and cannot bind, because the plumbing
+hands the model a slice and the model has no way to know a slice is what it has.** The fix is a turn
+boundary, not a sentence.
+
+### 6c.2 The split: the poller carries, the daemon decides
+
+`telegram_poll.py` extracts `media_group_id` onto the normalized record (`extract_media_group_id`,
+built) and **does nothing else with it** — no coalescing, no holding, no reordering. Its offset
+contract is untouched, and the reason is the contract itself: coalescing means *waiting*, waiting
+means a message exists only in memory for a moment, and **nothing may be acked to Telegram before it
+has been read.**
+
+The coalescing is `presence.py`'s, in the inbound task: `album_key` → `album_absorb` → `album_due` →
+`album_inbound_text`, and one durable hold. One album becomes **one queue entry**, therefore one turn.
+*(Pending the daemon-wiring port; until it lands, album members still arrive as separate entries.)*
+
+### 6c.3 The hold policy — two bounds, one free close
+
+| | | |
+|---|---|---|
+| **QUIET** | `ALBUM_QUIET_SEC` = **2 s** | hand a group over once no new member has arrived for this long |
+| **CAP** | `ALBUM_MAX_HOLD_SEC` = **15 s** | …and never past this, measured from the **first** member and not resettable |
+| **free close** | — | any ordinary `message` that is not one of its members ends the group **on the spot, at zero added latency** |
+
+The free close is what keeps the common shape — nine photos, then a question — instant **and in the
+right order**: the album is queued ahead of the question it is the context for. It rests on album
+members being contiguous, which is `[INFERRED]` (it follows from `sendMediaGroup` being one call and
+this being a 1:1 chat with one sender; the Bot API does not spell it out). If that is ever wrong the
+cost is one album split into two turns — the pre-album behaviour, never a loss. An **edit**, a
+reaction and a tap close nothing: an edit lands on some *earlier* message and a reaction names one of
+the *assistant's*, so closing on either could split an album mid-upload.
+
+**The long poll shrinks to `ALBUM_POLL_TIMEOUT_SEC` (1 s) while anything is held.** Without it a 25 s
+long poll parks the loop and the 2 s quiet window is a 25 s one. Nothing shrinks when nothing is held.
+
+### 6c.4 The three rails
+
+- **NEVER DELAY A MESSAGE THAT ISN'T IN AN ALBUM.** A record with no `media_group_id` — every plain
+  text message, every lone photo — is dispatched in the cycle it was polled in. Its latency is
+  byte-for-byte what it was. *A slower assistant is a worse assistant.*
+- **NEVER HOLD FOREVER.** `album_due` runs on **every** cycle of the poll loop, including a cycle whose
+  poll returned nothing and a cycle whose poll **failed**, so neither silence nor a transport blip can
+  extend a hold. The clock is `time.monotonic`, so a wall-clock jump cannot either. A member cap (24;
+  Telegram's own cap is 10) bounds the buffer, and the wind-down at the bottom of the loop flushes
+  whatever is still held on every graceful stop — every restart and every merge reload.
+- **NEVER LOSE A MESSAGE.** The poller has already committed the offset for these members and
+  Telegram never re-sends an acked update, so the hold is **durable**:
+  `state/telegram-album-hold.json`, written after every change. Everything uncertain **delivers** — an
+  unreadable hold file, a non-string group id, a malformed hold record, the member cap: each resolves
+  to "hand it over now", which is at worst the behaviour this replaces.
+
+### 6c.5 What a restart mid-album does
+
+**It delivers what it has, immediately, as one turn. It does not resume the hold.** The successor
+cannot know how much of the album it has, and the offset says the rest may never come again. Members
+that arrive *after* the restart form their own group and their own turn — exactly the split the
+pre-restart daemon would have produced, and never a loss. The monotonic stamps are deliberately not
+persisted (they are meaningless to another process), and the file is removed **before** the members
+are handed back, so a crash in the dispatch that follows cannot re-deliver them — a duplicate would be
+a message the owner never sent.
+
+### 6c.6 The line, and one thing it deliberately gives up
+
+`album_inbound_text` emits a header naming the count, then one descriptor per member in send order,
+then the caption **once**. **The caption is searched for, not assumed to be on the first member** —
+Telegram puts it on exactly one, and which one is the sending client's business, not a documented
+guarantee. Each descriptor goes through the same attachment-or-text builder a lone photo already goes
+through, so there is no second extraction path to drift (the §1 argument the edit path also rests on)
+and the re-fetch recovery line is not lost by being inside an album.
+
+**An album contributes no id to the edit window (§6a).** An edit to its caption would otherwise
+replace the entry — nine descriptors and all — with the one edited caption string, losing the images
+from the turn. With no id the edit falls through to the annotation path and arrives as the correction
+it is, beside an album entry that is still intact. Costs an annotation; the alternative costs the
+photos.
+
+### 6c.7 As built
+
+- `telegram_poll.py` (built) — `extract_media_group_id`; `media_group_id` additive on the record.
+- `presence.py` (pending the daemon-wiring port) — `album_key` / `album_topic` / `album_inbound_text`
+  / `album_absorb` / `album_due` / `album_flush_all` / `save_album_hold` / `load_album_hold`; the
+  daemon state's `album_hold`; an inbound-dispatch helper lifted out of `telegram_task` (singles
+  unchanged) so an album unit and a single share one queueing path.
+- Tests: `../scripts/test_telegram_albums.py` — the poller field and the offset invariant across an
+  album batch here; the daemon-side cases (both bounds and the free close, the split-across-two-polls
+  case, caption not on the first member, a lone photo and a plain message undelayed, interleaved
+  non-album messages, a failed poll, the shrinking poll window, restart mid-album, the wind-down flush)
+  arrive with the wiring.
+
+---
+
 ## 6. Cross-cutting
 
-- **`allowed_updates`** becomes `["message", "message_reaction"]` at the **one** `get_updates` site
-  (`telegram_poll.py`; see the §1 correction) — the single change that unlocks §3. (Add
-  `message_reaction_count` only if we ever want anonymous-group tallies — not needed for a private chat.)
+- **`allowed_updates`** is `["message", "edited_message", "message_reaction", "callback_query"]` at
+  the **one** `get_updates` site (`telegram_poll.py`; see the §1 correction) — `message_reaction`
+  unlocks §3, `edited_message` unlocks §6a and `callback_query` unlocks §6b. **Naming a subset is an
+  implicit "and nothing else"** — and the narrowing is *sticky* across later calls — which is the whole
+  §6a defect and would have been §6b's too. (Add `message_reaction_count` only if we ever want
+  anonymous-group tallies — not needed for a private chat.)
 - **Offset / durability:** unchanged. All new update kinds ride the same fetched-and-committed batch;
-  extraction happens *after* the batch is in hand, so nothing new can be fetched-then-lost.
+  extraction happens *after* the batch is in hand, so nothing new can be fetched-then-lost. **§6c is
+  the one feature that holds a message after the offset moved**, which is exactly why its hold is
+  durable (`state/telegram-album-hold.json`) — the poller itself still coalesces nothing and still
+  acks nothing it has not read.
 - **Fail-open everywhere:** any new branch that errors falls back to the current text-only behavior and
   logs; a plain text message must never regress.
 - **Security:** allowlist gates downloads; filenames sanitized; size-capped; inbox pruned nightly.
@@ -365,6 +735,11 @@ them in order. One extra send, only on a burst, only right after a cold start.
   `state/telegram-message-map.json` (nudge→message id) — both gitignored, seeded from `.example`s.
   `state/custom-emoji-cache.json` (§3.6, `custom_emoji_id` → base emoji) is also gitignored, but has no
   `.example` seed — it's a pure regenerable network cache, no vocabulary to hand-edit.
+  `state/telegram-questions.json` (§6b) is gitignored and likewise unseeded — it is **runtime state,
+  not config**: nothing in it is hand-edited, and an empty file is the correct starting point.
+  `state/telegram-album-hold.json` (§6c) is the same, and is additionally **transient by design**: it
+  exists only while an album is mid-hold and is removed as soon as the group is handed over, so its
+  normal state is *absent*.
 - **Docs:** update `seneschal/scripts/TELEGRAM_SETUP.md`, `CLAUDE.md` (Telegram inbound description), and
   `state/README.md` (new `inbox/` + the two map files) **in the same PR** as the code (stale docs = bug).
 
@@ -384,6 +759,21 @@ them in order. One extra send, only on a burst, only right after a cold start.
    with by design (§3.4b's "custom-emoji reaction … extraction skips" was correct at the time — the
    owner's Premium picks were being silently dropped). Self-contained: `resolve_reactions` runs once per poll,
    after extraction, and everything else in §3 is unchanged. Tests: `scripts/test_telegram_reactions.py`.
+6. **PR 6 — Message edits (§6a).** The same class of gap PR 5 closed, one update type over: an
+   `allowed_updates` omission made a whole kind of inbound impossible rather than merely unhandled,
+   and nothing about it was visible from either side of the conversation. Poller half built; daemon
+   half pending. Tests: `scripts/test_telegram_edits.py`.
+7. **PR 7 — The question picker (§6b).** Sequenced after PR 6, which it builds on rather than beside:
+   they change the same `allowed_updates` line, and this is the third update type on a pattern PRs 3
+   and 6 already established (ask for the type, extract it, annotate it into the same durable queue).
+   The new surface is outbound — a keyboard and a durable pending-question store — but the inbound half
+   is deliberately unremarkable. `telegram_ask.py` and the poller half built; daemon half pending.
+   Tests: `scripts/test_telegram_questions.py`. **`setMyCommands` deliberately excluded — §6b.8.**
+8. **PR 8 — Albums, N updates → ONE turn (§6c).** The first item here that is not an `allowed_updates`
+   omission: the update type always arrived, the *field that binds nine of them into one message* was
+   never read. It is also the first to change the **turn boundary** rather than the content of a turn,
+   which is why the hold is the whole design and the two bounds are stated in §6c.3 rather than left
+   to a constant. Poller half built; daemon half pending. Tests: `scripts/test_telegram_albums.py`.
 
 ### Deviations from the draft, decided while building PR 1
 - **The §2.4 "reply" is the assistant's, not the daemon's.** The draft had the daemon emit a canned
@@ -399,7 +789,7 @@ them in order. One extra send, only on a burst, only right after a cold start.
 
 ---
 
-## 8. Decisions (resolved 2026-07-16, owner rulings)
+## 8. Decisions (resolved 2026-07-16, owner decisions)
 
 1. **Attachment scope — GENERAL, no per-type auto-act.** Telegram isn't the big-data path; the owner
    just wants the assistant able to *respond to attachments generally*. → §2.1: download + surface path/caption,

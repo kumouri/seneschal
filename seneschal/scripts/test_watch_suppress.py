@@ -27,16 +27,22 @@ Every fixture is synthetic; no instant is read from the wall clock.
 
 Run:  python -m unittest test_watch_suppress   (from seneschal/scripts)
 """
+import io
 import json
 import os
 import re
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from datetime import datetime, timezone
+from unittest import mock
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 
+import reminders_acks as ra  # noqa: E402
+import telegram_send as ts  # noqa: E402
 import watch_suppress as ws  # noqa: E402
 
 DOMAIN = "old-shop.example"
@@ -309,6 +315,96 @@ class ReminderPathIsNotThisDoor(unittest.TestCase):
         src = self._source("watch_suppress.py")
         for name in ("import telegram_", "import presence", "from presence", "from telegram_"):
             self.assertNotIn(name, src, name)
+
+
+class ComposesWithTheAckGate(unittest.TestCase):
+    """The suppression list does not replace the reminder ack gate. Both are consulted at
+    `telegram_send`'s one door, either can block, and every verdict lands in `state/watch-gate.jsonl`.
+    The list is this test's own (patched in as the live path), so nothing depends on an install's
+    real list or the empty shipped example."""
+
+    NOW = datetime(2026, 8, 30, 15, 0, 0, tzinfo=timezone.utc)
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.list_path = os.path.join(self.dir, "watch-suppressions.json")
+        write_list(self.list_path, [{"pattern": DOMAIN, "added": "2026-08-30",
+                                     "reason": "the owner is deliberately letting this domain expire"}])
+        patcher = mock.patch.object(ws, "default_list_path", return_value=self.list_path)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _run_send(self, text, source="watch"):
+        real_argv, buf = sys.argv, io.StringIO()
+        sys.argv = ["telegram_send.py", "--text", text, "--chat-id", "1",
+                    "--state-dir", self.dir, "--dry-run"]
+        if source:
+            os.environ[ts.SOURCE_ENV_VAR] = source
+        try:
+            with redirect_stdout(buf):
+                code = ts.main(now=self.NOW)
+        finally:
+            sys.argv = real_argv
+            os.environ.pop(ts.SOURCE_ENV_VAR, None)
+        return code, json.loads(buf.getvalue().strip())
+
+    def gate_log(self):
+        with open(os.path.join(self.dir, ra.WATCH_GATE_LOG), "r", encoding="utf-8") as fh:
+            return [json.loads(ln) for ln in fh if ln.strip()]
+
+    def test_the_peeks_alert_is_refused_in_code_and_the_block_is_logged(self):
+        code, out = self._run_send(DOMAIN_PUSH)
+        self.assertEqual(code, 3)
+        self.assertFalse(out["sent"])
+        self.assertEqual(out["suppressed"], ws.SUPPRESSED_REASON)
+        self.assertEqual(out["suppression"]["pattern"], DOMAIN)
+        rows = self.gate_log()
+        self.assertEqual(len(rows), 1)  # ONE row per send, whichever gate answered
+        self.assertTrue(rows[0]["blocked"])
+        self.assertEqual(rows[0]["reason"], ws.SUPPRESSED_REASON)
+        self.assertEqual(rows[0]["verdict"]["pattern"], DOMAIN)
+        self.assertEqual(rows[0]["source"], "watch")
+
+    def test_a_non_matching_message_is_delivered_unchanged_and_still_logged(self):
+        code, out = self._run_send(UNRELATED_PUSH)
+        self.assertEqual(code, 0)
+        self.assertTrue(out["dry_run"])
+        self.assertEqual(out["chars"], len(UNRELATED_PUSH))
+        rows = self.gate_log()
+        self.assertEqual(len(rows), 1)
+        self.assertFalse(rows[0]["blocked"])
+        self.assertIsNone(rows[0]["reason"])  # allowed sends say so explicitly
+
+    def test_ungated_surfaces_are_untouched(self):
+        """The warm session shares this script. No Watch stamp, no gate, no log line — a suppression
+        list may not start eating the assistant's own conversation."""
+        code, out = self._run_send(DOMAIN_PUSH, source=None)
+        self.assertEqual(code, 0)
+        self.assertTrue(out["dry_run"])
+        self.assertFalse(os.path.exists(os.path.join(self.dir, ra.WATCH_GATE_LOG)))
+
+    def test_no_ack_gate_turns_the_whole_door_off(self):
+        """One flag, one door: `--no-ack-gate` is the escape hatch for both halves, so an operator who
+        needs a message out is not left guessing which gate ate it."""
+        args = type("A", (), {})()
+        args.state_dir, args.reminder_id = self.dir, None
+        args.ack_gate, args.no_ack_gate = False, True
+        self.assertIsNone(ts.ack_gate_check(DOMAIN_PUSH, args, now=self.NOW))
+        self.assertFalse(os.path.exists(os.path.join(self.dir, ra.WATCH_GATE_LOG)))
+
+    def test_the_ack_gate_still_blocks_what_it_always_blocked(self):
+        """The other gate, unchanged: an acked ⏰ row named by a chasing message is still refused, and
+        the log row still names `reminder_acked_today`."""
+        rid = "00000000-0000-0000-0000-000000000001"
+        with open(os.path.join(self.dir, ra.REMINDERS_FILE), "w", encoding="utf-8") as fh:
+            json.dump([{"id": "rmd", "reminder_id": rid,
+                        "text": "Orchid fertilizer feeding — it's due today (day 5). "
+                                "— ack in the store or tell me."}], fh)
+        ra.record_ack(self.dir, rid, ra.local_today(self.NOW))
+        code, out = self._run_send("Owner — orchid fertilizer feeding is 3.5 hours overdue (due 12:30).")
+        self.assertEqual(code, 3)
+        self.assertEqual(out["suppressed"], "reminder_acked_today")
+        self.assertEqual(self.gate_log()[0]["reason"], "reminder_acked_today")
 
 
 if __name__ == "__main__":

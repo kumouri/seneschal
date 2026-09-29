@@ -44,7 +44,11 @@ seneschal/
   scripts/         presence.py (resident asyncio daemon), sentinel.py (helper/one-shot),
                    identity_common.py (persona/identity.json reader — never raises, defaults
                    when absent; presence.py renders its grounding/slot prompts from it),
-                   telegram/discord/proton/google comms bridges, reminders_* queue+ack ledger
+                   telegram/discord/proton/google comms bridges (telegram_* — send/poll, the
+                   one HTTP transport, Markdown→HTML, topics, ask pickers: TELEGRAM_SETUP.md),
+                   mouth.py + turns.py + promises.py + channel_declare.py + turn_suppression.py
+                   + tomorrow_marker.py (said-log/dispatch queue, turn capture, promises, reply
+                   routing — each spec in docs/CLAUDE.md), reminders_* queue+ack ledger
                    (incl. reminders_seed.py — the whole-day exact-time seeder; reminders_cadence
                    / reminder_premise* / reminder_suppressions / reminders_live / _reconcile),
                    ack.py (free-text ack) + watch_ack/_reconcile/_suppress (Watch-send gates),

@@ -48,6 +48,9 @@ seneschal/store/notion/mcp.json
 # owner's own topics, vendors, accounts and reminder vocabulary). See seneschal/references/CLAUDE.md.
 seneschal/references/watch-suppressions.json
 seneschal/references/reminder-aliases.json
+# The Telegram topic routing table (purpose -> topic title); telegram_topics.py falls back to the
+# tracked telegram-topics.example.json when it is absent. Runtime thread ids live in state/.
+seneschal/references/telegram-topics.json
 
 # Archons (Forge mode) — generated scaffolds, run outputs, runtime state, and
 # per-archon private inputs (profile, watchlist, voice profile) stay local; only

@@ -57,21 +57,25 @@ specs and carry no status.
 
 - `how-inbound-becomes-a-reply.md` — REFERENCE — the path from a Telegram/Discord arrival through the
   one action queue to a delivered reply.
-- `mouth-spec.md` — **PARTIAL(phases 0-1 BUILT)** — the record of what the assistant actually said.
-- `telegram-inbound-spec.md` — **BUILT** — attachments, swipe-replies, reactions; an unnamed
+- `mouth-spec.md` — **PARTIAL(phases 0-1 module BUILT; send-site recording + daemon drain pending)**
+  — the record of what the assistant actually said.
+- `telegram-inbound-spec.md` — **PARTIAL(§2-§5 BUILT; §6a-§6c poller + picker halves BUILT, daemon
+  wiring pending)** — attachments, swipe-replies, reactions, edits, pickers, albums; an unnamed
   `allowed_updates` type is never delivered at all.
-- `telegram-capability-map.md` — **PARTIAL(§2.1① BUILT, extended repeatedly)** — the Bot API
-  documented method by method; only a handful are called.
+- `telegram-capability-map.md` — **MEMO(built items marked inline)** — the Bot API documented method
+  by method; only a handful are called.
 - `telegram-send-document-spec.md` — **BUILT(sendPhoto + `--document`/sendDocument, both narrow — no
   `--filename` override, no `--topic` resolution, no outbound trace)** — overturns the capability
   map's "deliberate" verdict on outbound media; stdlib multipart so the token never reaches argv.
-- `picker-state-marking-spec.md` — **BUILT** — a Telegram reaction marks picker state; 😴 is derived
-  every pass, never latched.
+- `picker-state-marking-spec.md` — **PARTIAL(`telegram_ask.py` primitives BUILT; the marking pass
+  arrives with the PR-sweep port)** — a Telegram reaction marks picker state; 😴 is derived every
+  pass, never latched.
 - `ask-provenance-spec.md` — **PARTIAL(phases 1-3 BUILT; 4 open)** — a picker's `origin` is now
   auto-stamped.
 - `promises-ledger-spec.md` — **PARTIAL(phase 0 BUILT)** — a commitment record owned outside the turn
   that made it; phases 1-3 designed, not built.
-- `substance-or-silence-spec.md` — **PARTIAL(phases 1-2 BUILT; phase 3 is a counting exercise)** — a
+- `substance-or-silence-spec.md` — **PARTIAL(rule + `turn_suppression.py` BUILT; landed predicate +
+  daemon wiring pending; phase 3 is a counting exercise)** — a
   turn restating what the owner already has is a buzz with no fact in it (`../modes/chat.md`).
 
 ## Background work
@@ -160,15 +164,17 @@ specs and carry no status.
 
 - `how-the-approval-gate-works.md` — REFERENCE — how the act-low / ask-high gate actually works, end
   to end.
-- `message-routing-spec.md` — **PARTIAL(phases 1-2 BUILT)** — a declared, resolved channel purpose
+- `message-routing-spec.md` — **PARTIAL(`channel_declare.py` BUILT; phase 1-2 daemon wiring pending)**
+  — a declared, resolved channel purpose
   decides a Telegram turn's destination, winning over the inbound thread unconditionally.
 - `dynamic-topics-spec.md` — **PARTIAL(§0-§2 core minting BUILT, via a simpler mechanism than
-  designed)** — a topic needs no PR at all; promotion-to-git, renames of a promoted purpose, sprawl
-  controls and the act-low line remain open.
-- `topic-mirroring-spec.md` — **SPEC-ONLY(phase 1 measured live)** — copying into a topic works but
+  designed)** — a topic needs no code change at all; promotion into the owner's table, renames of a
+  promoted purpose, sprawl controls and the act-low line remain open.
+- `topic-mirroring-spec.md` — **SPEC-ONLY** — copying into a topic works but
   loses/misattributes attribution.
-- `reply-marker-forcing-function-spec.md` — **BUILT(+ §9 fix)** — every reply names which message it
-  answers, unconditionally.
+- `reply-marker-forcing-function-spec.md` — **PARTIAL(marker check + retry prompt BUILT; daemon
+  wiring and §9's empty-reply guard pending)** — every reply names which message it answers,
+  unconditionally.
 - `slack-draft-and-hold-spec.md` — **BUILT(phase 1 whole feature)** — drafts from a pinned SSOT; the
   send is always ask-high.
 - `voice-call-spec.md` — **PARTIAL(P1 BUILT — outbound talk mode: the Worker's `/push-call` gains
@@ -184,7 +190,7 @@ specs and carry no status.
   seed path, report-only, decides nothing new; Phase 1 gated on §10.2/§10.3)** — a reminder has no
   concept of *why* it exists.
 - `tomorrow-marker-spec.md` — **PARTIAL(§6 decided; §7 phases 0-2 BUILT; §3 retention prune wired
-  into Dream)** — a first-class "prioritize tomorrow" marker: three act-low capture doors (a
+  into Dream; the daemon's morning-slot injection + picker callback pending)** — a first-class "prioritize tomorrow" marker: three act-low capture doors (a
   `<tomorrow>` chat tag, a `Tomorrow` flag on tasks/reminders, a Wrap-time Telegram picker) into one
   durable `state/` file (`scripts/tomorrow_marker.py`) the Brief leads with and the Wrap resolves
   (close/roll/drop) per item — one grid picker, never a prose list.
