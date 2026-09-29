@@ -156,7 +156,7 @@ class GithubUnit(unittest.TestCase):
     def test_parses_gh_json(self):
         payload = json.dumps([{
             "name": "lavalamp", "owner": {"login": "kumouri"},
-            "description": "IdleOn bot", "isPrivate": True, "isArchived": False,
+            "description": "game bot", "isPrivate": True, "isArchived": False,
             "pushedAt": "2026-07-01T14:15:08Z",
             "primaryLanguage": {"name": "JavaScript"}, "url": "https://x",
         }])
