@@ -30,7 +30,7 @@ new_sqlite_classes = ["CallEscalation"]
 [[d1_databases]]
 binding = "DB"
 database_name = "call_screener"
-database_id = ""  # filled by `wrangler d1 create call_screener` during provisioning
+database_id = "00000000-0000-0000-0000-000000000000"  # placeholder — replace with the id `wrangler d1 create call_screener` prints
 
 [vars]
 GATE_PROMPT = "Thanks for calling. To cut down on spam, please press 1 to be connected."

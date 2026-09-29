@@ -35,7 +35,7 @@ wrangler secret put TELEGRAM_THREAD_ID   # optional: a private-chat topic id; om
 ## 2. Provision D1
 
 ```bash
-wrangler d1 create call_screener        # paste the returned database_id into wrangler.toml
+wrangler d1 create call_screener        # paste the returned database_id over the 00000000-… placeholder in wrangler.toml
 npm run db:apply:local                  # or db:apply:remote for production
 ```
 
