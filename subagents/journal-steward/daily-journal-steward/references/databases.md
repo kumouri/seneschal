@@ -179,5 +179,10 @@ Tier guide: 🥉 minor wins/chores/quick tasks · 🥈 notable progress/multi-st
   Tier/Valence/Priority/etc. are **select**. They're set the same way via MCP but only accept their
   exact option strings (emoji included).
 - **Emoji is part of option values** (e.g. `🥉 Small`, `🔴 High`, `💼 Work`). Copy them exactly.
+- **SQL mode strips rich-text formatting.** A text property read through the data source's SQL
+  projection comes back as plain words — bold, links and line structure silently gone. When a text
+  field's *formatting* is part of its content (a curated line meant to be rendered verbatim), read it
+  with a rows-mode query or `store-get` (`notion-fetch`), never SQL mode, or a later write will persist
+  the flattened copy.
 - **Provenance URLs:** `Journal Digest Link` / `Origin Journal Digest` point at this run's Agent Run Log
   entry (see §2) — create that row first and reuse its URL everywhere.
