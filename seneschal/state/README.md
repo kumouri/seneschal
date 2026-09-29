@@ -46,7 +46,8 @@ carry-over); this directory is the cheap local cache the no-LLM sentinel and the
 | `meals.json` | Dream (staged snapshot) | The **meal-plan/meal-idea snapshot** the cockpit's Meals panel reads (`GET /api/meals`) — `{"staged_at", "plans": [{"title","url","summary","tags"}]}`. Optional: written when Dream stages meal plans from the active store; absent → the panel shows an honest empty state. |
 | `model-config.json` | cockpit / `model_config.py` CLI (seed `model-config.example.json`) | The two **model dials**: `warm_model` (wins over `--model` at every warm-session spawn — `presence.resolve_warm_model`) and `max_routable_model` (the live ceiling on Fable delegation; gates the router's fable arm + `fable_delegate.py`). |
 | `governor-config.json` + `governor-ledger.jsonl` + `governor-alert-state.json` + `governor-inflight.json` | `governor.py` (Oikonomos; config hand-edited, seeds `governor-*.example.*`) | The **budget governor**: per-model token budgets/quotas (config), the append-only spend ledger (each warm turn's usage is metered in by `presence._governor_meter_turn_usage`), the per-knob alert dedupe state, and delegation-concurrency inflight marks. Fail-open — a governor hiccup never breaks a turn. |
-| `pending-approvals.json` | brain | Held drafts awaiting approval (local mirror of the carry-over record). |
+| `pending-approvals.json` | `../scripts/pending_approvals.py` (`add` / `list` / `resolve` — the ONE writer; email and Slack triage both call it, and `send_gate.py` writes only through it: `grant`/`revoke` mint/flip rows via `add`+`resolve`, and the gate's spend is a `resolve` that stamps `gate_consumed_at`) | Held drafts awaiting approval (local mirror of the carry-over record) **and THE approval store every outbound send is gated on** — one store, never a second. Schema below. |
+| `send-recipients.jsonl` | `../scripts/send_recipients.py` (`record`), called from every outbound call site — `proton_send.py`, `gmail_api.py send`/`send-draft`, `gcal_api.py create-event`/`delete-event`, `push_sms.py`, `push_call.py`, `discord_send.py` | Append-only **non-content send ledger** — one line per real send attempt, `{at, channel, recipient_class[, gate]}` where `recipient_class` is `owner` / `third_party` / `unknown`, **never the address, number, handle, subject or body**. Answers "who did an outbound send actually reach", which no transcript does; `send_gate.py blast-radius` reads it back. `record()` never raises. Schema below. No seed (an empty file is the healthy fresh state); retention not yet built. |
 | `last-peek` | `presence.py` / `sentinel.py` | Timestamp of the last comms-peek (gates the peek cadence). |
 | `slots.json` | `presence.py` | Per-slot last-fired **local** date (`{name: "YYYY-MM-DD"}`) for the daemon's internal Brief/Wrap/Dream/Journal scheduler — including the once-per-day exact-time reminder **seed** under the `reminders-seed` name (`maybe_seed_day`'s date-rollover guard; stamped only on the seed run's clean exit). Fire-once-per-day guard. |
 | `rolls.json` | `presence.py` (`reminders_roll.py`) | Last-refill **local** date (`{"refilled": "YYYY-MM-DD"}`) for standing every-N-hours reminder **rolls** — the daemon regenerates each roll's day of nudges once per local day (future-only, idempotent). See "standing rolls" below + `../references/reminders-policy.md`. |
@@ -381,26 +382,99 @@ freshly-spawned session.
 
 ## `pending-approvals.json` schema
 
-Local mirror of the held drafts in the carry-over record (the system of record). The brain writes these
-when it drafts something ask-high; the owner approves/rejects via chat, Telegram, or a Notion comment, and
-the brain flips `status` and executes. See `../references/memory.md` for the full loop.
+Local mirror of the held drafts in the carry-over record (the system of record). Email and Slack triage
+draft something ask-high and call `../scripts/pending_approvals.py add` to hold it — **the one writer
+this file has** (never hand-append, never compute the `a<N>` id by reading the file yourself). The owner
+approves/rejects via chat, Telegram, or a store comment, and the same script's `resolve` verb flips
+`status` before the assistant executes. See `../references/memory.md` for the full loop.
 
-**Base fields (every kind):**
+**Top-level shape — versioned:**
 
 ```json
-[
-  {
-    "id": "a3",                       // short, stable — so a one-word reply ("send a3") is unambiguous.
-                                      //   ONE id space across email/slack/calendar (a<N>).
-    "kind": "email",                  // email | slack | calendar_response | notion_write | archon
-    "channelRef": "<thread/event id>",
-    "summary": "Reply to Alex re: design feedback",
-    "bodyPreview": "Hi Alex — thanks for the…",
-    "created_at": "2026-06-29T18:20:00Z",
-    "status": "pending"                // pending | sent | rejected | failed | approved
-  }
-]
+{
+  "schema": "seneschal.pending-approvals/1",
+  "approvals": [
+    { "...": "one entry per the base/kind-specific shape below" }
+  ]
+}
 ```
+
+- **Why versioned:** the send gate (`../scripts/send_gate.py`) reads this file from every outbound
+  chokepoint, so its shape is a contract between several writers and a reader — a version field is what
+  lets a future shape change be detected instead of silently misread.
+- **Migration — a bare array (no `schema` field) is the older shape.** `pending_approvals.py`'s reader
+  tolerates it unconditionally; its writer always stamps the current `schema` on every save. **One round
+  trip through the module — the very next `add`/`resolve` — upgrades an old file in place.**
+- **A file that fails to parse, or parses to neither shape, is refused (`CorruptStore`) rather than read
+  as empty** — treating corruption as "no drafts held" would let the next write atomically replace
+  real-but-malformed content with a list holding only the new entry.
+
+**Base fields (every kind, inside `approvals[]`):**
+
+```json
+{
+  "id": "a3",                       // short, stable — so a one-word reply ("send a3") is unambiguous.
+                                    //   ONE id space across email/slack/calendar (a<N>), stamped by
+                                    //   pending_approvals.add() — never set by the caller.
+  "kind": "email",                  // email | slack | calendar | calendar_response | sms | call | discord
+                                    //   | notion_write | archon
+  "channelRef": "<thread/event id>",
+  "summary": "Reply to Alex re: design feedback",
+  "bodyPreview": "Hi Alex — thanks for the…",
+  "created_at": "2026-06-29T18:20:00Z",   // stamped by add() — never set by the caller
+  "status": "pending"                // pending | sent | rejected | failed | approved | revoked — stamped
+                                      //   "pending" by add(); every later transition is resolve()
+}
+```
+
+**What the send gate reads and writes (`../scripts/send_gate.py`; host steps `../scripts/SEND_GATE_SETUP.md`):**
+
+- **Only a row with `status: "approved"` is an approval.** On the owner's `send a<N>` the triage skills
+  run `resolve a<N> --status approved` BEFORE the send; the gate matches an `approved` row of the same
+  `kind` whose recipient tokens (`to`/`cc`/`bcc`/`recipient`/`recipients`, `draftId`, `eventId`, or the
+  channel part of a `slack:<channel>[:<ts>]` `channelRef`, all lowercased) COVER every non-owner
+  recipient of the send. `pending` is not an approval.
+- **Single-use rows are spent on the way through:** the gate stamps `gate_consumed_at` (UTC) and
+  `gate_channel` (which chokepoint spent it — `proton_email`, `gmail_send`, `hook:<tool>`, …) via
+  `resolve` and never matches that row again; `status` stays `approved` until the caller resolves
+  `sent`/`failed` after the network call.
+- **Standing rows** — `{kind, to, status: "approved", standing: true, reason, granted_by,
+  granted_at[, expires_at]}`, minted only by `send_gate.py grant --standing` — cover their recipient on
+  every send and are never spent; `expires_at` (UTC, `YYYY-MM-DDTHH:MM:SSZ`) lapses them; `revoke` flips
+  `status` to `revoked` with `revoked_at`/`revoked_reason`. A single-use `grant` (no `--standing`) is the
+  same row without the flag — a one-off the owner directed in chat with no held draft. A pre-cleared
+  recipient's address lives here, in gitignored state, never in a tracked file.
+- **Purpose-scoped standing rows** — a standing row with `purpose: "<slug>"` and `to: "*"`, minted only by
+  `send_gate.py grant --kind K --purpose <slug> --standing`. It covers ANY recipient of that kind, but
+  only a send the caller LABELS with that purpose — and the hook takes the label only from a detector
+  that proves the act (none ship with the framework). The recipient match skips every row carrying
+  `purpose`, so such a row can never widen an unlabelled send.
+- **`kind`** for the gate's channels: `email` covers Proton and Gmail alike; `calendar` an event's
+  attendees (create) or its event id (delete); `slack` rows match the hook on `channelRef`'s channel id;
+  `sms` / `call` / `discord` match an explicit `--to` / `--channel-id` override.
+
+**Email drafts add these fields** (`kind: "email"`; base fields unchanged):
+
+```json
+{
+  "id": "a9",
+  "kind": "email",
+  "channelRef": "proton:<message-or-thread-id>",   // or the Gmail message/thread id
+  "to": "dana@example.com",
+  "draftId": "r-0000000000000000000",               // Gmail drafts only — what the gate matches send-draft on
+  "summary": "Reply to Dana re: contract renewal",
+  "bodyPreview": "Hi — I'm <assistant>, <owner>'s assistant; they asked me to…",
+  "body": "<full verbatim send text — the assistant always signs (send a9)>",
+  "sources": ["thread"],
+  "created_at": "2026-09-13T22:40:00Z",
+  "status": "pending"
+}
+```
+
+- **Proton is why this entry is not optional:** `proton_send.py --dry-run` builds and prints the
+  message but persists nothing — without this ledger entry a held Proton draft would exist only in the
+  chat transcript and vanish with the session. Gmail's `create_draft` also lands in the owner's own
+  drafts folder; Proton has no such fallback.
 
 - **`status: "approved"`** (additive) = approved-but-not-yet-sent — a session understood the approval but
   lacked hands to execute (the Slack-hands gap); the next capable turn drains it. See
@@ -437,6 +511,41 @@ the brain flips `status` and executes. See `../references/memory.md` for the ful
 > **Daemon Slack access** for executing a Telegram `send a7` lives in `../scripts/slack-mcp.json`
 > (git-ignored; seed `slack-mcp.json.example`), auto-detected by `presence.py` (Q9). Setup:
 > `../scripts/SLACK_MCP_SETUP.md`.
+
+## `send-recipients.jsonl` schema
+
+Append-only **JSON Lines**, one object per send attempt — the non-content record of who an outbound
+send actually reached. Writer: `../scripts/send_recipients.py` (`record`, on `stateio.append_jsonl`).
+
+```json
+{"at": "2026-09-09T22:40:00Z", "channel": "proton_email", "recipient_class": "owner", "gate": {"allowed": true, "reason": "owner", "approval_id": null}}
+{"at": "2026-09-16T12:00:00Z", "channel": "proton_email", "recipient_class": "third_party", "gate": {"allowed": false, "reason": "no-approval", "approval_id": null}}
+```
+
+- **`channel`** names the call site: `proton_email`, `gmail_send`, `gmail_send_draft`,
+  `gcal_create_event`, `gcal_delete_event`, `push_sms`, `push_call`, `discord_send`.
+- **`recipient_class`** is exactly one of `owner`, `third_party` or `unknown` (could not be decided from
+  what the call site has) — **never collapsed into either firm class**; `record()` coerces anything else
+  to `unknown`.
+  - **Email sends** (`proton_email`, `gmail_send`) — `send_recipients.classify_emails` against the
+    owner's own addresses (`owner.email` + `owner.emails` in `../../persona/identity.json`, plus the
+    assistant's own `assistant.email`): `owner` only when every `--to`/`--cc`/`--bcc` address is one of
+    them, `third_party` the moment one is not, `unknown` when no address could be read.
+  - **`gmail_send_draft`** / **`gcal_delete_event`** always write `unknown` — the recipient lives on
+    Google's side (the draft body, the event's attendees) and is not fetched per send.
+  - **`gcal_create_event`** — `owner` when the event carries no `attendees`; otherwise
+    `classify_emails` over the attendee addresses.
+  - **`push_sms` / `push_call` / `discord_send`** — `send_recipients.classify_single_recipient`: `owner`
+    with no explicit override (the owner's own phone / the assistant's private channel); `unknown` for an
+    explicit override that cannot be verified locally. Never `third_party`.
+- **`gate`** — what `send_gate.require_approval` decided: `allowed`, `reason` (`owner` / `purpose` /
+  `standing` / `approved` when allowed; `no-approval` / `no-recipient` / `store-corrupt` / `gate-error`
+  when refused) and the `approval_id` it spent or leaned on. **A refused send still writes a row.** The
+  verdict's own `recipients` list is deliberately not copied in.
+- **The privacy invariant: no address, phone number, handle, subject line or body ever reaches this
+  file** — `record()`'s signature has no field to carry one, and `test_send_recipients.py` asserts it.
+- **`record()` NEVER RAISES, and a call site never lets classification raise into the send** — each
+  classifies inside a `try` that falls back to `"unknown"`. Instrumentation, not the gate.
 
 ## `archive-people.json` schema + `archives/<person>/` layout
 

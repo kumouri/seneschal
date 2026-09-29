@@ -12,6 +12,9 @@ USAGE:
   python telegram_ingest.py --person alex --skip-service            # drop join/call service rows
 
 Prints a one-line JSON result {ok, person, count, media_count, out}. Exit 0 on success, non-zero on failure.
+
+Part of Archive mode's cluster; it emits the normalized-record schema archive_common.py defines, and
+the cluster overview lives in that module's docstring.
 """
 from __future__ import annotations
 

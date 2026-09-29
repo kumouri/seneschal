@@ -242,6 +242,31 @@ class OffsetMinutesOwnerDst(unittest.TestCase):
             self.assertEqual(tzc.offset_minutes(edge_epoch - 60), -360)
             self.assertEqual(tzc.offset_minutes(edge_epoch), -300)
 
+    def test_utc_offset_on_is_the_dates_own_offset_read_at_local_noon(self):
+        class FakeBerlin(tzinfo):
+            """+120 on a summer DATE (Apr-Sep), +60 otherwise — keyed on the wall-clock date."""
+
+            def utcoffset(self, dt):
+                return timedelta(minutes=120 if 4 <= dt.month <= 9 else 60)
+
+            def dst(self, dt):
+                return timedelta(0)
+
+            def tzname(self, dt):
+                return "FakeBerlin"
+
+        from datetime import date
+        with unittest.mock.patch.object(tzc, "_zone", return_value=FakeBerlin()):
+            self.assertEqual(tzc.utc_offset_on(date(2026, 7, 10)), timedelta(hours=2))
+            self.assertEqual(tzc.utc_offset_on(date(2026, 1, 10)), timedelta(hours=1))
+
+    def test_utc_offset_on_machine_local_fallback_is_a_timedelta(self):
+        from datetime import date
+        with unittest.mock.patch.object(tzc, "_zone", return_value=None):
+            off = tzc.utc_offset_on(date(2026, 7, 10))
+        self.assertIsInstance(off, timedelta)
+        self.assertEqual(off, datetime(2026, 7, 10, 12).astimezone().utcoffset())
+
     @unittest.skipUnless(_adelaide_resolves(), "needs tzdata (run inside the uv venv)")
     def test_real_zone_dst_edge(self):
         with unittest.mock.patch.object(tzc, "load_identity",

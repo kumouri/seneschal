@@ -47,7 +47,10 @@ python seneschal/scripts/setup_state.py mark owner-interview in-progress --step 
 
 1. **Name + pronunciation.** The owner's name; ask whether it's pronounced the way it's
    spelled and capture a phonetic spelling only if not (`owner.nameSpoken`).
-2. **Pronouns.** (`owner.pronouns`.)
+2. **Pronouns.** (`owner.pronouns`.) Then, as its own question, **their email addresses** — the
+   primary (`owner.email`) and any others a message to them might go to, e.g. a work address
+   (`owner.emails`, a list). The outbound send gate treats exactly these as "the owner": a send
+   only to them passes untouched, anything else needs an approval (`seneschal/scripts/SEND_GATE_SETUP.md`).
 3. **Timezone + day boundary.** IANA zone, machine's current zone offered as the default
    (hint it with `python -c "from datetime import datetime; print(datetime.now().astimezone().tzinfo)"`
    — that prints an offset name on some platforms, so have the owner confirm the proper IANA
@@ -86,7 +89,7 @@ python seneschal/scripts/setup_state.py mark owner-interview in-progress --step 
    and current beats exhaustive; the template's section headings, one owner. Show it. One
    approval → write (in the turn *after* the approval, so no question ever has a file card
    under it).
-2. Merge `owner.*` (name / nameSpoken / pronouns / email / timezone / dayBoundaryHour) into
+2. Merge `owner.*` (name / nameSpoken / pronouns / email / emails / timezone / dayBoundaryHour) into
    `persona/identity.json` — read-modify-write, preserving `assistant.*` untouched. Create
    the file from `persona/identity.example.json` if it doesn't exist yet.
 3. Never write on a skipped confirmation; a fully-skipped interview marks the chapter

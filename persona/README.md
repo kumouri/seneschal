@@ -16,7 +16,7 @@ Alongside them:
 | `persona.default.md` | ✅ | The default-Claude persona (see above). |
 | `persona.template.md` | ✅ | The generation template `/setup-persona` fills (`{assistant_name}`-style tokens). |
 | `identity.example.json` | ✅ | Commented fill-in seed for `identity.json`. |
-| `identity.json` | ❌ gitignored | Structured identity **code** reads (assistant name/pronouns/email/TTS; owner name/pronouns/email/timezone/dayBoundaryHour — the after-midnight cut, default 5). Written by the wizard + store onboarding; read via `seneschal/scripts/identity_common.py`. Every field nullable — the daemon boots fine without it. |
+| `identity.json` | ❌ gitignored | Structured identity **code** reads (assistant name/pronouns/email/TTS; owner name/pronouns/email + `emails` (the owner's other addresses — the send gate's "is this the owner?" set)/timezone/dayBoundaryHour — the after-midnight cut, default 5). Written by the wizard + store onboarding; read via `seneschal/scripts/identity_common.py`. Every field nullable — the daemon boots fine without it. |
 | `persona.md` | ❌ gitignored | The personalized persona **skills** read. Regenerate via the wizard; don't hand-drift it away from `identity.json`. |
 | `owner-profile.md` | ❌ gitignored | Who the owner is — the context the assistant uses to judge relevance. Built by the `/setup-store` onboarding interview (confirm-every-fact); keep it short and current. |
 

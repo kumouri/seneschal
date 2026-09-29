@@ -11,6 +11,9 @@ code READS it. Consumers today:
     machine-local wall clock.
   * ``clock`` / ``activity_day`` — ``owner.dayBoundaryHour`` (via :func:`day_boundary_hour`) is the
     after-midnight cut: activity before that local hour counts as the PRIOR day.
+  * ``send_recipients`` / ``send_gate`` — ``owner.email`` + ``owner.emails`` (via
+    :func:`owner_emails`) and ``assistant.email`` decide which recipients count as the owner's own,
+    so a send to them passes the outbound approval gate untouched.
 Skills read ``persona/persona.md`` instead (the wizard generates both from one interview so
 they never disagree — see ``persona/README.md``).
 
@@ -31,7 +34,8 @@ REPO_ROOT = os.path.normpath(os.path.join(SCRIPT_DIR, "..", ".."))
 IDENTITY_PATH = os.path.join(REPO_ROOT, "persona", "identity.json")
 
 # Mirrors persona/identity.example.json: assistant.pronouns defaults to "they/them",
-# owner.dayBoundaryHour defaults to 5 (05:00), everything else is null. owner.timezone null =
+# owner.dayBoundaryHour defaults to 5 (05:00), owner.emails to an empty list (the owner's OTHER
+# addresses, beside owner.email), everything else is null. owner.timezone null =
 # machine-local semantics (slot times and date math run on the machine's wall clock; see
 # presence.py's tz-mismatch warning).
 DEFAULTS = {
@@ -50,6 +54,7 @@ DEFAULTS = {
         "nameSpoken": None,
         "pronouns": None,
         "email": None,
+        "emails": [],
         "timezone": None,
         "dayBoundaryHour": 5,
     },
@@ -140,3 +145,27 @@ def day_boundary_hour(identity: dict) -> int:
         return DEFAULT_DAY_BOUNDARY_HOUR
     lo, hi = DAY_BOUNDARY_RANGE
     return val if lo <= val <= hi else DEFAULT_DAY_BOUNDARY_HOUR
+
+
+def owner_emails(identity: dict) -> frozenset:
+    """Every address that is the owner's own, lowercased and de-duplicated: ``owner.email`` plus
+    each entry of the optional ``owner.emails`` list (a second mailbox, a work address, the address
+    job applications go out from). Empty when nothing is configured.
+
+    This is the set the outbound send gate treats as "the owner" — a send whose every recipient is
+    in it needs no approval — so it is deliberately strict about shape: only non-blank strings
+    containing an ``@`` count, a bare string where the list belongs is accepted as a one-item list,
+    and anything else is skipped rather than guessed at. Never raises."""
+    out = set()
+    single = get_str(identity, "owner", "email")
+    if single:
+        out.add(single)
+    sec = identity.get("owner") if isinstance(identity, dict) else None
+    extra = sec.get("emails") if isinstance(sec, dict) else None
+    if isinstance(extra, str):
+        extra = [extra]
+    if isinstance(extra, (list, tuple)):
+        for val in extra:
+            if isinstance(val, str) and val.strip():
+                out.add(val.strip())
+    return frozenset(a.lower() for a in out if "@" in a)

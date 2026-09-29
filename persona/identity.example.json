@@ -20,6 +20,7 @@
     "nameSpoken": null,
     "pronouns": null,
     "email": null,
+    "emails": [],
     "timezone": null,
     "dayBoundaryHour": 5
   }

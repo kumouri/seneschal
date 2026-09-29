@@ -145,5 +145,34 @@ class DayBoundaryHourTest(unittest.TestCase):
         self.assertEqual(example["owner"]["dayBoundaryHour"], ic.DEFAULTS["owner"]["dayBoundaryHour"])
 
 
+class OwnerEmailsTest(unittest.TestCase):
+    """``owner.email`` + ``owner.emails`` — the set the outbound send gate treats as the owner."""
+
+    def test_defaults_are_empty(self):
+        self.assertEqual(ic.DEFAULTS["owner"]["emails"], [])
+        self.assertEqual(ic.owner_emails(ic.DEFAULTS), frozenset())
+        self.assertEqual(ic.owner_emails({}), frozenset())
+
+    def test_single_plus_list_lowercased_and_deduplicated(self):
+        identity = {"owner": {"email": "Owner@Example.com",
+                              "emails": ["owner@example.com", " Other@Example.org ", ""]}}
+        self.assertEqual(ic.owner_emails(identity), {"owner@example.com", "other@example.org"})
+
+    def test_a_bare_string_where_the_list_belongs_is_one_item(self):
+        self.assertEqual(ic.owner_emails({"owner": {"emails": "a@example.com"}}), {"a@example.com"})
+
+    def test_wrong_shapes_are_skipped_never_raised(self):
+        for bad in (None, 42, {"x": "a@example.com"}, [None, 7, "not-an-address"]):
+            self.assertEqual(ic.owner_emails({"owner": {"emails": bad}}), frozenset(), bad)
+        self.assertEqual(ic.owner_emails({"owner": "nope"}), frozenset())
+        self.assertEqual(ic.owner_emails([]), frozenset())
+
+    def test_the_example_file_carries_the_list(self):
+        path = os.path.join(ic.REPO_ROOT, "persona", "identity.example.json")
+        with open(path, encoding="utf-8") as fh:
+            example = json.load(fh)
+        self.assertEqual(example["owner"]["emails"], ic.DEFAULTS["owner"]["emails"])
+
+
 if __name__ == "__main__":
     unittest.main()
