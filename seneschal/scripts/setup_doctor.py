@@ -55,6 +55,7 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 import model_config  # noqa: E402
+import settings_merge  # noqa: E402 — one resolver for the user settings path
 import setup_env  # noqa: E402
 import setup_state  # noqa: E402
 
@@ -553,9 +554,10 @@ def check_daemon(ctx) -> dict:
 
 
 def check_hooks(ctx) -> dict:
-    """8 — the machine-wide session_stamp.py hook in the USER's ~/.claude/settings.json
+    """8 — the machine-wide session_stamp.py hook in the USER's ~/.claude/settings.json — or
+    `$CLAUDE_CONFIG_DIR/settings.json` when that is set, since that is the file Claude Code reads
     (string search only — no JSON surgery on a file this tool doesn't own)."""
-    path = ctx.home / ".claude" / "settings.json"
+    path = settings_merge.claude_config_dir(ctx.environ, ctx.home) / "settings.json"
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:

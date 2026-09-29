@@ -99,8 +99,19 @@ class SettingsMergeError(Exception):
     """A condition this tool refuses to push through (corrupt file, unmergeable shape)."""
 
 
+def claude_config_dir(environ=None, home=None) -> Path:
+    """The directory Claude Code reads the user's `settings.json` from: `CLAUDE_CONFIG_DIR` when set
+    (Claude Code relocates its whole user config there — a second profile, a clean test account),
+    else `~/.claude`. Writing the hooks anywhere else would install them where the CLI never looks."""
+    env = os.environ if environ is None else environ
+    override = env.get("CLAUDE_CONFIG_DIR")
+    if override:
+        return Path(override)
+    return (Path(home) if home else Path.home()) / ".claude"
+
+
 def default_settings_path() -> Path:
-    return Path.home() / ".claude" / "settings.json"
+    return claude_config_dir() / "settings.json"
 
 
 def expected_command(repo: Path, script_name: str = STAMP_MARKER) -> str:

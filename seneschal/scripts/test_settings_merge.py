@@ -284,5 +284,17 @@ class GuardHooks(Base):
                     self.assertIn(f"--guard {name}", text)
 
 
+class ClaudeConfigDir(unittest.TestCase):
+    """CLAUDE_CONFIG_DIR relocates Claude Code's user config; hooks must land where the CLI reads."""
+
+    def test_defaults_to_home_dot_claude(self):
+        self.assertEqual(sm.claude_config_dir({}, "/h"), Path("/h") / ".claude")
+
+    def test_honours_claude_config_dir(self):
+        self.assertEqual(sm.claude_config_dir({"CLAUDE_CONFIG_DIR": "/cfg"}, "/h"), Path("/cfg"))
+
+    def test_empty_value_falls_back(self):
+        self.assertEqual(sm.claude_config_dir({"CLAUDE_CONFIG_DIR": ""}, "/h"), Path("/h") / ".claude")
+
 if __name__ == "__main__":
     unittest.main()

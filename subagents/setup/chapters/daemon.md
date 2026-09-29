@@ -131,7 +131,7 @@ exactly — that doc stays the authoritative manual path.
 ## 5 — Session hooks (every platform)
 
 The machine-wide session registry hook (`SCHEDULING.md` §5): `session_stamp.py` on all four
-session events in the **user's** `~/.claude/settings.json` — never this repo's settings.
+session events in the **user's** `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR/settings.json` when that is set — `settings_merge.py` and the doctor both follow it) — never this repo's settings.
 Diff first, always:
 
 ```
