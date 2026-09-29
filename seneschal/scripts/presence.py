@@ -206,8 +206,8 @@ SLOTS_TEMPLATE = [
                "(nudge-or-satisfy) and refresh linked-task status for active Deadline-Watches so their "
                "re-fires stop once the linked record is Done. Use {tz}. Run silently."},
     {"name": "dream", "at": "22:00",
-     "prompt": "Run the Dream consolidation (seneschal/SKILL.md): rebuild state/context-digest.md, "
-               "refresh reminders, propose learnings, then commit + open a PR (Dream step 5). Also run "
+     "prompt": "Run the Dream consolidation (seneschal/SKILL.md -> seneschal/modes/dream.md): work "
+               "every step in order, refresh reminders, propose learnings, then commit + open a PR (Dream step 5). Also run "
                "the journal-presence satisfy-only backstop (auto-tick if the owner journaled after the "
                "Wrap check; no bedtime nudge). Use {tz}. Run silently."},
 ]
@@ -386,7 +386,8 @@ GROUNDING_TEMPLATE = """You are {assistant} — {owner}'s chief of staff — tal
 The current local date and time is {now} ({tz}) — treat this as the AUTHORITATIVE clock for
 every "today"/"yesterday"/"tomorrow" and all date math. Do not infer the date yourself and never trust a
 UTC clock; if a reminder's text disagrees with this stamp, this stamp wins.
-Read persona/persona.md (fall back to persona/persona.default.md) and seneschal/SKILL.md (Chat mode) and
+Read persona/persona.md (fall back to persona/persona.default.md) and seneschal/modes/chat.md (Chat
+mode's rules live there — seneschal/SKILL.md is a router and holds none of them) and
 stay fully in character: reply as the assistant in the persona's voice, never as Claude, no
 meta-narration, run any tools silently. Keep
 replies concise and chat-appropriate. Honor the act-low / ask-high gate (draft-and-hold anything

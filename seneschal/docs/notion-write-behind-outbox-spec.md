@@ -43,7 +43,7 @@ underlying Notion write actually landed. Today it can silently not:
 - **Same exposure for every act-low write:** med-intake rows (the recurring-medication auto-log), Run Log
   entries, reminder status flips. Each is a fire-and-forget MCP call with no retry.
 
-The house rule (persona operating principle #5, "honest about state"; `SKILL.md` Chat step 6) is *never
+The house rule (persona operating principle #5, "honest about state"; `modes/chat.md` rule 6) is *never
 claim a write you didn't make*. Right now honoring it means the assistant has to **park the item in
 carry-over by hand** and hope a later run replays it. That's a manual, lossy outbox. This spec makes it a
 real one.
@@ -95,7 +95,7 @@ the flush and how it talks to Notion* — is the open fork in §9. Framing it th
 | Any **read** (`notion-fetch`, `query-data-sources`, `search`) | **Direct** | n/a |
 | **Ask-high** sends (email/Slack/calendar) & flips (linked Task/Goal → Done, archive) | **Direct**, via the approval loop | n/a — human-gated, single-shot (§3) |
 
-The ack path is the marquee case. Where it plugs in today: chat write-through (`SKILL.md` Chat step 5) and
+The ack path is the marquee case. Where it plugs in today: chat write-through (`modes/chat.md` rule 5) and
 the slot ack path both already call `reminders_dequeue.py` (which records `acks.json`). That same moment
 gains **one more call** — enqueue an outbox entry — so the ack is now durable against Notion, not just
 against the fire-gate. (See §8 for why both still fire.)
@@ -332,7 +332,7 @@ Stdlib, TDD, merge-on-green, merge-commit only, `-c core.fsmonitor=false` on eve
    dead-letter rules in `store/notion/mapping.md` ("Outbox — durable act-low writes"), and the backend
    scope above.
 4. ▶ **Wire the enqueue producers + the (a) in-turn drain routine** — belt-and-suspenders ack flow in
-   `SKILL.md` (Chat step 5), the med-log path via `outbox.py medlog`, and the drain
+   `modes/chat.md` (rule 5), the med-log path via `outbox.py medlog`, and the drain
    (`pull --json` → replay via MCP → `mark`) land with the producer-wiring PR (which also gates the
    daemon paths on the `notion` backend). (Option (b) `notion_rest.py` + `outbox_task` remains the
    deferred fast-follow.)

@@ -293,7 +293,7 @@ Dream-staged snapshot below). A missing `health.db` or a missing/older-schema ta
 every endpoint answers an honest `"available": false` instead. Frontend: `HealthSummaryPanel`,
 `SleepPanel` (a simple bar sparkline of recent nights), `WorkoutsPanel` (week rollup + recent
 list), `NutritionPanel` (today's tiles + short history), and `MealsPanel` (staged plans as link
-cards; empty state: the reserved nutrition desk). Dream-side staging: `seneschal/SKILL.md`'s Dream
+cards; empty state: the reserved nutrition desk). Dream-side staging: `seneschal/modes/dream.md`'s
 mode searches the store for meal-plan/meal-idea pages by title/tag convention (no hardcoded
 database ids — none exist yet) and overwrites `state/meals.json` (`{"staged_at", "plans":
 [{"title","url","summary"?,"tags"?}, ...]}`); no matches → still writes a valid empty-`plans` file;

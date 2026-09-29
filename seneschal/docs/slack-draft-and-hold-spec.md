@@ -328,7 +328,7 @@ Stale docs are a bug. The build PR touches, minimum: `subagents/slack-triage/SKI
 sub-step, triggers, volume guard), `seneschal/references/comms-mapping.md` (Slack section → SSOT + hold
 loop pointers), `seneschal/references/memory.md` + `seneschal/state/README.md` (additive schema fields +
 `approved` status), `seneschal/references/autonomy-policy.md` (only if wording needs the SSOT pointer),
-`seneschal/SKILL.md` (Triage mode one-liner), and the new `seneschal/references/slack-ssot.md` itself
+`seneschal/modes/triage.md` (the Slack one-liner), and the new `seneschal/references/slack-ssot.md` itself
 (seeded from the skeleton, filled by the owner).
 
 ## Phasing
