@@ -1,0 +1,10 @@
+{
+  "schema": "seneschal.accounts/1",
+  "accounts": {
+    "00000000-0000-0000-0000-000000000000": {
+      "label": "main",
+      "email": null,
+      "note": "Copy to accounts.json and key each entry by the account uuid a plan-usage.jsonl row reports. Only label is read."
+    }
+  }
+}

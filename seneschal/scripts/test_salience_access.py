@@ -224,9 +224,13 @@ class IngestTaggingUnit(unittest.TestCase):
         self.assertEqual(self._row("plain"), (0, None, None))
 
     def test_unknown_category_coerced_ineligible_prediction_cleared(self):
+        # A REGISTERED source, not a placeholder: once `index_records` runs the provenance guard
+        # before it reads anything, a source outside that registry (`provenance_guard.py`) is
+        # refused rather than tagged. The subject here is category coercion, not naming.
         ri.index_records(self.conn, [
-            {"source": "j", "ref": "weird", "text": "x", "salience_cat": "not.a.category"},
-            {"source": "j", "ref": "bereavement", "text": "a family bereavement",
+            {"source": "journal", "ref": "weird", "text": "x",
+             "salience_cat": "not.a.category"},
+            {"source": "journal", "ref": "bereavement", "text": "a family bereavement",
              "disposable": 1, "salience_cat": "identity.core"},
         ], CFG)
         self.assertEqual(self._row("weird")[:2], (0, "unknown"))
