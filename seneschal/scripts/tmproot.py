@@ -26,10 +26,9 @@ run's temp traffic is pointed at one directory that the run owns, and the run de
    (`guard_tests`) are the BLOCKING half of the regression guard: they fail if the redirect is not in
    force, in-process or in a child, or if the guard stops sorting first; `test_tmproot.py` fails if a
    root `ci.yml` discovers has no guard.
-2. **A runner that starts several suites** (a local all-gates runner, when one lands) calls
-   `install()` in its own process before the first step, so every child inherits the root and each
-   root's own `install()` ADOPTS it rather than nesting a second one; after the run it can print
-   `new_leaks()`.
+2. **`ci_local.py`** calls `install()` in its own process before the first step, so every child it
+   starts — the unittest roots, `npm test` — inherits the root, and each root's own `install()`
+   ADOPTS it rather than nesting a second one. After the run it prints `new_leaks()`.
 
 Not covered: one module run by name (`python -m unittest test_jobs`) never imports the guard. That is
 a handful of directories, not a suite's thousands; a module that wants the guarantee anyway can call
@@ -42,8 +41,8 @@ a handful of directories, not a suite's thousands; a module that wants the guara
   at it (children inherit those; Node's `os.tmpdir()` and .NET's `GetTempPath()` read them too),
   export `SENESCHAL_TEST_TMPROOT`, and at interpreter exit count what the run left behind, remove the root,
   and print one line to stderr if anything was left or could not be removed.
-* **Adopt** — `SENESCHAL_TEST_TMPROOT` names an existing directory, so a parent (a runner, an outer
-  suite) owns it: point this process at the same root and leave removal to the owner. One root per run
+* **Adopt** — `SENESCHAL_TEST_TMPROOT` names an existing directory, so a parent (`ci_local.py`, an
+  outer suite) owns it: point this process at the same root and leave removal to the owner. One root per run
   keeps paths short (Windows' 260-character limit) and the leftover count whole.
 * **Sweep** — an owner first removes sibling roots under `seneschal-test-runs/` older than
   `STALE_AFTER_SEC`, so a run killed before its exit hook leaves one directory until the next run, not

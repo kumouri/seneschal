@@ -138,15 +138,15 @@ class SeneschaldControlUpdateTest(unittest.TestCase):
         what "make origin advance" needs to do below. A bare repo has no checkout to protect.
         """
         origin = tempfile.mkdtemp(prefix="seneschald_origin_")
-        self.addCleanup(shutil.rmtree, origin, ignore_errors=True)
+        self.addCleanup(tmproot.rmtree, origin)
         self._git(origin, "init", "--bare", "-b", "main")
 
         repo = tempfile.mkdtemp(prefix="seneschald_test_")
-        self.addCleanup(shutil.rmtree, repo, ignore_errors=True)
+        self.addCleanup(tmproot.rmtree, repo)
         # Seed origin's history through a throwaway clone — a bare repo has no working tree to
         # write `git add`/`commit` against directly.
         seed = tempfile.mkdtemp(prefix="seneschald_seed_")
-        self.addCleanup(shutil.rmtree, seed, ignore_errors=True)
+        self.addCleanup(tmproot.rmtree, seed)
         subprocess.run(["git", "-c", "core.fsmonitor=false", "clone", origin, seed],
                        check=True, capture_output=True, text=True)
         self._git(seed, "config", "user.email", "test@example.invalid")
