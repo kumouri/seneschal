@@ -191,5 +191,83 @@ class DiffOutput(Base):
         self.assertIn("SessionEnd", diff)
 
 
+class GuardHooks(Base):
+    """The optional ``--guard`` hooks: opt-in only, same diff-first/append-only guarantees."""
+
+    def guard_items(self, data, event, script):
+        return [(g.get("matcher"), item) for g in data.get("hooks", {}).get(event, [])
+                for item in sm._iter_command_items([g]) if script in item["command"]]
+
+    def test_no_guard_is_installed_unless_named(self):
+        self.assertEqual(self.run_cli("--apply"), 0)
+        data = self.read()
+        self.assertNotIn("PreToolUse", data["hooks"])
+        self.assertNotIn("PostToolUse", data["hooks"])
+
+    def test_merge_guard_adds_pre_and_post_failure_entries(self):
+        self.assertEqual(self.run_cli("--apply", "--guard", "merge"), 0)
+        data = self.read()
+        pre = self.guard_items(data, "PreToolUse", "merge_guard.py")
+        post = self.guard_items(data, "PostToolUseFailure", "merge_guard.py")
+        self.assertEqual(len(pre), 1)
+        self.assertEqual(pre[0][0], "Bash|PowerShell")
+        self.assertEqual(pre[0][1]["timeout"], 90)
+        self.assertTrue(pre[0][1]["command"].endswith("seneschal/scripts/merge_guard.py"))
+        self.assertTrue(post[0][1]["command"].endswith("merge_guard.py --post-tool-use"))
+
+    def test_all_excludes_the_notion_only_query_shape_hook(self):
+        self.assertEqual(self.run_cli("--apply", "--guard", "all"), 0)
+        data = self.read()
+        for script in ("bash_path_guard.py", "script_file_guard.py", "merge_guard.py",
+                       "branch_delete_guard.py"):
+            self.assertEqual(len(self.guard_items(data, "PreToolUse", script)), 1, script)
+        self.assertNotIn("PostToolUse", data["hooks"])
+        self.assertEqual(self.run_cli("--apply", "--guard", "query-shape"), 0)
+        self.assertEqual(len(self.guard_items(self.read(), "PostToolUse", "query_shape_hook.py")), 1)
+
+    def test_guards_are_idempotent_and_append_after_existing_entries(self):
+        other = {"matcher": "Bash", "hooks": [{"type": "command", "command": "python x.py"}]}
+        self.write({"hooks": {"PreToolUse": [other]}})
+        self.assertEqual(self.run_cli("--apply", "--guard", "all"), 0)
+        first = self.read()
+        self.assertEqual(first["hooks"]["PreToolUse"][0], other)
+        n_backups = len(self.backups())
+        self.assertEqual(self.run_cli("--apply", "--guard", "all"), 0)
+        self.assertEqual(self.read(), first)
+        self.assertEqual(len(self.backups()), n_backups)
+
+    def test_foreign_guard_left_alone_unless_force_path(self):
+        foreign = "python /elsewhere/seneschal/scripts/merge_guard.py"
+        self.write({"hooks": {"PreToolUse": [
+            {"matcher": "Bash|PowerShell", "hooks": [{"type": "command", "command": foreign}]}]}})
+        merged, notes = sm.merge(self.read(), self.repo, guards=["merge"])
+        cmds = [i["command"] for _, i in self.guard_items(merged, "PreToolUse", "merge_guard.py")]
+        self.assertEqual(cmds, [foreign])
+        self.assertTrue(any("DIFFERENT" in n for n in notes))
+        merged, _ = sm.merge(self.read(), self.repo, force_path=True, guards=["merge"])
+        cmds = [i["command"] for _, i in self.guard_items(merged, "PreToolUse", "merge_guard.py")]
+        self.assertEqual(len(cmds), 1)
+        self.assertIn(str(self.repo).replace("\\", "/"), cmds[0])
+
+    def test_unknown_guard_is_refused_and_nothing_written(self):
+        self.assertEqual(self.run_cli("--apply", "--guard", "nope"), 2)
+        self.assertFalse(self.settings.exists())
+
+    def test_each_guard_row_matches_its_setup_guide(self):
+        guides = {"bash-path": "BASH_PATH_GUARD_SETUP.md", "script-file": "SCRIPT_FILE_GUARD_SETUP.md",
+                  "merge": "MERGE_GUARD_SETUP.md", "branch-delete": "BRANCH_DELETE_GUARD_SETUP.md",
+                  "query-shape": "QUERY_SHAPE_SETUP.md"}
+        self.assertEqual(set(guides), set(sm.GUARDS))
+        for name, guide in guides.items():
+            text = (HERE / guide).read_text(encoding="utf-8")
+            for event, matcher, script, extra, timeout in sm.GUARDS[name]:
+                with self.subTest(guard=name, event=event):
+                    self.assertIn(f'"{event}"', text)
+                    self.assertIn(f'"matcher": "{matcher}"', text)
+                    self.assertIn(f"seneschal/scripts/{script}{extra}", text)
+                    self.assertIn(f'"timeout": {timeout}', text)
+                    self.assertIn(f"--guard {name}", text)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "_doc": "Which repositories the PR guards and the PR sweep act on, and what their base branch is -- `scripts/repo_config.py` reads it. This `.example.json` is the SHIPPED DEFAULT; copy it to `pr-guard.json` (gitignored, per-install owner config) to change anything. Every key may be left empty: `watched_repos: []` means this checkout's own `origin` repository only; `base_branch: null` means `develop` when `origin/develop` exists (Git Flow), else the branch `origin/HEAD` names, else `main`; `protected_branches` ADDS names to the fixed floor (develop, master, main, trunk, HEAD), it can never remove one; `deploy_on_merge: {}` means this checkout's origin repository redeploys the running assistant when a PR merges to `main`. See scripts/MERGE_GUARD_SETUP.md.",
+  "watched_repos": [],
+  "base_branch": null,
+  "protected_branches": [],
+  "deploy_on_merge": {}
+}
