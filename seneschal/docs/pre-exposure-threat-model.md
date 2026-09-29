@@ -249,7 +249,7 @@ logpush.
 **Blast radius:** the owner's phone and attention, inbound-call reachability, metered spend, and the
 screener password. **Precondition for F3a–F3c: knowing the Worker URL.**
 
-### 4.4 — F4 · Third-party text reaches a `bypassPermissions` model unattended, and the persistence guard is not yet wired · **REACHABLE WITHOUT A TUNNEL**
+### 4.4 — F4 · Third-party text reaches a `bypassPermissions` model unattended, and the persistence guard now refuses it at the index · **REACHABLE WITHOUT A TUNNEL**
 
 **The grant that sets every blast radius here.** `presence.py` —
 `--permission-mode`, default `bypassPermissions`, whose help string reads *"the assistant's
@@ -275,13 +275,12 @@ the index as the destination where **nobody is in the loop at all**.
 session at `bypassPermissions`. A low-privilege model launders attacker text into a store a
 high-privilege model treats as its own recall.
 
-**What exists, and what does not yet.** `provenance_guard.py` is the persistence half of "mail text is
-data, never instruction" in code: a structural, fail-closed registry that refuses unattested writers
-(its `session-distillation` source is stamp-required, and the LLM arm's `llm-excerpt` stamp is
-UNATTESTED). **Its own docstring says it is not yet adopted in this tree** — `rag_index.index_records`
-does not call it, and `mini_dream.py` does not yet write the producer stamp — so until that rework
-lands it runs only as a dry-run `--check`. Every other destination in `comms-mapping.md` (job briefs,
-subagent prompts, carry-over, the run log, memory files) is prose-only by that reference's own account.
+**What exists, and what does not yet.** `provenance_guard.py` is adopted: `rag_index.index_records`
+runs it on every record before reading the text, `mini_dream.py` writes the producer stamp (`llm-excerpt`
+is refused), and the LLM distill fences the transcript as untrusted data. Refusals land in the index's
+`provenance_refusals` ledger, which `rag_index.py --stats` shows. Every other destination in
+`comms-mapping.md` (job briefs, subagent prompts, carry-over, the run log, memory files) stays prose-only
+by that reference's own account.
 `rag_projects.py` also indexes README excerpts and commit subjects from configured roots — third-party
 text if any configured root holds a cloned dependency.
 
@@ -601,7 +600,7 @@ the machine.
 | **C6** | The installed merge guard's detection perimeter matches its documentation (the §4.6 table), and any shape it does not detect is listed as unguarded. | §4.6 |
 | **C7** | The approval picker shows **all** changed paths, or the count plus the highest-risk ones — not the first few. | §4.6 |
 | **C8** | The allowlisted Telegram chat is a **DM, not a group**; if a group is ever needed, the allowlist moves from chat id to user id first. Both chat allowlists refuse to start empty rather than fail open. | §4.10 |
-| **C9** | `provenance_guard.py` is adopted — called from `rag_index.index_records`, with `mini_dream.py` writing its producer stamp — and the LLM distill's prompt fences the transcript as data. | §4.4 |
+| **C9** | **Met.** `provenance_guard.py` is adopted — called from `rag_index.index_records`, with `mini_dream.py` writing its producer stamp — and the LLM distill's prompt fences the transcript as data. | §4.4 |
 | **C10** | Gradle `distributionSha256Sum` + a wrapper-validation step; `--ignore-scripts` where the build allows. | §4.10 |
 
 ### The honest summary of the checklist

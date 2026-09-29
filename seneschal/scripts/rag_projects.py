@@ -496,6 +496,8 @@ def main(argv=None):
 
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     out = Path(args.out)
+    # Atomic, both of them: a rescan takes minutes and these are the only copies. `projects.jsonl`
+    # is also the RAG ingest's input, so a torn file is a silently-truncated index, not a crash.
     mw.write_text(str(out), "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records))
     mw.write_text(str(args.map), render_map(summaries, gh, now))
     print(f"scanned {len(summaries)} local projects, {len(gh)} GitHub repos "

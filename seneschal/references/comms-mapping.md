@@ -179,16 +179,18 @@ makes an injected sentence there survive and repeat.
 
 **That one row is enforced in code — and the other rows are still prose.** Say the asymmetry out
 loud, because a partial guard that reads as total is worse than none:
-`../scripts/provenance_guard.py` is built to run inside `rag_index.index_records`, the single choke
-point every write to the index passes through (**not yet wired in this tree** — until the RAG rework
-adopts it, it runs only as its dry-run `--check` CLI), and **refuses to persist anything whose writer cannot vouch for
-it**. It decides on the source name and a producer stamp — **never on the text**, deliberately: "is
+`../scripts/provenance_guard.py` runs inside `rag_index.index_records`, the single choke point every
+write to the index passes through (Dream's `--ingest`, `--local`, `--chat`, `rag_projects.py`), checks
+every record **before its text is read**, and **refuses to persist anything whose writer cannot vouch
+for it**. It decides on the source name and a producer stamp — **never on the text**, deliberately: "is
 this an email?" asked of a blob is the game nobody wins. It **fails closed** (an unregistered source,
 a missing stamp, an unrecognised stamp: all refused), it records every refusal in the index's own
-`provenance_refusals` table where `rag_index.py --stats` will show it, and its only override is
-`--allow-unattested SOURCE` typed on a command line. First thing it turns away: an LLM arm of
-`mini_dream.py` that fed verbatim transcript to a summarizer and stored the result unreviewed
-(`../docs/pre-exposure-threat-model.md`).
+`provenance_refusals` table where `rag_index.py --stats` shows it (refs and reasons only, never the
+refused text), and its only override is `--allow-unattested SOURCE` typed on a command line — counted
+in the same ledger. First thing it turns away: the LLM arm of `mini_dream.py`, which feeds verbatim
+transcript to a summarizer; every distillation carries a producer stamp (`deterministic-fields` is
+archived, `llm-excerpt` is refused), and both arms still land in the session-distillations log that
+orientation tails (`../docs/pre-exposure-threat-model.md`).
 
 **What that does NOT cover, stated plainly.** The other rows of this table — a job brief, a
 delegation, a subagent prompt, `carry-over.md`, `standing-safety.json`, `brief-prestage.json`,
