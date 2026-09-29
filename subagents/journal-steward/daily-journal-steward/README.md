@@ -25,35 +25,33 @@ daily-journal-steward/
 All database/page ids in `references/databases.md` are **placeholders** — the store setup flow fills a
 local (gitignored) copy with your workspace's real ids.
 
-## How the recurring task uses the skill
+## How the daily run is fired — the presence daemon owns it
 
-A scheduled Claude run starts a fresh session, so the schedule's **prompt loads `SKILL.md` from this
-folder** and executes it. No capability install required. (Optional: install it via **Settings →
-Capabilities** so you can also invoke it by name in any chat.)
+**No Task Scheduler entry and no Claude Desktop scheduled task.** The resident daemon has a built-in
+slot scheduler: `SLOTS_TEMPLATE` in `../../../seneschal/scripts/presence.py` carries
+`{"name": "daily-journal", "at": "05:00"}`, whose prompt is *"Run the Daily Journal
+(subagents/journal-steward/daily-journal-steward/SKILL.md). Use {tz}. Run silently."* (`{tz}` is
+rendered from the owner's configured timezone). `maybe_run_slots` fires it at most once per local day
+and spawns a fresh headless `claude -p` for it, so the run loads `SKILL.md` from disk exactly as a cold
+session would. Full cadence, the catch-up window (`--slot-catchup-min`, default 180 min) and the kill
+switch (`--no-slots`): `../../../seneschal/scripts/SCHEDULING.md` §1.
 
-## Daily schedule config
+The **time lives in `presence.py`** (machine-local wall clock, assumed to match the owner's timezone),
+so moving 05:00 is a code change there, not a schedule someone enables. (A standalone Desktop scheduled
+task still works — SCHEDULING.md lists it as the legacy path — but with the daemon running it would
+double-process the journal.)
 
-Enable a daily scheduled task with:
-
-- **Schedule:** `0 5 * * *`  (daily at **5:00 AM**, in the owner's configured timezone)
-- **Prompt:**
-
-  > Daily Journal Steward — daily run. Read the skill at
-  > `<repo>\subagents\journal-steward\daily-journal-steward\SKILL.md`
-  > and follow it exactly to process the owner's Interstitial Journal for the most recent completed
-  > journal day, using the connected Notion MCP. Use the owner's configured timezone; treat
-  > after-midnight entries as the prior day. Honor the skill's critical-path-first /
-  > never-load-schemas / batch-aggressively rules and write the Agent Run Log entry incrementally.
-  > Only pause to ask if you hit one of the skill's "ask for clarification" conditions.
-
-The framework's scheduled-task wiring lives in `../../../seneschal/scripts/SCHEDULING.md`.
+**One duplicate-processing risk the repo cannot see:** if an original journal automation (e.g. a
+Notion "Daily Journal Steward" agent) is still switched on in the workspace, both systems process the
+same journal. Whether it is off is a workspace fact, not a tracked file — hence checklist step 2.
 
 ## Cutover checklist
 
 1. ⬜ Run store setup so a local copy of `references/databases.md` carries your real Notion ids.
 2. ⬜ **Turn off any existing journal automation** (e.g. an original Notion agent), so only one system
    processes the journal.
-3. ⬜ Enable the daily schedule above.
+3. ✅ Daily run wired — the daemon's `daily-journal` slot at 05:00 (above); nothing to enable by hand
+   once `/setup daemon` has installed `seneschald`.
 4. ⬜ Watch the first live run: check the cleared journal + carry-over callout and the
    **🧠 Agent Run Log** entry (its page body should hold the day's verbatim entries). The run log's
    incremental writes mean even a partial run leaves a trace.

@@ -37,7 +37,7 @@ three invocation shapes, which is the menu for any new port:
 
 | Archetype | Shape | Notes |
 |-----------|-------|-------|
-| **Scheduled** | its own recurring task (like DJS's daily 5:00 AM run) | For pipelines that must run whether or not anyone asks. Wire via `../../seneschal/scripts/SCHEDULING.md`. |
+| **Scheduled** | a presence-daemon slot (like DJS's `daily-journal` slot at 05:00 in `presence.py`'s `SLOTS_TEMPLATE`) | For pipelines that must run whether or not anyone asks. The daemon owns the cadence — add a slot, don't hand-create a Task Scheduler or Desktop scheduled task. Wire via `../../seneschal/scripts/SCHEDULING.md` §1. |
 | **Inline / event-chained** | loaded and executed by a parent skill in the same session, right after the event it reacts to | Cheapest: no extra schedule. E.g. a scanner that runs on each new capture the parent just created. The parent notes the delegated run (and counts) in its run log. |
 | **On-demand** | invoked by name/@mention when the owner asks | For irregular work. The parent skill's only duty is a carry-over note when the on-demand work is outstanding. |
 
@@ -52,9 +52,22 @@ Anything **outbound** (a sub-skill that emails or messages someone) goes through
 bridges (`../../seneschal/scripts/` — `google_*` / `proton_*`) and is **draft-and-hold** under the autonomy
 policy — a ported agent never gets its own send path.
 
+**A delegation whose miss or double-run has a real cost is owned in code, not in prose.** "Invoke X at
+the end of the run" is a sentence a turn decides whether to honour — and it will eventually skip it,
+defer it to another mode ("the Brief will send it"), or run it twice. When the outcome matters (an
+outbound send is the usual case), put the *is it due / was it done* decision in a small deterministic
+gate script with a status exit code and a recording wrapper around the action, have the parent skill
+**read** that status, and give the daemon a backstop that runs the gate on its own. The parent then
+reports what the gate said — never that the work "will happen later".
+
 ## Status
 
 The pattern is proven: the Daily Journal Steward shipped this way, and four private satellite agents
 were ported with the same recipe in the original workspace (they are personal and not part of this
 repo). To port your own: follow the recipe, pick an archetype, and wire the hook in
 `daily-journal-steward/references/delegations.md`.
+
+**Invocation, as actually built.** DJS itself runs from the presence daemon's `daily-journal` slot
+(05:00 local; `../../seneschal/scripts/SCHEDULING.md` §1) — there is no separate schedule to
+enable. The one cutover step that stays manual is turning off whatever automation the port replaces
+(e.g. the original Notion agent), so two systems never process the same journal.

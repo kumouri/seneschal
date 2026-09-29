@@ -5,19 +5,9 @@ __pycache__/
 .venv/
 
 # Secrets (email/OAuth/SMTP/SMS/Telegram/calls/Discord/Signal/Google) — never commit
-**/gmail_oauth.env
-**/google.env
-**/proton.env
-**/push-sms.env
-**/push-call.env
-**/telegram.env
-**/discord.env
-**/signal.env
-**/rag.env
-**/router.env
-**/sentiment.env
-**/ha.env
-**/cockpit.env
+# Every *.env file is ignored globally, so a new secret env file is ignored by default rather than
+# by remembering to add a per-name line. Only the tracked *.env.example templates ship.
+*.env
 **/notion-mcp.json
 **/slack-mcp.json
 **/*.secret
@@ -62,7 +52,11 @@ seneschal/store/notion/mcp.json
 archons/scaffolds/
 archons/need/
 archons/stable/
-archons/*/out/
+# `out/*` rather than `out/`: git never descends into an excluded *directory*, so a re-include of a
+# tracked README inside one would be silently ignored. Only an out/README.md is ever tracked —
+# deliverables carry the owner's data.
+archons/*/out/*
+!archons/*/out/README.md
 archons/*/state/*
 !archons/*/state/README.md
 !archons/*/state/*.example.json
@@ -74,7 +68,7 @@ archons/*/voice-profile.md
 
 # Runtime state — local-first, regenerated; track only docs + examples.
 # The runtime memory logs (state/run-log.md, state/carry-over.md,
-# state/context-digest.md) live here so the daemon can run off main without pull
+# state/standing-safety.json, state/brief-prestage.json, state/open-loops.json) live here so the daemon can run off main without pull
 # conflicts on files the assistant rewrites at runtime; the active store is the
 # system of record. See seneschal/state/README.md.
 seneschal/state/*

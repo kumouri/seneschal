@@ -241,7 +241,7 @@ def read_summary(state_dir) -> dict:
 
 
 # --------------------------------------------------------------------------------------------------
-# state/meals.json — the Dream-staged Notion meal-plan snapshot (seneschal/SKILL.md, Dream mode step 2d)
+# state/meals.json — the Dream-staged Notion meal-plan snapshot (seneschal/modes/dream.md, step 2d)
 # --------------------------------------------------------------------------------------------------
 
 def read_meals(state_dir) -> dict:

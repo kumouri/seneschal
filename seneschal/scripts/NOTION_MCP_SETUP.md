@@ -12,7 +12,7 @@ this session"* and your "mark it done" acks never reach the Tasks / ⏰ Reminder
 > ack only lives in the volatile warm session, never the ⏰ Reminders DB. A reboot clears the session, the
 > next reminder run reads a still-un-acked row, and it **re-nudges you for something you already did**.
 > With Notion wired, the assistant writes the ack straight through to Notion, so it survives the reboot
-> and the loop stops. (See `seneschal/SKILL.md` Chat mode + the persona's no-false-writes principle.)
+> and the loop stops. (See `seneschal/modes/chat.md` + the persona's no-false-writes principle.)
 
 > Symptom this fixes: you tell the assistant "I did these," it says "✅ done," but the Tasks DB / brief
 > never reflect it — because the write had nowhere to go. (The persona also refuses to claim a write it

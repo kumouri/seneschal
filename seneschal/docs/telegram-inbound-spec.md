@@ -104,7 +104,7 @@ auto-runs a tool on an inbound file.
   (only `README.md` + `*.example.*` are tracked), so a keeper file would need a gitignore negation to
   exist at all — runtime dirs here are made by code and documented in `state/README.md`, like `sessions/`
   and `archives/`.
-- `seneschal/SKILL.md` — Dream step 2 calls the inbox sweep.
+- `seneschal/modes/dream.md` — step 2 calls the inbox sweep.
 
 ### 2.4 Edge cases & guardrails
 - **20 MB cap.** The Bot API's `getFile` download tops out at **~20 MB**. Health-export zips can exceed
