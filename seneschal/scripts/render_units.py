@@ -68,6 +68,7 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 import model_config  # noqa: E402
+import setup_checkout  # noqa: E402
 import setup_state  # noqa: E402
 
 REPO_ROOT = HERE.parents[1]
@@ -869,6 +870,19 @@ def _main(argv: list[str]) -> int:
     except RenderError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+
+    # Registrations pin absolute paths: never pin a disposable git worktree the owner
+    # didn't explicitly accept (setup_checkout.py; preflight records the choice).
+    checkout = setup_checkout.detect(repo)
+    ledger = setup_state.load(Path(args.state_file) if args.state_file
+                              else repo / "seneschal" / "state" / "setup-state.json")
+    if not setup_checkout.accepted(ledger, checkout):
+        if not dry:
+            print(f"error: {setup_checkout.refusal(checkout)}", file=sys.stderr)
+            print("       (accepting records the choice: python seneschal/scripts/setup_checkout.py accept)",
+                  file=sys.stderr)
+            return setup_checkout.EXIT_UNACCEPTED_WORKTREE
+        print(f"warning: {setup_checkout.refusal(checkout)} --apply will refuse until accepted.")
 
     setup_dir = repo / SETUP_DIR_REL
     if models:

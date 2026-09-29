@@ -60,10 +60,11 @@ seneschal/
                    pipelines, archive_common.py + telegram_ingest.py + discord_export_ingest.py
                    + sms_ingest.py + archive_aggregate.py (message archiver),
                    setup_state.py + setup_env.py + setup_doctor.py + settings_merge.py +
-                   render_units.py (the /setup wizard's deterministic substrate:
-                   resumability ledger + manifest-driven env-file writer + the /doctor
-                   green/yellow/red health board + the ~/.claude/settings.json hook merger
-                   + the daemon chapter's launcher/unit/plist renderer),
+                   render_units.py + setup_checkout.py (the /setup wizard's deterministic
+                   substrate: resumability ledger + manifest-driven env-file writer + the
+                   /doctor green/yellow/red health board + the ~/.claude/settings.json hook
+                   merger + the daemon chapter's launcher/unit/plist renderer + the
+                   git-worktree guard preflight and render_units --apply enforce),
                    check_placeholders.py (CI guard), *_SETUP.md guides,
                    seneschald-control.ps1 + run-*.cmd (Windows scheduled-task wrappers)
   setup/           env-manifest.json — the machine-readable manifest of every configurable env

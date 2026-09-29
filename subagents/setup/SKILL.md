@@ -27,8 +27,23 @@ domain logic; this skill owns the order, the ledger conventions, and the resume 
   `declined` with an honest one-line note of what won't work — never a silent gap. The
   framework runs on the shipped defaults (default-Claude persona, no store, Telegram-less)
   even if the owner skips it all.
-- **One question at a time, defaults shown.** This is a conversation, not a form. Offer the
-  vanilla default; Enter/skip keeps it.
+- **One question per turn, always — asked with the picker.** This is a conversation, not a
+  form. Never batch questions into one message, however related. Every question goes through
+  the host's selectable-options question tool (Claude Code: `AskUserQuestion`), including the
+  free-form ones: offer concrete suggestions as options (the vanilla default first, then
+  candidates from the store / the candidate-facts sheet / what was detected), rely on the
+  tool's free-text "Other" for anything else, and include a **Skip** option. Prose-only
+  questions are the fallback for a host with no picker, not a style choice — one interaction
+  mode, start to finish.
+- **A turn that asks something ends on the question.** No tool call, command output, or file
+  write after it — a trailing file card under the question reads as "wrote the file and
+  stopped", and the owner reports a halt while the wizard is actually waiting. Do the writes
+  *before* asking, or in the next turn.
+- **Every prefilled value names its source.** A value the wizard didn't ask for — from the
+  store, the owner's global `CLAUDE.md`, the Claude account, the machine — is shown *with*
+  where it came from ("from your global CLAUDE.md", "from your Claude account", "from this
+  machine's clock") and confirmed / edited / rejected before it lands. Never silently accept
+  an inferred fact.
 - **Act-low locally; per-step confirmation for anything that installs or registers.** Writing
   gitignored local files is act-low. Running an installer (`winget`/`brew`/a curl script),
   `uv sync`, `npm ci`, `claude mcp add`, or anything that opens an OAuth browser tab gets a
@@ -60,7 +75,10 @@ domain logic; this skill owns the order, the ledger conventions, and the resume 
   `python seneschal/scripts/setup_state.py mark <chapter> in-progress --step "<where>"`;
   on exit: `mark <chapter> done|declined|blocked|awaiting-auth-restart --summary "<one line>"
   [--artifacts p1,p2] [--hash-artifacts]`. The `--step` cursor is what makes a mid-chapter
-  crash resume inside the chapter, not at its top.
+  crash resume inside the chapter, not at its top — so a multi-section chapter re-marks
+  `in-progress --step "<section>"` as **each** section starts (the board shows it as
+  `at: <section>`), and a resumed chapter reads it back with `get <chapter>` and picks up
+  there.
 - **Resume point** = the first chapter, in the order below, whose status is `pending`,
   `in-progress`, `awaiting-auth-restart`, or `stale`. `declined` and `blocked` chapters are
   *not* resume points — mention them in one line when showing the board and move on (the
@@ -81,7 +99,7 @@ domain logic; this skill owns the order, the ledger conventions, and the resume 
 
 | # | Chapter id(s) | File | Configures | Artifacts |
 |---|---|---|---|---|
-| 1 | `preflight` | `chapters/preflight.md` | platform + tool inventory, repo sanity, ledger init | — (ledger only) |
+| 1 | `preflight` | `chapters/preflight.md` | platform + tool inventory, repo sanity (incl. the git-worktree guard), ledger init | — (ledger only) |
 | 2 | `persona` | `../persona-wizard/SKILL.md` | the assistant's name, voice, demeanor, channel identities | `persona/identity.json`, `persona/persona.md` |
 | 3 | `store` | `../store-setup/SKILL.md` | the data backend (Notion / Obsidian / Markdown) + provisioning | `seneschal/store/config.json` |
 | 4 | `owner-interview` | `chapters/owner-interview.md` | who the owner is — profile, timezone, habits, escalation | `persona/owner-profile.md` |

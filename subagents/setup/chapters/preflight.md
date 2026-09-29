@@ -1,8 +1,9 @@
 # Chapter: preflight
 
 Look before anything is touched. This chapter detects the platform, inventories the tools the
-later chapters lean on, sanity-checks the checkout, initializes the ledger, and shows the owner
-the road ahead. **It writes nothing but the ledger** — no env files, no installs, no persona.
+later chapters lean on, sanity-checks the checkout (including the git-worktree guard),
+initializes the ledger, and shows the owner the road ahead. **It writes nothing but the
+ledger** — no env files, no installs, no persona.
 
 ## 1 — Platform
 
@@ -39,6 +40,29 @@ offer installs here — the chapter that *needs* a missing tool owns that conver
 - **A real checkout:** `git rev-parse --show-toplevel` from the repo root succeeds and points
   at this directory. If not (a tarball download), say plainly that self-update and the
   merge-is-deploy loop won't work, and continue — nothing else here needs git history.
+- **Not a git worktree** (checked before anything else is written):
+
+  ```
+  python seneschal/scripts/setup_checkout.py check
+  ```
+
+  It compares `git rev-parse --git-dir` with `--git-common-dir` and records the verdict in
+  the ledger's `checkout` block. Claude Code's desktop app often opens a session in an
+  **auto-created worktree** (`<repo>/.claude/worktrees/<name>`, branch `claude/<name>`) —
+  and every artifact this wizard writes is gitignored, so it would all land in a disposable
+  folder the app may clean up, not in the checkout the owner thinks they set up. When the
+  verdict says `"worktree": true`, **stop** and say its `message` plainly (it names both
+  paths): run `/setup` from the main checkout instead, or type **use this worktree** to
+  proceed. Only that explicit reply accepts it:
+
+  ```
+  python seneschal/scripts/setup_checkout.py accept
+  ```
+
+  Anything else → stop the walk here (leave `preflight` `in-progress`; nothing else has
+  been written). The acceptance is recorded per path, and the `daemon` chapter —
+  plus `render_units.py --apply` itself — refuses to pin an unaccepted worktree into
+  a registration.
 - **`seneschal/state/` writable:** the ledger write in step 4 is itself the probe. If it
   fails, surface the OS error and stop — every later chapter depends on writing state.
 
@@ -66,5 +90,5 @@ where it left off), and that `/setup <chapter>` jumps anywhere.
 Then mark and move on:
 
 ```
-python seneschal/scripts/setup_state.py mark preflight done --summary "<platform>; python <ver>, git <ver>, claude <ver>; uv/node <found|missing>"
+python seneschal/scripts/setup_state.py mark preflight done --summary "<platform>; python <ver>, git <ver>, claude <ver>; uv/node <found|missing>[; worktree accepted]"
 ```
