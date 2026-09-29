@@ -91,3 +91,7 @@ seneschal/state/*
 !seneschal/state/*.example.json
 !seneschal/state/*.example.jsonl
 !seneschal/state/*.example.md
+
+# Claude Code's per-session worktrees (and the job worktrees' marker path) — disposable checkouts,
+# never part of the tree. Docs name this path, so it must resolve as ignored runtime, not a dangling pointer.
+.claude/worktrees/
