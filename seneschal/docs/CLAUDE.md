@@ -30,11 +30,11 @@ specs and carry no status.
 
 ## The daemon and its lifecycle
 
-- `asyncio-daemon-design.md` + `asyncio-daemon-plan.md` — **PARTIAL(phases 0-3 BUILT)** — the
-  reactive core: supervised tasks under one `asyncio.gather`, each behind `_supervise`.
+- `asyncio-daemon-design.md` + `asyncio-daemon-plan.md` — **BUILT** — the reactive core: nine
+  supervised tasks under one `asyncio.gather`, each behind `_supervise`; the loop as deployed.
 - `how-to-add-a-daemon-task.md` — REFERENCE — the explicit gather-and-`_supervise` mechanism, the
   steps, and what not to do.
-- `hung-turn-deadline-spec.md` — **PARTIAL(P1+P2 BUILT; §4 decided)** — a hang is a gap between
+- `hung-turn-deadline-spec.md` — **BUILT(P1, P2; P3 is deliberately nothing)** — a hang is a gap between
   stream events, never a cap.
 - `seneschald-revive-spec.md` — **PARTIAL(watchdog side BUILT; the presence.py halves of §8/§9
   pending)** — revives a dead daemon; §9 catches it alive on the wrong account.
@@ -131,9 +131,9 @@ specs and carry no status.
   report-only until an allowlist exists.
 - `budget-headroom-spec.md` — **PARTIAL(validator BUILT; no generator here)** — headroom is computed
   in code and validated, independent of the byte cap.
-- `context-budget-collisions-spec.md` — **PARTIAL(phases 1-3 BUILT; `--enforce-chain` unwired)** —
-  chain-continuity + a rechain helper.
-- `concurrent-pr-collisions-spec.md` — **PARTIAL(phase 1, 2R, 2b-as-a-job, 2a's detection + §5B BUILT as modules; daemon wiring pending)** — a
+- `context-budget-collisions-spec.md` — **PARTIAL(phase 1 BUILT; `--enforce-chain` unwired; the
+  phase-2 rechain helper not in this tree)** — chain-continuity for the one ledger every PR edits.
+- `concurrent-pr-collisions-spec.md` — **PARTIAL(phase 1, 2R, 2b-as-a-job, 2a's detection + §5B BUILT, run by the daemon's PR watch; phase 1.5 and 2a's report unbuilt)** — a
   picker names which other open PR shares its files; the daemon rebases BEHIND PRs and repairs
   ledger and Markdown conflicts, keeping both sides (§5A.9); a PR a still-running job opened is a
   draft until that job ends (§5B, `job_pr_draft.py`).
