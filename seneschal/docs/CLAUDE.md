@@ -130,8 +130,8 @@ specs and carry no status.
   range + a CRLF-normalized `sha256` in an HTML-comment JSON block; an (unbuilt) checker reports
   FRESH/MOVED/STALE/GONE per entry, reusing `check_context_pointers.py`'s path resolution,
   report-only until an allowlist exists.
-- `budget-headroom-spec.md` — **BUILT(phase 0; further phases archived)** — headroom is generated in
-  code and validated, independent of the byte cap.
+- `budget-headroom-spec.md` — **PARTIAL(validator BUILT; no generator here)** — headroom is computed
+  in code and validated, independent of the byte cap.
 - `context-budget-collisions-spec.md` — **PARTIAL(phases 1-3 BUILT; `--enforce-chain` unwired)** —
   chain-continuity + a rechain helper.
 - `concurrent-pr-collisions-spec.md` — **PARTIAL(phase 1, 2R, 2b-as-a-job, 2a's detection + §5B BUILT as modules; daemon wiring pending)** — a
