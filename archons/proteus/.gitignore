@@ -28,6 +28,8 @@ out/
 profile.json
 watchlist.json
 voice-profile.md
+# the owner's company judgements (promote_intel.py writes it; only company-intel.example.json is tracked)
+company-intel.json
 
 # --- local noise ----------------------------------------------------------------
 __pycache__/

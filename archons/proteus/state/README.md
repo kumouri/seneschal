@@ -9,7 +9,7 @@ This is the archon-wide convention — see [`seneschal/references/archons.md`](.
 | --- | --- | --- |
 | `state/` | runtime churn — ledgers, "latest" caches, counters, queues, sentinels, logs | no |
 | `out/` | **deliverables** — drafted resumes/covers/research, digests, generated views | no (they embed the owner's contact details) |
-| `<archon>/` | curated inputs + code — `profile.json`, `watchlist.json`, `voice-profile.md`, `tools/`, `.gitignore` | **yes** (private inputs as `*.example.*` seeds) |
+| `<archon>/` | curated inputs + code — `profile.json`, `watchlist.json`, `voice-profile.md`, `company-intel.json`, `tools/`, `.gitignore` | **yes** (private inputs — `profile.json`, `watchlist.json`, `voice-profile.md`, `company-intel.json` — are gitignored, tracked only as `*.example.*` seeds; `company-intel.json` is written only by `promote_intel.py`) |
 
 Paths are defined once in [`tools/proteus_paths.py`](../tools/proteus_paths.py) — import that
 rather than rebuilding them, so the tools can't drift apart.
@@ -18,10 +18,12 @@ rather than rebuilding them, so the tools can't drift apart.
 
 | file | written by | what it is |
 | --- | --- | --- |
-| `seen.json` | `hunt_cycle.py` | **The dedup ledger** — `url → {first_seen, last_seen, best_score, notified, …}`. Decides what counts as a *new* match. **Losing this re-alerts every posting**, so the migration moves it rather than regenerating it. |
-| `cycles.jsonl` | `hunt_cycle.py` | One append-only line per hourly cycle: `{at, fetched, kept, new_hot, notified, deferred, quiet}`. The daily digest rolls these up. |
+| `seen.json` | `hunt_cycle.py` (the only writer) | **The dedup ledger** — `url → {first_seen, last_seen, best_score, notified, apply_url, …}`. Decides what counts as a *new* match. **Losing this re-alerts every posting**, so the migration moves it rather than regenerating it. Append-only in practice, so it only grows. `apply_url` is carried so the daily digest can offer the same "apply here, not there" line the hourly alert does; it is **additive and sticky** — an older row simply has no key, and a later fetch that omits it doesn't erase a URL already learned. Read by `daily_digest.py`. |
+| `cycles.jsonl` | `hunt_cycle.py` | One append-only line per hourly cycle: `{at, fetched, kept, new_hot, notified, deferred, quiet, hydration}`. `hydration` is the lazy-description step's summary (`{shortlisted, hydrated, rescored, warnings}`, or `{error}`). The daily digest rolls these up. |
 | `jobs-latest.json` | `fetch_jobs.py` | Most recent raw fetch across the watchlist. Tens of MB, overwritten hourly. |
-| `scored-latest.json` | `score_jobs.py` | Most recent scored pool — the live board. Tens of MB, overwritten hourly. |
+| `scored-latest.json` | `score_jobs.py`, then `hunt_cycle.py` | Most recent scored pool — the live board. Tens of MB, overwritten hourly. `hunt_cycle` rewrites it (atomically) only when the hydrate-and-rescore step changed a row. |
+| `company-intel-pending.jsonl` | `record_intel.py` (append-only); pruned by `promote_intel.py` | **Proposed company intel awaiting promotion** — one JSON line per finding a work-up recorded (`{company, adjust, tags, note, source, updated, recorded_at}`). The archon appends here INSTEAD of writing the curated `company-intel.json`. `score_jobs.py` overlays it on the ledger so a finding tilts scoring the same cycle, marked `[pending review]`; `promote_intel.py --apply` (Dream step 2e) merges it into the local, gitignored `company-intel.json` and prunes a line only once its content has **landed** (refused, owner-weakening proposals stay queued). The opt-in `--via-pr` path (private forks only) lands via a PR instead, so a held or red PR never loses an entry. Deleting it discards every unpromoted finding. |
+| `wttj-discovery.json` | `wttj_discover.py` | The last Welcome-to-the-Jungle discovery report — which companies post into US metros and how often, from the published sitemaps. An occasional curation aid, not part of the hunt; safe to delete. |
 | `paused` | you (`touch`) | Sentinel. While it exists the hourly hunt exits immediately — the pause switch. |
 | `logs/` | deploy/delegate commands | Archon deploy + A2A delegation logs and pid files. |
 | `ledger.jsonl` | demiurge (`--ledger-dir`) | The delegation ledger — every delegated task's request/response. Runtime churn, deliberately **not** in the tracked stable (see `archons.md`). |

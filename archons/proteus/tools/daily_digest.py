@@ -7,6 +7,9 @@ matches (alerted or not), near-misses worth a second look, flagged-but-strong po
 that disappeared since yesterday (the missed-window signal). Emails it to the owner via Proton and
 pings Telegram with the one-liner. Deterministic — full Proteus workups stay on-demand.
 
+Every job line carries the posting link plus a distinct apply URL where the feed gave one (see
+``_links``), so a mirrored or republished req still points at the employer's own.
+
 Run:  python daily_digest.py [--date YYYY-MM-DD] [--threshold 60] [--near 45]
                              [--no-email] [--no-telegram] [--dry-run]
 """
@@ -28,8 +31,27 @@ import proteus_paths  # noqa: E402  (canonical state/ vs out/ paths)
 HOURLY_DIR = str(proteus_paths.STATE_DIR)
 DIGEST_DIR = str(proteus_paths.DIGEST_DIR)
 SCRIPTS = os.path.join(REPO_ROOT, "seneschal", "scripts")
+SENESCHAL_STATE = os.path.join(REPO_ROOT, "seneschal", "state")
 
 EMAIL_TO = os.environ.get("PROTEUS_DIGEST_TO", "")  # the owner's address; set via env or run-proteus-digest.cmd
+
+
+def record_assertion(text: str) -> bool:
+    """Log the digest ping to the assistant's assertions log, when that module is installed. Lazy +
+    guarded import for the same reason as `hunt_cycle.record_assertion` (an OPTIONAL HOOK): this is
+    an unattended scheduled run, and a missing sibling must cost the row, never the digest.
+
+    The email itself is deliberately NOT recorded — email is not one of the surfaces that log
+    covers. The Telegram one-liner announcing it IS, and that is what the owner reads on the phone."""
+    try:
+        if SCRIPTS not in sys.path:
+            sys.path.append(SCRIPTS)
+        import mouth
+
+        return mouth.record_assertion(SENESCHAL_STATE, surface="telegram", kind="archon",
+                                      speaker="proteus", text=text)
+    except Exception:  # noqa: BLE001 — see the docstring
+        return False
 
 
 def _day_of(iso: str) -> str:
@@ -60,6 +82,20 @@ def _comp(entry: dict) -> str:
     return "comp n/p"
 
 
+def _links(url: str, entry: dict) -> str:
+    """The posting link, plus a distinct apply link when the feed gave one — so a digest line lands
+    the owner on the employer's own req, not only on somebody's copy of it.
+
+    The apply link is shown only when it is genuinely different (``proteus_paths.norm_url``).
+    Degrades: no apply link still leaves the posting link on the row.
+    """
+    parts = [url] if url else []
+    apply_url = str(entry.get("apply_url") or "").strip()
+    if apply_url and proteus_paths.norm_url(apply_url) != proteus_paths.norm_url(url or ""):
+        parts.append(f"· 📨 apply: {apply_url}")
+    return " ".join(parts)
+
+
 def _fmt(url: str, entry: dict) -> str:
     """Headline: company · title · min comp · true-remote verdict · score."""
     verdict = VERDICT_LABEL.get(entry.get("remote_verdict") or "")
@@ -69,7 +105,7 @@ def _fmt(url: str, entry: dict) -> str:
     flag_s = "".join(f"\n  - ⚠️ {f}" for f in flags)
     return (f"- **{entry.get('company')}** · {entry.get('title')} · {_comp(entry)} · {verdict} · "
             f"**{entry.get('last_score', 0):.1f}%**\n  ({entry.get('location') or 'location n/a'}) "
-            f"{url}{flag_s}")
+            f"{_links(url, entry)}{flag_s}")
 
 
 def build_digest(ledger: dict, cycles: list[dict], day: str, threshold: float, near: float) -> tuple[str, dict]:
@@ -190,12 +226,15 @@ def main(argv=None) -> int:
             capture_output=True, text=True, timeout=120)
         sent["email"] = result.returncode == 0
     if not args.no_telegram:
+        line = f"📬 {subject} — emailed to {EMAIL_TO}."
         result = subprocess.run(
             [sys.executable, os.path.join(SCRIPTS, "telegram_send.py"),
              "--env-file", os.path.join(SCRIPTS, "telegram.env"),
-             "--text", f"📬 {subject} — emailed to {EMAIL_TO}.", "--parse-mode", "", "--disable-preview"],
+             "--text", line, "--parse-mode", "", "--disable-preview"],
             capture_output=True, text=True, timeout=60)
         sent["telegram"] = result.returncode == 0
+        if sent["telegram"]:
+            record_assertion(line)
 
     print(json.dumps({"ok": True, "digest": digest_path, "stats": stats, "sent": sent}))
     return 0

@@ -88,6 +88,13 @@ STEPS = {
     "2b": {"label": "RAG index ingest", "owner": "rag_index.py", "max_age_days": 2},
     "2c": {"label": "sentiment cross-check", "owner": None, "max_age_days": 14},
     "2d": {"label": "meal-plan staging", "owner": None, "max_age_days": 7},
+    # The one step whose owner lives outside this directory: the shipped Proteus archon's promoter
+    # (`owner_dir`, repo-relative). And the one step that only exists when something is deployed —
+    # `only_if` names the file whose presence means "this archon is in use here" (its gitignored
+    # profile). Without it the step is still LISTED, but never nudged: an install that never
+    # deployed Proteus must not be told nightly that Proteus's promotion "stopped running".
+    "2e": {"label": "archon intel promotion", "owner": "promote_intel.py", "max_age_days": 7,
+           "owner_dir": "archons/proteus/tools", "only_if": "archons/proteus/profile.json"},
     # 2 days, not 7: the window this protects is "how much can one bad write cost", and every night
     # it does not run is a night of `carry-over.md` with no copy. See state_backup.py.
     "2g": {"label": "state backups", "owner": "state_backup.py", "max_age_days": 2},
@@ -97,6 +104,19 @@ STEPS = {
     "rollup": {"label": "salience rollup (weekly)", "owner": "salience_rollup.py",
                "max_age_days": 21},
 }
+
+#: The repo root the optional `owner_dir` / `only_if` keys are relative to (seneschal/scripts/../..).
+#: A module attribute so a test can point it at a fixture tree.
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def _measured(meta: dict) -> bool:
+    """Can this step be ALARMED on? It needs an owner that stamps it and, when the step declares
+    `only_if`, that file present — an optional component nobody deployed has no step to miss."""
+    if meta.get("owner") is None:
+        return False
+    only_if = meta.get("only_if")
+    return not only_if or os.path.exists(os.path.join(REPO_ROOT, only_if))
 
 
 def _path(state_dir: str) -> str:
@@ -231,7 +251,7 @@ def report(state_dir: str, now: datetime | None = None) -> list[dict]:
             "note": row.get("note"),
             "overdue": overdue,
             # Only a step some script stamps can be alarmed on — see the note on STEPS.
-            "measured": meta["owner"] is not None,
+            "measured": _measured(meta),
         })
     # Worst first: never-run before merely-stale, then by age. `stale()` slices off the top of
     # this, so the nudge names the most alarming thing rather than the alphabetically first.

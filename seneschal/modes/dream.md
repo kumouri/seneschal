@@ -202,18 +202,19 @@ On a Dream run:
    honest "nothing staged right now" beats a missing file); the store unreachable/erroring → **skip the
    write entirely** and leave the prior file exactly as it was — its old `staged_at` stands, and the
    cockpit shows that staleness honestly rather than Dream forcing a write it can't back.
-2e. **Promote pending archon intel (act-low locally, one ask-high PR) — only if an archon that keeps an
-   intel overlay is deployed** (the shipped example is `../../archons/proteus/`). If
+2e. **Promote pending archon intel (act-low, local) — only if an archon that keeps an intel overlay is
+   deployed** (the shipped example is `../../archons/proteus/`). If
    `../../archons/proteus/state/company-intel-pending.jsonl` has unpromoted entries, run `python
-   ../../archons/proteus/tools/promote_intel.py --apply`. It merges them into the archon's tracked
-   intel file in a transient worktree and opens a PR. **That PR is ask-high, not the step-5
-   merge-on-green path** — a tracked data file the archon's scoring reads is a functionality change, so
-   the merge guard HOLDS it and it merges only on the owner's approval. A held merge is the designed
-   outcome, not a failure: Dream records the PR as held-for-approval and moves on. Nothing pending → no
-   PR, as most nights. **The live checkout is never written** — a dirty daemon checkout blocks its
-   `pull --ff-only`. Skip silently if the archon isn't deployed or the queue is gone. **The script
+   ../../archons/proteus/tools/promote_intel.py --apply`. It merges them into the archon's local,
+   **gitignored** intel file (owner data) — no git, no commit, no PR — and refuses any proposal that
+   would weaken an owner entry (it stays queued for the owner). Only an owner who keeps the ledger in
+   a **private fork** adds `--via-pr` (it publishes the file to the checkout's remote): that opens an
+   **ask-high** PR the merge guard HOLDS for the owner's approval — Dream records it as
+   held-for-approval and moves on. Nothing pending → nothing to do, as most nights. No tracked file
+   changes under the live checkout. Skip silently if the archon isn't deployed or the queue is gone. **The script
    stamps 2e itself on a successful run**, including a nothing-pending one — so running it *is* what
-   clears the ledger row, and a `--dry-run` stamps nothing.
+   clears the ledger row, and a `--dry-run` stamps nothing. The 2e row only ALARMS where the archon is
+   deployed (its gitignored `profile.json` exists); elsewhere `status` lists it but never nudges.
 3. **Propose learnings (gated).** Spot repeated patterns worth encoding (*"declines every recruiter
    invite," "archives the X newsletter every time"*) and draft each as a **proposal**. **Weekly, also run
    the Observability rollup:** scan a rolling window of `state/metrics.jsonl` (the metrics the
