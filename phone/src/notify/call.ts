@@ -28,10 +28,14 @@
  *
  * With no persona voice configured (the shipped default) every call is exactly
  * one plain-`<Say>` request.
+ *
+ * `placeTalkCall` is the third shape: a live ConversationRelay conversation with
+ * the owner rather than a spoken line (see its docstring).
  */
 import type { Env } from "../config";
 import { personaFromEnv } from "../config";
-import { escalationGather, say, sayVoiceOf } from "../twiml";
+import { connectRelay, escalationGather, say, sayVoiceOf, wssOf } from "../twiml";
+import { ownerGreeting } from "../relay/owner-prompt";
 
 /** Twilio REST resource for creating a new call on an account (pure — unit-tested). */
 export function callsCreateUrl(accountSid: string): string {
@@ -105,4 +109,27 @@ export async function placeEscalationCall(
 ): Promise<string> {
   const prompt = `${message} — press 1 to let me know you got it, and I'll stop calling.`;
   return createCallInPersonaVoice(env, toE164, (voice) => escalationGather({ prompt, actionUrl: ackUrl, voice }));
+}
+
+/**
+ * Place a talk-mode call: rings `env.USER_CELL_E164` — deliberately the only destination this
+ * function can dial, no `to` parameter exists to override it — and connects live to the
+ * `RelaySession` Durable Object named `sessionId`, running in owner mode (seeded by the caller
+ * BEFORE this is called, so the ConversationRelay handshake finds it already configured). Unlike
+ * `placeCall`/`placeEscalationCall`, this never falls back to a scripted `<Say>`: a garbled
+ * ConversationRelay voice is Twilio's problem (warning 13511), not a reason to skip the
+ * conversation the owner asked for. Also carries a `mode=owner` `<Parameter>` — belt and braces
+ * alongside the Durable Object's own persisted seed (`RelaySession.loadSeed`/`seed`); only the
+ * Worker generates this TwiML, so the parameter is trusted the same way the seed POST is.
+ */
+export async function placeTalkCall(env: Env, base: string, sessionId: string): Promise<string> {
+  const persona = personaFromEnv(env);
+  const twiml = connectRelay({
+    wsUrl: `${wssOf(base)}/ws?s=${sessionId}`,
+    welcomeGreeting: ownerGreeting(persona),
+    ttsProvider: persona.ttsProvider,
+    voice: persona.voice,
+    parameters: [{ name: "mode", value: "owner" }],
+  });
+  return createCall(env, env.USER_CELL_E164, twiml);
 }

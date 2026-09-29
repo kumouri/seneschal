@@ -17,7 +17,7 @@ Inbound call → Worker `POST /voice` runs the cheapest-first cascade (`src/scre
    silent timeout — the `<Gather>` uses `actionOnEmptyResult`) is recorded (`recordGateFail`, never
    counting allowlisted contacts). A **silent timeout blocklists on the first strike** (humans mash
    keys; robots say nothing); a **wrong key** gets two strikes of grace.
-4. gate-pass → `<Connect><ConversationRelay>` → the `RelaySession` Durable Object runs the Claude
+4. gate-pass → `<Connect><ConversationRelay>` → the `RelaySession` Durable Object (screener mode) runs the Claude
    conversation as the assistant persona, then transfers / takes a message / marks spam (via Twilio
    REST), logs to D1, and notifies the owner — **Telegram when configured, SMS only as the fallback**
    (`src/notify/owner.ts`).
@@ -41,8 +41,31 @@ The reminder escalation's cap is a different constant.
   platform default voice. The env overrides it (`ASSISTANT_NAME` / `ASSISTANT_VOICE_ID` /
   `ASSISTANT_TTS_PROVIDER` → `personaFromEnv` in `src/config.ts`); the canonical persona lives in
   `persona/persona.md` at the repo root, and the setup wizard emits these env values.
-- `src/relay/session.ts` — the `RelaySession` Durable Object. `src/twilio/calls.ts` — live-call
-  transfer; `src/twilio/transfer.ts` — the three-attempt loop + `liveTransferTwiml`.
+- `src/persona.ts` also carries **`ownerDemeanor`** — the owner-facing register (crisp, warm chief of
+  staff), used only by talk-mode calls; `demeanor` stays the outsider-facing screener register.
+- `src/relay/session.ts` — the `RelaySession` Durable Object. Holds `mode: "screener" | "owner"`
+  (default `"screener"`; a `POST` seed before the WebSocket upgrade — see talk mode below — switches it
+  to `"owner"`), branching the system prompt/tools/turn-engine on it; screener calls are unchanged.
+  **The seed is persisted to `state.storage`, not just instance fields**: the phone rings for several
+  seconds between the seed POST and the ConversationRelay handshake, long enough for an idle DO to be
+  evicted and a fresh instance to fall back to the screener default mid-call — the constructor reloads
+  it via `blockConcurrencyWhile` before any `fetch()` runs. Belt and braces: the talk TwiML also carries
+  a `mode=owner` `<Parameter>`, and `resolveSessionMode` (pure, unit-tested) requires the persisted
+  seed AND that parameter to agree before entering owner mode; either alone falls back to screener,
+  logged loudly. `src/relay/owner-prompt.ts` (owner-mode system prompt, greeting, and its lone
+  `end_call` tool) and `src/relay/owner-conversation.ts` (`runOwnerTurn`, capped at
+  `MAX_OWNER_TURNS`) are the owner-mode siblings of `src/screener/prompt.ts` + `conversation.ts`.
+- `src/twilio/calls.ts` — live-call transfer; `src/twilio/transfer.ts` — the three-attempt loop +
+  `liveTransferTwiml`.
+- **Talk mode.** `POST /push-call` with `{"mode": "talk", "context"?: "..."}` (checked before the
+  scripted-line `text` shape) dials `env.USER_CELL_E164` **only** — `notify/call.ts::placeTalkCall`
+  takes no `to` parameter at all, so there is no way to redirect it — and connects the call to
+  `RelaySession` in owner mode, seeded via a plain `fetch` POST to the Durable Object BEFORE the call
+  is placed (same pattern as `CallEscalation`'s `/start`). `context` is an optional plain-text snapshot
+  of the owner's day (calendar, pending reminders) the caller assembles. Shares the `DAILY_BUDGET_USD`
+  cap with inbound screening (`data/db.ts::sumSpendToday` + `budget.ts::overBudget`, checked before
+  dialing → `402` when over; the call's estimated cost is recorded back on hangup with
+  `outcome_stage`/`verdict` = `"talk"`).
 - `src/notify/owner.ts` — the one door for owner notifications (Telegram else SMS; a failed Telegram
   send still tries SMS); `telegram.ts` talks to the Bot API directly (the Worker can't reach the
   daemon) and uploads voicemail audio.

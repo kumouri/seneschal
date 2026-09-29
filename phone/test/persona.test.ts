@@ -43,6 +43,11 @@ describe("DEFAULT_PERSONA", () => {
     expect(DEFAULT_PERSONA.demeanor).toContain("{owner}");
   });
 
+  it("carries a separate owner-facing demeanor for talk-mode calls", () => {
+    expect(DEFAULT_PERSONA.ownerDemeanor).toContain("{owner}");
+    expect(DEFAULT_PERSONA.ownerDemeanor).not.toBe(DEFAULT_PERSONA.demeanor);
+  });
+
   it("greets as the owner's assistant", () => {
     expect(DEFAULT_PERSONA.greeting("Alex")).toBe(greetingLine(undefined, "Alex"));
   });
@@ -55,6 +60,7 @@ describe("personaFromEnv", () => {
     expect(p.voice).toBeUndefined();
     expect(p.ttsProvider).toBeUndefined();
     expect(p.demeanor).toBe(DEFAULT_PERSONA.demeanor);
+    expect(p.ownerDemeanor).toBe(DEFAULT_PERSONA.ownerDemeanor);
     expect(p.greeting("Alex")).toBe("Hi, this is Alex's assistant. And who do I have the pleasure of speaking with?");
   });
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { callsCreateUrl, placeCall, placeEscalationCall } from "../src/notify/call";
+import { callsCreateUrl, placeCall, placeEscalationCall, placeTalkCall } from "../src/notify/call";
 import type { Env } from "../src/config";
 
 describe("callsCreateUrl", () => {
@@ -142,5 +142,56 @@ describe("persona voice on outbound calls", () => {
     const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response("down", { status: 503 }));
     await expect(placeCall(voicedEnv(), "+15551112222", "hi")).rejects.toThrow(/Twilio call create 503/);
     expect(spy).toHaveBeenCalledTimes(2);
+  });
+});
+
+/**
+ * placeTalkCall — the talk-mode (voice-conversation) call. It takes no `to` parameter at all, so
+ * there is no argument shape that could ever dial anyone but `env.USER_CELL_E164`.
+ */
+describe("placeTalkCall", () => {
+  it("dials env.USER_CELL_E164 and connects to the ConversationRelay WebSocket for the given session", async () => {
+    const spy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ sid: "CA_TALK" }), { status: 201 }),
+    );
+    const sid = await placeTalkCall(fakeEnv(), "https://screener.example.workers.dev", "sess-123");
+    expect(sid).toBe("CA_TALK");
+
+    const body = spy.mock.calls[0]![1]!.body as URLSearchParams;
+    expect(body.get("To")).toBe("+15551112222"); // fakeEnv()'s USER_CELL_E164
+    const twiml = body.get("Twiml")!;
+    expect(twiml).toContain("<Connect><ConversationRelay");
+    expect(twiml).toContain('url="wss://screener.example.workers.dev/ws?s=sess-123"');
+    // Belt-and-braces alongside the DO's persisted seed (session.test.ts) — only the Worker
+    // generates this TwiML, so RelaySession trusts this parameter too.
+    expect(twiml).toContain('<Parameter name="mode" value="owner" />');
+  });
+
+  it("speaks the persona's voice and the owner-mode greeting", async () => {
+    const spy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ sid: "CA_TALK2" }), { status: 201 }),
+    );
+    const env = { ...fakeEnv(), ASSISTANT_NAME: "Robin", ASSISTANT_TTS_PROVIDER: "ElevenLabs", ASSISTANT_VOICE_ID: "voice-123" } as Env;
+    await placeTalkCall(env, "https://host", "sess-456");
+    const twiml = (spy.mock.calls[0]![1]!.body as URLSearchParams).get("Twiml")!;
+    expect(twiml).toContain('ttsProvider="ElevenLabs"');
+    expect(twiml).toContain('voice="voice-123"');
+    expect(twiml).toContain('welcomeGreeting="Hey — it&apos;s Robin. Got a minute?"');
+  });
+
+  it("uses the platform default voice when no persona voice is configured", async () => {
+    const spy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ sid: "CA_TALK3" }), { status: 201 }),
+    );
+    await placeTalkCall(fakeEnv(), "https://host", "sess-000");
+    const twiml = (spy.mock.calls[0]![1]!.body as URLSearchParams).get("Twiml")!;
+    expect(twiml).not.toContain("ttsProvider=");
+    expect(twiml).not.toContain(" voice=");
+  });
+
+  it("throws on a non-2xx Twilio response, without a default-voice fallback", async () => {
+    const spy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("nope", { status: 400 }));
+    await expect(placeTalkCall(fakeEnv(), "https://host", "sess-789")).rejects.toThrow(/Twilio call create 400/);
+    expect(spy).toHaveBeenCalledTimes(1); // no fallback retry — a garbled voice is Twilio's problem, not ours
   });
 });

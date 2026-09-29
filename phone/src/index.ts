@@ -6,6 +6,9 @@
  *                 ConversationRelay; anything else => hang up (robodialer).
  *   GET  /ws    — ConversationRelay WebSocket, handed to the RelaySession DO.
  *   GET  /status— liveness + effective settings (expanded into a dashboard in M5).
+ *   plus /blocklist, /sync-contacts, /push-call (+ /push-call/ack — reminder
+ *   calls, and `{mode:"talk"}` live owner conversations), /after-bridge (the
+ *   live-transfer attempt loop), /voicemail — see each handler.
  *
  * The public base URL is taken from PUBLIC_BASE_URL when set, otherwise derived
  * from the incoming request — so it works behind a dev tunnel or a deployed
@@ -15,12 +18,13 @@ import type { Env } from "./config";
 import { configured, personaFromEnv, settingsFromEnv } from "./config";
 import type { CallerInfo } from "./screener/decision";
 import { decideFunnel, decidePostGate } from "./screener/funnel";
-import { listBlocklist, lookupLists, recordGateFail, syncGoogleContacts, type GoogleContact } from "./data/db";
+import { listBlocklist, lookupLists, recordGateFail, sumSpendToday, syncGoogleContacts, type GoogleContact } from "./data/db";
 import { connectRelay, gate, hangupResponse, reject, say, sayVoiceOf, voicemail, wssOf } from "./twiml";
 import { liveTransferTwiml, nextLiveTransferStep, parseAttempt } from "./twilio/transfer";
 import { notifyOwner } from "./notify/owner";
 import { sendVoicemailAudio, telegramConfigured } from "./notify/telegram";
-import { placeCall } from "./notify/call";
+import { placeCall, placeTalkCall } from "./notify/call";
+import { overBudget } from "./budget";
 
 export { RelaySession } from "./relay/session";
 export { CallEscalation } from "./escalation/escalation";
@@ -198,7 +202,9 @@ function parseContacts(body: unknown): GoogleContact[] {
  * Place an outbound reminder call to the owner (bearer-authed). Twilio creds stay
  * in the Worker; the assistant's local push_call.py only holds this URL + secret. Body:
  * { "text": "...", "to"?: E164 }; `to` defaults to USER_CELL_E164. Mirrors the
- * /blocklist + /sync-contacts auth pattern.
+ * /blocklist + /sync-contacts auth pattern. `{ "mode": "talk", "context"?: "..." }`
+ * is the live-conversation sibling (see handlePushCallTalk) — checked first since
+ * it takes no `text` at all.
  */
 async function handlePushCall(request: Request, env: Env): Promise<Response> {
   const secret = env.PUSH_CALL_SECRET;
@@ -211,12 +217,15 @@ async function handlePushCall(request: Request, env: Env): Promise<Response> {
   } catch {
     return new Response("bad json", { status: 400 });
   }
-  const textRaw = typeof body === "object" && body !== null ? (body as { text?: unknown }).text : undefined;
+  const obj = typeof body === "object" && body !== null ? (body as Record<string, unknown>) : {};
+
+  if (obj.mode === "talk") return handlePushCallTalk(obj, request, env);
+
+  const textRaw = obj.text;
   const text = typeof textRaw === "string" ? textRaw.trim() : "";
   if (text === "") {
     return jsonResponse({ ok: false, error: "missing text" }, 400);
   }
-  const obj = typeof body === "object" && body !== null ? (body as Record<string, unknown>) : {};
   const toRaw = obj.to;
   const to = typeof toRaw === "string" && toRaw.startsWith("+") ? toRaw : env.USER_CELL_E164;
 
@@ -242,6 +251,43 @@ async function handlePushCall(request: Request, env: Env): Promise<Response> {
   try {
     const sid = await placeCall(env, to, text);
     return jsonResponse({ ok: true, sid, to });
+  } catch (e) {
+    return jsonResponse({ ok: false, error: String(e) }, 502);
+  }
+}
+
+/**
+ * Talk mode: the assistant calls the owner for a live voice conversation, not a scripted line.
+ * Dials `env.USER_CELL_E164` ONLY — `placeTalkCall` takes no `to` parameter at all, so nothing in
+ * this body can redirect the call elsewhere, deliberately (an inbound or other-recipient talk call
+ * is out of scope). `context` is an optional plain-text snapshot of the owner's day (calendar,
+ * pending reminders, open loops) the caller assembles; the model draws on it but never recites it
+ * unasked. Checks the shared `DAILY_BUDGET_USD` cap before dialing, and seeds the `RelaySession`
+ * Durable Object into owner mode BEFORE placing the call, so the ConversationRelay handshake that
+ * follows moments later finds the context already in place.
+ */
+async function handlePushCallTalk(obj: Record<string, unknown>, request: Request, env: Env): Promise<Response> {
+  if (env.USER_CELL_E164 === undefined || env.USER_CELL_E164 === "") {
+    return jsonResponse({ ok: false, error: "USER_CELL_E164 not configured" }, 500);
+  }
+  const settings = settingsFromEnv(env);
+  const todayUtc = new Date().toISOString().slice(0, 10);
+  const spentToday = await sumSpendToday(env.DB);
+  if (overBudget({ dateUtc: todayUtc, spentUsd: spentToday }, todayUtc, settings.dailyBudgetUsd)) {
+    return jsonResponse({ ok: false, error: "daily budget reached" }, 402);
+  }
+  const contextRaw = obj.context;
+  const context = typeof contextRaw === "string" ? contextRaw : "";
+  const base = baseUrlOf(request, env);
+  const sessionId = crypto.randomUUID();
+  try {
+    const stub = env.RELAY_SESSION.get(env.RELAY_SESSION.idFromName(sessionId));
+    await stub.fetch("https://relay/seed", {
+      method: "POST",
+      body: JSON.stringify({ mode: "owner", context }),
+    });
+    const sid = await placeTalkCall(env, base, sessionId);
+    return jsonResponse({ ok: true, sid, mode: "talk" });
   } catch (e) {
     return jsonResponse({ ok: false, error: String(e) }, 502);
   }

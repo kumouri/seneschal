@@ -51,7 +51,8 @@ blocklist / press-1 gate), the stage-4 Claude conversation (as a configurable pe
 default; see `src/persona.ts` + the `ASSISTANT_*` vars), owner notifications (Telegram, or SMS as the
 fallback — see [Owner notifications](#owner-notifications)), outbound reminder calls
 (`POST /push-call`, single-ring or escalating, spoken in the persona's voice when one is configured),
-voicemail fallback, and a Google Contacts allowlist sync. The **learning blocklist** flags spam once and rejects it for $0 ever after — a Claude spam
+voicemail fallback, a Google Contacts allowlist sync, and **talk mode** — the assistant phoning the
+owner for a real two-way conversation (see [Talk mode](#talk-mode-a-live-call-with-the-owner)). The **learning blocklist** flags spam once and rejects it for $0 ever after — a Claude spam
 verdict blocklists immediately, a **silent** press-1 timeout blocklists on the first strike (humans
 mash keys; robots say nothing), and a wrong-key press gets two strikes of grace. Blocked numbers also
 sync to the on-device blocker app ([android/](android/) — "Seneschal Call Shield"). See
@@ -99,13 +100,38 @@ the Twilio number and the caller is screened all over again. This is **not** the
 cap (`CallEscalation`, default 15 tries): a caller shouldn't be held for minutes, but the assistant can
 keep calling the owner about a reminder for half an hour.
 
+## Talk mode: a live call with the owner
+
+`POST /push-call` (bearer `PUSH_CALL_SECRET`) has three shapes:
+
+- `{"text": "...", "to"?: "+1…"}` — a single ring that speaks the line and hangs up.
+- `{"text": "...", "escalate": true}` — the `CallEscalation` Durable Object re-calls on a storage alarm
+  (default every 2 min, ≤15 tries) until the owner presses a digit (`POST /push-call/ack`).
+- `{"mode": "talk", "context"?: "..."}` — instead of a scripted line, dial `USER_CELL_E164` (the only
+  number this mode can ever reach; there is no `to`) and hand the answered call to `RelaySession` in
+  **owner mode**: the persona's owner-facing register (`ownerDemeanor`), not the screener's gatekeeper,
+  for a real back-and-forth. `context` is an optional plain-text snapshot of the owner's day — today's
+  calendar, pending reminders — that the assistant draws on but never recites unasked. The model hangs
+  up with an `end_call` tool when the owner says goodbye (or after 40 turns).
+
+Talk calls share the screener's `DAILY_BUDGET_USD` cap: the Worker sums today's `calls.cost_estimate_usd`
+before dialing (`402 daily budget reached` when over) and records the talk call's own estimated cost on
+hangup (`outcome_stage` / `verdict` = `talk`). Example trigger:
+
+```bash
+curl -X POST "$SCREENER_URL/push-call" -H "Authorization: Bearer $PUSH_CALL_SECRET" \
+  -H "Content-Type: application/json" -d '{"mode":"talk","context":"3pm dentist; rent reminder pending"}'
+```
+
 ## Layout
 
 - `src/screener/funnel.ts` — the tiered routing decision (pure, tested).
 - `src/persona.ts` — the shipped default persona (env-overridable name/voice).
 - `src/twiml.ts` — Dial / Reject / Gather / ConversationRelay builders.
-- `src/index.ts` — Worker router (`/voice`, `/gate`, `/ws`, `/status`, …).
-- `src/relay/` — ConversationRelay protocol + the `RelaySession` Durable Object.
+- `src/index.ts` — Worker router: `/voice`, `/gate`, `/ws`, `/status`, `/blocklist`, `/sync-contacts`,
+  `/push-call` (+ `/push-call/ack`), `/after-bridge` (the live-transfer attempt loop), `/voicemail`.
+- `src/relay/` — ConversationRelay protocol + the `RelaySession` Durable Object (screener or owner
+  mode) + the owner-mode prompt/turn engine (`owner-prompt.ts`, `owner-conversation.ts`).
 - `src/escalation/` — the `CallEscalation` Durable Object (call-until-answered, storage alarm).
 - `src/notify/` — owner notifications: `owner.ts` (the Telegram-else-SMS switch), `telegram.ts`,
   `sms.ts`, `format.ts`; `call.ts` places outbound reminder calls.
