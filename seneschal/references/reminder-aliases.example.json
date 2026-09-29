@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "_doc": "SHIPPED SEED. The owner's own words for their reminder rows: the vocabulary `scripts/ack.py` resolves a free-text ack against. The live file is `reminder-aliases.json` beside this one (gitignored, per install); ack.py reads it and falls back to this example when it is absent. Copy this file to start your own and replace the rows with your real reminder titles. Durable vocabulary lives here; the row ids stay in the gitignored runtime cache `state/reminders-id-cache.md`, which is where each `title` below is looked up (alias -> title here, title -> row id there). Two files, one hop.",
+  "_maintenance": "Add a phrase the first time the owner uses it and it fails to resolve; that is the whole maintenance loop. Do NOT invent synonyms nobody has said: every alias widens what can match, and a wrong ack is a false record the evening Wrap counts as truth.",
+  "_matching": "An alias matches when its token sequence appears CONTIGUOUSLY in the normalized phrase (lowercase, punctuation dissolved). The LONGEST match wins, so 'evening stretch' beats the bare 'stretch'. Several DIFFERENT rows tied at the longest match = AMBIGUOUS, and ack.py refuses the phrase and prints the candidates rather than guessing. That is why a word shared by two rows (the bare 'stretch' below) is listed on BOTH rather than pointed at the likelier one.",
+  "rows": [
+    {"title": "Water the plants", "aliases": ["water the plants", "watered the plants", "plants watered", "watered plants", "plants"]},
+    {"title": "Take out the trash", "aliases": ["take out the trash", "took out the trash", "trash out", "trash done", "trash"]},
+    {"title": "Morning stretch", "aliases": ["morning stretch", "stretched this morning", "stretch"]},
+    {"title": "Evening stretch", "aliases": ["evening stretch", "stretched tonight", "stretch"]},
+    {"title": "Submit timesheet", "aliases": ["submit timesheet", "submitted my timesheet", "timesheet"]}
+  ],
+  "side_words": {
+    "_doc": "The clock decides an AM/PM pair, but if the PHRASE names the OTHER side ('walked the dog this morning', typed at 19:00), ack.py REFUSES and names both rows instead of letting the clock overrule the owner's own words. Keep these lists TIGHT: every word added here is a word that can trigger a refusal.",
+    "am": ["morning", "am"],
+    "pm": ["evening", "night", "tonight", "pm"]
+  },
+  "clock_pairs": [
+    {
+      "_doc": "A row that exists in an AM and a PM copy, where the phrase names NEITHER side. The owner's local clock decides: local time >= `pm_from` resolves to the PM row, earlier to AM. ack.py always states which side it picked and why.",
+      "am": "Walk the dog (AM)",
+      "pm": "Walk the dog (PM)",
+      "pm_from": "12:00",
+      "aliases": ["walked the dog", "dog walked", "walk the dog", "dog walk"]
+    }
+  ]
+}

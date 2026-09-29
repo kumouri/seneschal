@@ -44,6 +44,11 @@ seneschal/store/config.json
 seneschal/store/notion/schema.md
 seneschal/store/notion/mcp.json
 
+# References — per-install owner data kept beside its tracked *.example.json (the entries name the
+# owner's own topics, vendors, accounts and reminder vocabulary). See seneschal/references/CLAUDE.md.
+seneschal/references/watch-suppressions.json
+seneschal/references/reminder-aliases.json
+
 # Archons (Forge mode) — generated scaffolds, run outputs, runtime state, and
 # per-archon private inputs (profile, watchlist, voice profile) stay local; only
 # *.example.*, state/README.md, and tools are tracked. Each archon also carries its
