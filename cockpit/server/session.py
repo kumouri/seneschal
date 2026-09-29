@@ -98,23 +98,48 @@ def unsign(token: Optional[str], secret: bytes, max_age_seconds: Optional[int] =
     return payload
 
 
+# Both token kinds are signed with the SAME secret, so a valid signature alone does not say which
+# kind a token is. Each payload carries a `typ`, and each reader refuses the other kind — otherwise
+# the pending-login cookie any anonymous visitor receives from /auth/login would pass as a session.
+TYP_SESSION = "session"
+TYP_LOGIN = "login"
+
+
 def create_session_token(secret: bytes, subject: str) -> str:
-    return sign({"sub": subject, "iat": time.time()}, secret)
+    return sign({"typ": TYP_SESSION, "sub": subject, "iat": time.time()}, secret)
 
 
 def read_session_token(secret: bytes, token: Optional[str]) -> Optional[dict]:
-    return unsign(token, secret, SESSION_MAX_AGE_SECONDS)
+    """A session payload, or None. Requires a non-empty string `sub` and refuses anything shaped like
+    a pending-login token. A payload with no `typ` is accepted only as a legacy session (issued before
+    the tag existed) — it must still carry `sub` and none of the login fields."""
+    payload = unsign(token, secret, SESSION_MAX_AGE_SECONDS)
+    if payload is None:
+        return None
+    typ = payload.get("typ")
+    if typ is not None and typ != TYP_SESSION:
+        return None
+    if typ is None and any(k in payload for k in ("cv", "state", "bg")):
+        return None
+    sub = payload.get("sub")
+    if not isinstance(sub, str) or not sub:
+        return None
+    return payload
 
 
 def create_pending_login_token(secret: bytes, state: str, code_verifier: str,
                                 breakglass_action: Optional[str] = None) -> str:
     """`breakglass_action` (optional) marks this login round-trip as a break-glass ladder rung 1-2
     re-auth for that action, rather than an ordinary login — see auth.py's `/auth/callback`."""
-    payload = {"state": state, "cv": code_verifier, "iat": time.time()}
+    payload = {"typ": TYP_LOGIN, "state": state, "cv": code_verifier, "iat": time.time()}
     if breakglass_action is not None:
         payload["bg"] = breakglass_action
     return sign(payload, secret)
 
 
 def read_pending_login_token(secret: bytes, token: Optional[str]) -> Optional[dict]:
-    return unsign(token, secret, PENDING_LOGIN_MAX_AGE_SECONDS)
+    """A pending-login payload, or None — never a session token replayed into the login slot."""
+    payload = unsign(token, secret, PENDING_LOGIN_MAX_AGE_SECONDS)
+    if payload is None or payload.get("typ") != TYP_LOGIN:
+        return None
+    return payload

@@ -92,9 +92,50 @@ class SessionTokenHelpersTests(unittest.TestCase):
         self.assertEqual(payload["bg"], "restart")
 
     def test_pending_login_token_expiry_shorter_than_session(self):
-        old = session.sign({"state": "s", "cv": "v",
+        old = session.sign({"typ": session.TYP_LOGIN, "state": "s", "cv": "v",
                              "iat": time.time() - session.PENDING_LOGIN_MAX_AGE_SECONDS - 5}, self.secret)
         self.assertIsNone(session.read_pending_login_token(self.secret, old))
+
+
+class TokenKindConfusionTests(unittest.TestCase):
+    """Both kinds share one secret, so the signature can't tell them apart — the `typ` tag must.
+    The pending-login cookie is handed to ANY anonymous visitor by /auth/login; it must never
+    authenticate a session (or the websocket, which reads the same session check)."""
+
+    def setUp(self):
+        self.secret = b"d" * 32
+
+    def test_pending_login_token_is_not_a_session(self):
+        pending = session.create_pending_login_token(self.secret, "state", "verifier")
+        self.assertIsNone(session.read_session_token(self.secret, pending))
+
+    def test_breakglass_pending_login_token_is_not_a_session(self):
+        pending = session.create_pending_login_token(self.secret, "s", "v", breakglass_action="restart")
+        self.assertIsNone(session.read_session_token(self.secret, pending))
+
+    def test_untagged_login_shaped_payload_is_not_a_session(self):
+        # a pending-login token minted before the tag existed
+        legacy_pending = session.sign({"state": "s", "cv": "v", "iat": time.time()}, self.secret)
+        self.assertIsNone(session.read_session_token(self.secret, legacy_pending))
+
+    def test_session_token_is_not_a_pending_login(self):
+        token = session.create_session_token(self.secret, "owner")
+        self.assertIsNone(session.read_pending_login_token(self.secret, token))
+
+    def test_session_requires_a_subject(self):
+        for payload in ({"typ": session.TYP_SESSION, "iat": time.time()},
+                        {"typ": session.TYP_SESSION, "sub": "", "iat": time.time()},
+                        {"typ": session.TYP_SESSION, "sub": 7, "iat": time.time()}):
+            self.assertIsNone(session.read_session_token(self.secret, session.sign(payload, self.secret)))
+
+    def test_unknown_typ_is_refused(self):
+        token = session.sign({"typ": "other", "sub": "owner", "iat": time.time()}, self.secret)
+        self.assertIsNone(session.read_session_token(self.secret, token))
+
+    def test_legacy_untagged_session_still_reads(self):
+        # sessions issued before the tag existed keep working until they expire (no forced logout)
+        token = session.sign({"sub": "owner", "iat": time.time()}, self.secret)
+        self.assertEqual(session.read_session_token(self.secret, token)["sub"], "owner")
 
 
 class SecretPersistenceTests(unittest.TestCase):

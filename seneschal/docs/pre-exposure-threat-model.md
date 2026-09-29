@@ -494,43 +494,25 @@ key-rotation surface.**
 | CSRF in `oidc` mode | **BUILT** | `require_csrf` custom header, paired with `require_auth` on mutating routes |
 | Archon SSO proxy auth | **BUILT** | the same `require_auth` dependency; writes 405'd |
 
-### 5.2 The blocker: a pending-login cookie is accepted as a session cookie
+### 5.2 Fixed: a pending-login cookie was accepted as a session cookie
 
-**This inverts the sequencing.** Both tokens are signed with the **same secret** and carry **no type
-discriminator**:
+Both cookie tokens are signed with the **same secret**, so a valid signature alone never said which
+kind a token was — and `read_session_token` checked only the signature and `iat` age, never `sub`.
+`GET /auth/login` has no auth dependency, so one anonymous request yielded a pending-login cookie that
+replayed as the session cookie; the websocket gate in `oidc` mode (`current_session_from_cookie(...) is
+None` → 4401) then accepted it. REST failed closed (a `KeyError` on `sess["sub"]`, a 500); the websocket
+did not. Turning on `oidc` mode therefore left the websocket open while making it look closed.
 
-```python
-cockpit/server/session.py
-    def create_session_token(secret, subject):  return sign({"sub": subject, "iat": time.time()}, secret)
-    def read_session_token(secret, token):      return unsign(token, secret, SESSION_MAX_AGE_SECONDS)
-    # create_pending_login_token signs {"state": ..., "cv": ..., "iat": ...} with the same secret
-```
-
-`read_session_token` checks the signature and `iat` age only — **it never requires `sub`.** Verified
-offline, no socket involved:
-
-```
-read_session_token(secret, create_pending_login_token(secret, "ST", "CV"))
-  -> {'cv': 'CV', 'iat': ..., 'state': 'ST'}      # not None, no 'sub'
-```
-
-The websocket gate in `oidc` mode is exactly that predicate: `/api/ws` closes with 4401 only if
-`auth.current_session_from_cookie(cookie) is None`, then accepts. And `GET /auth/login` has **no auth
-dependency** — only the "is OIDC configured" check — so one anonymous GET yields a valid pending-login
-cookie, replayable as the session cookie, good for its ten-minute life and re-mintable at will.
-
-**So turning on `oidc` mode does not close the websocket hole. It leaves it open while making it look
-closed.** REST is not bypassed — `require_auth` passes the `None` check and then raises `KeyError` on
-`sess["sub"]`, a 500, so it fails closed noisily. The websocket does not.
-
-**What right looks like, in the same repo:** the break-glass assertion (`cockpit/breakglass/assertion.py`)
-uses a *separate* secret and type-checks its claims. The session pair should do the same. **The fix is
-about ten lines: a `typ` field in the signed payload, and `read_session_token` requiring `sub` and the
-session type.** Do it regardless of exposure — it is a correctness bug.
+**Fixed** in `cockpit/server/session.py`: every payload carries a `typ` (`session` / `login`), each
+reader refuses the other kind, and `read_session_token` requires a non-empty string `sub`. An untagged
+payload is accepted only as a legacy session (it must carry `sub` and none of the login fields), so
+existing sessions survive the upgrade without a forced logout. `test_session.TokenKindConfusionTests`
+pins every direction of the confusion. The model to keep following is the break-glass assertion
+(`cockpit/breakglass/assertion.py`): a separate secret and type-checked claims.
 
 ### 5.3 Sizing
 
-**Code (all Small unless marked).** Fix the token confusion · `secure=True`, config-driven · an absolute
+**Code (all Small unless marked).** `secure=True`, config-driven · an absolute
 session cap carried through the sliding reissue · a discovery `issuer` self-check (one `if` — cheap
 defence-in-depth for a design with no signature check) · tighten the allowlist's `@`-local-part match ·
 a WebSocket `Origin` **and** client-host check · RP-initiated logout *(Small–Medium)* ·
@@ -561,8 +543,7 @@ JWT validation to audit because no token is parsed. That is the design working.
 
 ### 5.4 Does Zitadel alone make it safe to expose?
 
-**No — and §5.2 means turning it on without the token fix makes the cockpit *look* safer while the
-websocket stays open.** Zitadel touches none of: the token confusion, `secure=False`, unbounded sliding
+**No.** Even with the token confusion fixed (§5.2), Zitadel touches none of: `secure=False`, unbounded sliding
 sessions with no revocation, the vacuous `localhost_only` behind a proxy, the missing WebSocket `Origin`
 check, the absent rate limiting, the break-glass port (which never reads the cockpit cookie and has
 deliberately permissive CORS justified by a loopback bind), the archon UI ports, or the tunnel's
@@ -600,7 +581,7 @@ the machine.
 |---|---|---|---|
 | **B1** | **The exposed cockpit cannot run in dev mode.** `COCKPIT_DEV_NO_AUTH` is unset in the exposed process, and with a tunnel configured, an empty/misspelled OIDC config yields `unconfigured` (503), never `dev`. | `GET /api/auth/status` reports `oidc`; a test pinning that dev mode refuses when a tunnel/public flag is set | **NO-GO.** Nothing ties dev mode to the bind; the setup chapter recommends it. §4.9(a) |
 | **B2** | **`/api/ws` has its own `Origin` AND client-host check, independent of `auth_mode()`, and `dev` is a hard refusal there.** | `grep -c "Origin" cockpit/server/app.py` → a code hit, not a comment | **NO-GO.** No `Origin` check exists. §4.9(b) |
-| **B3** | **The pending-login token cannot be replayed as a session token.** | a test asserting `read_session_token(secret, create_pending_login_token(...)) is None` | **NO-GO.** It returns a dict. **Without this, turning on Zitadel does not close B2.** §5.2 |
+| **B3** | **The pending-login token cannot be replayed as a session token.** | a test asserting `read_session_token(secret, create_pending_login_token(...)) is None` | **GO.** Fixed; `test_session.TokenKindConfusionTests`. §5.2 |
 | **B4** | **`secure=True` on both cookies**, plus an absolute session cap. | `grep -c "secure=False" cockpit/server/auth.py` → 0 | **NO-GO.** Two occurrences, each with a comment naming this exact moment. §5.3 |
 | **B5** | **Rate limiting exists** on `/auth/login` and `/api/*` — in the app, not only at the edge. | `grep -ric "ratelimit\|throttle" cockpit/server/` → non-zero | **NO-GO.** None. §3 |
 | **B6** | **`X-Forwarded-For` handling is decided explicitly** — `--proxy-headers --forwarded-allow-ips=127.0.0.1`, and `localhost_only` means something once loopback stops meaning "local human". **`FORWARDED_ALLOW_IPS=*` is never set.** | read the uvicorn argv; `FORWARDED_ALLOW_IPS` empty in the process environment | **NO-GO** (undecided). Today the safe behaviour holds by a library default nothing names or tests. §4.9(b) |
