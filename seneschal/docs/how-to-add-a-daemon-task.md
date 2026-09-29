@@ -6,8 +6,11 @@
 
 `seneschal/scripts/presence.py`'s `main_async` starts every supervised task in one
 `asyncio.gather(...)` call, each wrapped in `_supervise(name, coro, state, log)`. There is **no
-decorator, no `TASKS` table** — what you're adding to is one line per task. Six ship today:
-`telegram`, `discord`, `drainer`, `scheduler`, `control`, `cockpit`.
+decorator, no `TASKS` table** — what you're adding to is one line per task. Nine ship today:
+`telegram`, `discord`, `drainer`, `scheduler`, `control`, `cockpit` (the pipe), `archon-sites`,
+`cockpit-app` (the cockpit backend's reconcile loop) and `pr-watch`. Cheap per-tick duties (the outbox
+flush, the mouth drain, the plan-meter reading, vitals) are NOT tasks — they ride `scheduler_task`'s
+~5 s tick as a `maybe_*` call, which is the lighter shape to reach for first.
 
 ```python
 await asyncio.gather(
@@ -35,8 +38,13 @@ await asyncio.gather(
 4. **Wire an opt-out flag if it can be disabled** (`--no-your-task`), following the existing
    `--no-cockpit` / `--no-discord` / `--no-reminders` / `--no-peek` / `--no-slots` pattern. A task
    that is switched off (or can't run in test modes — `--stub-brain`, `--fake-inbox`) simply
-   `return`s at the top; `cockpit_task` and `control_task` are the reference.
-5. **Add tests.** `test_presence_*.py` is the existing shape — a task that changes daemon behaviour
+   `return`s at the top; `cockpit_task` and `control_task` are the reference. A task whose whole
+   job is to reach the owner's phone also returns under `--stub-send` (`pr_watch_task`), and one
+   that only makes sense on one store backend gates on `store_backend_active()` (the Notion-only
+   outbox tending is the reference).
+5. **Say what it is at boot.** `main()` logs one line per optional capability (e.g. "PR watch: … every
+   180s", or why it is off) so a reader of `presence.log` never has to guess which tasks are live.
+6. **Add tests.** `test_presence_*.py` is the existing shape — a task that changes daemon behaviour
    needs a test asserting that behaviour, not just that the task doesn't crash.
 
 ## What NOT to do

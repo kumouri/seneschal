@@ -94,7 +94,11 @@ seneschal/
                    the CI gate set — check_*.py (each docstring is its spec) + count_tests.py +
                    ci_local.py (runs every CI gate locally) + check_placeholders.py —
                    *_SETUP.md guides + INTEGRATIONS.md,
-                   seneschald-control.ps1 + run-*.cmd (Windows scheduled-task wrappers)
+                   seneschald-control.ps1 + run-*.cmd (Windows scheduled-task wrappers) +
+                   seneschald_revive.py (the watchdog's revive predicate), backends/ (the
+                   warm-session Backend seam: claude_cli / codex_cli + CODEX_SETUP.md),
+                   interleave.py (the mid-turn relevance gate), instructions_loaded.py
+                   (opt-in sub-router load logger)
   setup/           env-manifest.json — the machine-readable manifest of every configurable env
                    surface, which the /setup wizard's env walker + the doctor read
   *.json           the CI gates' tracked config: context-budget.json, context-pointers.json,
@@ -173,7 +177,18 @@ itself when a PR merges (`seneschald-update` scheduled task → ff-pull → grac
 branch has no unique commits AND the session registry says no live session claims it (`sentinel.py
 --branch-claimed`, fail-closed), stamps `state/seneschald-health.json` every cycle (`last_ok` is the
 watch-the-watcher field), and nudges the owner on Telegram when blocked > 3 cycles (~30 min, re-alert ≤
-every 6 h) — see `scripts/PATH_A_CUTOVER.md`. Runtime state lives in gitignored `seneschal/state/`.
+every 6 h) — see `scripts/PATH_A_CUTOVER.md`. It also revives a dead daemon (`seneschald_revive.py`,
+`docs/seneschald-revive-spec.md`) and restarts it when the owner logs into a different Claude account. Runtime state lives in gitignored `seneschal/state/`.
+
+**Supervised tasks + resilience** (the full list and recipe: `docs/how-to-add-a-daemon-task.md`):
+beside chat/reminders/control the daemon supervises the cockpit backend (`cockpit_site.py`),
+archon sites (`archon_sites.py`) and a PR watch (`pr_sweep.py` + `pr_repair.py` — asks via the merge
+guard, never merges). The warm session sits behind a **backend** seam (`scripts/backends/`: claude-cli
+default, codex-cli opt-in via the model-config dial), **resumes** across reloads when the gate allows
+(`docs/session-continuity-spec.md`), is cut off by an idle-gap **hung-turn deadline**
+(`docs/hung-turn-deadline-spec.md`), and observes mid-turn arrivals (`interleave.py`). A self
+**crash-loop guard** keeps a fast crash loop from burning, and the watchdog stands down for it and for a
+deliberate stop. The Notion write-behind outbox flush is daemon-owned and Notion-backend only.
 
 **Multi-session awareness:** a session registry (`state/sessions/`) tracks every live Claude Code
 session on the box — the daemon defers non-piercing nudges into a live interactive `/assistant` chat

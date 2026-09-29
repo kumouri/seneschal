@@ -1,12 +1,11 @@
 # Reply-marker line — a second required opening line on the Telegram reply path
 
 **Status:** `PARTIAL(channel_declare.py's reply-marker check, extractor, combined retry prompt and /2
-log fields BUILT; the presence.py drainer wiring and §9's empty-reply guard not yet landed)` —
+log fields BUILT; the presence.py drainer wiring and §9's empty-reply guard BUILT)` —
 `has_reply_marker`, `extract_reply_marker_line`, `retry_prompt`, `REPLY_MARKER_RETRY_PROMPT_TEMPLATE`,
 `CHANNEL_AND_MARKER_RETRY_PROMPT_TEMPLATE` and the `reply_marker_*` fields on `record_outcome` all ship in
 `seneschal/scripts/channel_declare.py` (tests: `seneschal/scripts/test_channel_declare.py`). The
-drainer call site that runs them, and the empty-reply guard in front of it, arrive with the daemon
-wiring.
+drainer runs them, with the empty-reply guard in front (`presence.drainer_task`).
 
 **Scope.** A second required opening line on `presence.py`'s Telegram chat-turn reply path,
 generalizing `message-routing-spec.md`'s `[[channel:PURPOSE]]` forcing function:

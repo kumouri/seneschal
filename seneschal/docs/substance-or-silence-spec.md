@@ -2,10 +2,9 @@
 
 **Status:** `PARTIAL(the written rule BUILT — seneschal/modes/chat.md rule 13; turn_suppression.py
 BUILT — side map, verdict seam, audit log + CLI; the landed predicate
-reminders_acks.reaction_ack_fully_landed and the drainer's third outcome in presence.py not yet landed;
-phase 3 is a week of measurement)` — until the predicate and the drainer wiring land,
-`turn_suppression.verdict()` finds no predicate and returns `suppress: False`, so every reaction relay
-still runs a turn. That is the designed fail-open direction, not a gap in safety.
+reminders_acks.reaction_ack_fully_landed and the drainer's third outcome in presence.py BUILT;
+phase 3 is a week of measurement)` — the predicate reads the Notion outbox, so on a filesystem backend
+nothing ever qualifies and every reaction relay still runs a turn: the designed fail-open direction.
 
 **The owner's request:** don't reply to every message just because one arrived. A turn whose entire
 content is a restatement of something the owner already has is a buzz with no fact in it.

@@ -135,10 +135,6 @@
       "reason": "Deferred advisor rails (references/advisor-chain.md's later phase and slack-draft-and-hold-spec.md). A design doc naming a module it PROPOSES is legitimate; silently passing it is not. This row is a to-do with a home."
     },
     {
-      "pointer": "seneschal/scripts/backends/",
-      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
-    },
-    {
       "pointer": "tools/<id>_paths.py",
       "reason": "A template path: each archon's own `<id>_paths.py` module, named generically in the Forge's instructions. The shipped instance is `archons/proteus/tools/proteus_paths.py`."
     }

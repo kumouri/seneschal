@@ -1,17 +1,17 @@
 # Mid-turn interleave — the message that arrives while the previous one is still being answered
 
-**Status:** `PARTIAL(the gate module interleave.py + router.classify_steer BUILT and tested; the presence.py wiring — observe hooks, phase 1's arrival marker, phase 2's live loop — and WarmSession.send_interrupt pending)` —
+**Status:** `BUILT` —
 `seneschal/scripts/interleave.py` carries Layer A's carve-out, `gate()`, the append-only
 `state/interleave-log.jsonl` writers and readers (`stats`, `diagnose`), the `--interleave-mode`
 enum and its per-host refusal (`refuse_mode`), and phase 2's pure helpers (the continuation prompt, the
 possibly-landed clause, the MCP-possibly-landed row). Layer B is `router.classify_steer`
-(`seneschal/scripts/router.py`). **What is not wired yet** is the daemon half in `presence.py` — the
-turn window (`interleave_open_turn` / `interleave_close_turn`), the intake snapshot and off-path gate run
+(`seneschal/scripts/router.py`). The daemon half is wired in `presence.py` — the turn window
+(`interleave_open_turn` / `interleave_close_turn`), the intake snapshot and off-path gate run
 (`interleave_snapshot` / `interleave_observe`), the stream-tee taps (`interleave_note_tool` /
-`interleave_track_tool_call`), phase 2's loop (`interleave_live_send`) and pop discipline
-(`pop_folded_prefix`), the `--interleave-mode` flag, and `WarmSession.send_interrupt` /
-`interrupt_requested` in the claude-cli backend. Until it lands nothing calls the gate, and the daemon
-behaves exactly as before. Once wired, the daemon's default is `observe` and `live` ships **off**.
+`interleave_track_tool_call`), phase 1's arrival marker, phase 2's loop (`interleave_live_send`) and pop
+discipline (`pop_folded_prefix`), the `--interleave-mode` flag, and `WarmSession.send_interrupt` /
+`interrupt_requested` in `seneschal/scripts/backends/claude_cli.py`. The daemon's default is `observe`; `live` ships
+**off** and is refused on an unprobed CLI version.
 
 **Sits on, and must not contradict:** [`asyncio-daemon-design.md`](asyncio-daemon-design.md) (the
 reactive core; this spec's whole subject is its serialization property),

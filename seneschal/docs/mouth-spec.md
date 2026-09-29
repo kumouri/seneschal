@@ -1,13 +1,12 @@
 # The Mouth — one voice, one clock, one assertions log
 
-**Status:** `PARTIAL(phases 0-1 module BUILT — mouth.py's assertions log, outbound queue, staleness
-prefix and drain; recording at each §2.1 send site and the presence.py drain wiring not yet landed;
-phases 2-3 unbuilt)` — `seneschal/scripts/mouth.py` ships the whole phase-0/phase-1 surface
+**Status:** `PARTIAL(phases 0-1 BUILT — mouth.py's assertions log, outbound queue, staleness
+prefix and drain, recorded at the daemon's send sites and drained on its tick; phases 2-3 unbuilt)` — `seneschal/scripts/mouth.py` ships the whole phase-0/phase-1 surface
 (`record_assertion` / `read_assertions` / `prune` / `origin_hand`, and `enqueue` / `read_outbound` /
 `pending` / `staleness_prefix` / `drain`), covered by `seneschal/scripts/test_mouth.py`, and Dream
-already prunes the log (`seneschal/modes/dream.md`). What is **not** here yet is the daemon side: the
-send sites of §2.1 do not call `record_assertion`, and `presence.py`'s scheduler tick does not drain
-the queue. Until that wiring lands the Mouth is an *available* door, not the only one.
+already prunes the log (`seneschal/modes/dream.md`). The daemon side is wired: `presence.deliver_reply`
+(Door B) records every landed reply and push, and `scheduler_task` drains the queue each tick
+(`_drain_mouth`). Unmigrated producers keep their direct path until moved, per §7.
 **Parent pattern:** `background-jobs-spec.md` — the record, not the turn, holds the promise.
 
 **Why this exists.** An always-on assistant speaks through many producers — reminders, job

@@ -1,6 +1,6 @@
 # The Seneschal Cockpit — design spec
 
-**Status:** `PARTIAL(v1-v5 + the Jobs, Trace and Open-specs panels BUILT; the cockpit supervision task, the transcript archive's boot backfill and its Dream size check not yet wired; public exposure deferred)` —
+**Status:** `PARTIAL(v1-v5 + the Jobs, Trace and Open-specs panels, the cockpit supervision task and the transcript archive BUILT; public exposure deferred)` —
 v1 (read-only monitor), v2 (daemon pipe + chat pane), v3 (model dials + Fable delegation), v3.5
 (Oikonomos, the budget governor), v4 (health/workout/meal panels + store-staged meals), and **v5 (the
 real OIDC auth stack, the archon SSO proxy, the break-glass recovery ladder, and the decoy)** have
@@ -10,11 +10,9 @@ shipped. So have the **Jobs panel**, the **Trace panel** (`session-trace-spec.md
 derived** from each document's own status header via `seneschal/scripts/check_doc_status.py`, storing
 nothing, read-only with no route to edit a status, and a **grid tile**, deliberately unlike the Trace
 panel: a reference list the owner goes looking for rather than a read-along of the conversation.
-**Not yet wired:** the supervision module (`seneschal/scripts/cockpit_site.py`) and the transcript
-archive's boot-time backfill both need their `presence.py` call sites, and the archive's size sensor
-needs its Dream step (§"Cockpit supervision", §"The
-transcript archive"); until then the backend is started by hand as `cockpit/README.md` describes.
-Public exposure (a tunnel + DNS) remains deferred — everything binds `127.0.0.1`, and dev-no-auth
+The daemon supervises the backend (`cockpit_app_task` over `seneschal/scripts/cockpit_site.py`,
+§"Cockpit supervision") and backfills the transcript archive at boot, and Dream runs the archive's
+size sensor (§"The transcript archive"). Public exposure (a tunnel + DNS) remains deferred — everything binds `127.0.0.1`, and dev-no-auth
 remains the default until the owner provisions an OIDC app (see `cockpit/README.md` for the shipped
 surface, which is authoritative where this spec and the build differ). Per-directory rules a tidy-up
 could undo: `cockpit/CLAUDE.md`.

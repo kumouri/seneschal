@@ -499,12 +499,16 @@ class AckableNudge(unittest.TestCase):
 
 
 class AckedLineTellsAssistant(unittest.TestCase):
-    def test_acked_line_says_not_to_repeat_it(self):
+    def test_acked_line_says_how_far_the_ack_got(self):
+        """The acked line says exactly how far the automated half got — re-nudges dropped, the ack
+        journalled — and that the store write is still OWED. Claiming the row is already Done would make
+        the warm session stand down on a write that has not happened (neither call writes the store)."""
         ctx = {"intents": {"👍": "ack"}, "sent": {"42": {"kind": "nudge", "text": "⏰ Reminder: meds"}}}
         line = pr.telegram_inbound_text({"kind": "reaction", "emoji": "👍", "message_id": 42},
                                         ctx, acked=True)
-        self.assertIn("already run the ack", line)
-        self.assertIn("no need to repeat it", line)
+        self.assertIn("journalled the ack to the outbox", line)
+        self.assertIn("NOT happened yet", line)
+        self.assertNotIn("no need to repeat it", line)
         self.assertTrue(line.endswith("]"))
 
     def test_unacked_line_makes_no_such_claim(self):

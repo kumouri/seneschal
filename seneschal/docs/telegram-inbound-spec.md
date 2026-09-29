@@ -1,13 +1,12 @@
 # Telegram inbound enhancements — spec
 
-**Status:** `PARTIAL(§2-§5 and §3.6 BUILT; §6a edits, §6b the question picker and §6c albums BUILT in telegram_poll.py and telegram_ask.py, their presence.py wiring pending; Phase C §3.4 deferred)` —
+**Status:** `PARTIAL(§2-§5, §3.6 and §6a-§6c BUILT end to end; Phase C §3.4 deferred)` —
 §2 attachment intake (PR 1), §4 reply-context (PR 2), §3 reactions Phase A+B (PR 3), §5 backlog-ack
 (PR 4) and §3.6 custom-emoji resolution (PR 5) are all **built** end to end — see §7. For §6a message
 edits (PR 6), §6b the question picker (PR 7) and §6c albums (PR 8), the poller half
 (`telegram_poll.py`: `edited_message`, `callback_query`, `media_group_id`) and the picker module
-(`telegram_ask.py`) are built; the daemon half (`presence.py`: the edit/queue rewrite, callback
-resolution and the album hold) lands with the daemon-wiring port, and until it does those inbound
-kinds are extracted but not acted on. **Phase C (§3.4) remains ask-high and unbuilt** by decision.
+(`telegram_ask.py`) are built, and so is the daemon half (`presence.py`: `apply_inbound_edit`,
+`resolve_callback` / `_callback_line`, and the durable album hold). **Phase C (§3.4) remains ask-high and unbuilt** by decision.
 **Author:** the assistant, on the owner's ask (2026-07-16); §6a-§6c added later, also on the owner's
 ask.
 **Scope:** the Telegram *inbound* path only. Outbound (`send_telegram`) is untouched.

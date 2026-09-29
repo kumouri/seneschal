@@ -1,6 +1,6 @@
 # Dynamic topics — minting a Telegram topic mid-conversation, no PR, no reload
 
-**Status:** `PARTIAL(§0-§2's core capability BUILT — telegram_topics.py add/retire over the existing runtime state file, a simpler mechanism than §1's design; §3's declaration-driven routing waits on message-routing-spec.md phase 2 and the presence.py wiring; §4's promotion, §5's policy for a promoted purpose, §6's sprawl controls and §7's gate recommendation remain open)`
+**Status:** `PARTIAL(§0-§2's core capability BUILT — telegram_topics.py add/retire over the existing runtime state file, a simpler mechanism than §1's design; §3's declaration-driven routing BUILT via message-routing-spec.md phase 2 in the daemon's drainer; §4's promotion, §5's policy for a promoted purpose, §6's sprawl controls and §7's gate recommendation remain open)`
 · **Owner:** the assistant. **Scope:** `../scripts/telegram_topics.py`'s purpose→name table and its
 two readers (`create_topic`/`thread_id`, and `../scripts/channel_declare.py`'s
 `resolve_purpose`/`grounding_instruction`). Does not touch the Bot API surface, `presence.py`'s

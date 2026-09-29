@@ -1,8 +1,8 @@
 # Message routing — a channel-declaration requirement on the assistant's reply path
 
 **Status:** `PARTIAL(channel_declare.py BUILT — §1-§4's parse/strip/retry/fuzzy-match machinery + the
-§7 log + telegram_topics.purpose_for_thread; the presence.py drainer wiring that runs it (phase 1) and
-routes by it (phase 2) not yet landed; phases 3-4 unbuilt)`.
+§7 log + telegram_topics.purpose_for_thread; phases 1-2 BUILT in the presence.py drainer, which runs it and
+routes by the declared purpose; phases 3-4 unbuilt)`.
 
 **Scope.** A structural forcing function on `presence.py`'s chat-turn reply path — the one that sends
 the turn into the warm session and hands the result to `deliver_reply` — that makes it impossible for
@@ -401,7 +401,7 @@ overturnable by the owner at any time.
 
 ## Router entry
 
-**Status:** `channel_declare.py` BUILT (§1-§4 + the §7 log); the drainer wiring for phases 1-2 pending;
+**Status:** `channel_declare.py` BUILT (§1-§4 + the §7 log); the drainer wiring for phases 1-2 BUILT;
 phases 3-4 unbuilt.
 
 **What it decides:** A structural forcing function on the chat-turn reply path that makes it

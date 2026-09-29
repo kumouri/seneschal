@@ -1,12 +1,12 @@
 # Plan-meter telemetry: reading `/usage` on a cadence, without becoming a budget alarm
 
-**Status:** `PARTIAL(phase 1's instrument, §4.2.1's account identity and §8.3's failure notice BUILT as modules; the daemon loop checks that run them are not yet wired into presence.py; §8.1/§8.2/§8.5 open)` —
+**Status:** `PARTIAL(phase 1's instrument, §4.2.1's account identity and §8.3's failure notice BUILT, run by the daemon's tick; §8.1/§8.2/§8.5 open)` —
 the instrument is `seneschal/scripts/usage_probe.py` (spawn, parse, failure taxonomy, shape
 fingerprint, the account block, one row per attempt) + `seneschal/scripts/usage_activity.py` (the
 §10.2 activity snapshot) + `seneschal/scripts/usage_health.py` (§8.3's failure notice), each with its
-tests. **What is not wired yet** is the daemon half — `presence.py`'s `maybe_usage_reading` (the
-hourly due-check) and `maybe_usage_notice` (the notice sender). Until it lands, a reading is taken
-only by running `usage_probe.py` by hand, and nothing speaks. **The METER never speaks — §8.2's
+tests. The daemon half is wired — `presence.py`'s `maybe_usage_reading` (the hourly due-check, last
+on the tick) and `maybe_usage_notice` (the notice sender, through the Mouth); `--no-usage-reading` /
+`--no-usage-notice` turn them off. **The METER never speaks — §8.2's
 conservative branch stands; only the INSTRUMENT may, and only when it breaks (§8.3).** §10 records
 what building it measured, including two things this document assumed and one design it did not
 contain.

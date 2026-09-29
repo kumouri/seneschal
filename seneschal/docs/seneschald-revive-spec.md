@@ -1,11 +1,10 @@
 # seneschald auto-revive — making a crashed daemon come back on its own
 
-**Status:** `PARTIAL(the watchdog side BUILT — seneschald_revive.py + seneschald-control.ps1, §1-§7 and
-the watchdog halves of §8/§9; the presence.py halves of §8 (the self crash-loop guard) and §9 (the
-boot-time account stamp in presence.lock) land with the daemon-core port)` — until the daemon writes
-`claude_identity` into its lock, the credential check reads `unstamped` and takes no action, which is
-its designed fail-safe; until the daemon writes `seneschald-crashloop`, only the watchdog's own budget
-guards against a revive loop.
+**Status:** `BUILT` — the watchdog side (`seneschald_revive.py` + `seneschald-control.ps1`, §1-§7 and the
+watchdog halves of §8/§9) and the daemon side (`presence.py`: the self crash-loop guard of §8 —
+`record_boot_attempt` / `trip_crashloop_guard` / `maybe_clear_crashloop_on_sustained` — and §9's
+boot-time `claude_identity` stamp in `presence.lock`). A lock with no stamp still reads `unstamped` and
+takes no action, the designed fail-safe.
 Implementation: `seneschal/scripts/seneschald_revive.py` (the decision predicate) +
 `seneschald-control.ps1`'s `Invoke-PresenceRevive` / `Save-PresenceRevivalState` /
 `Confirm-PresenceSustained` (the thin caller) + `Invoke-CredentialCheck` and its helpers (§9). Tests:

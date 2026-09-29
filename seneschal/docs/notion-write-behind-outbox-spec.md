@@ -1,8 +1,8 @@
 # Notion write-behind outbox — design (durability)
 
-**Status:** `PARTIAL(§11 steps 1-4, 6 and 7 BUILT — store, CLI, in-turn drain, §6.1 supersession, §6.2
-retraction, dead-letter classes, the task_status op; the daemon's drain + backlog alarm (§7, §9 (a′)/(a‴))
-land with the presence.py port)` — approved direction (owner sign-off) · **Owner:** the assistant ·
+**Status:** `BUILT` — §11 steps 1-4, 6 and 7: store, CLI, in-turn drain, §6.1 supersession, §6.2
+retraction, dead-letter classes, the task_status op, and the daemon-owned drain + backlog alarm (§7,
+§9 (a′)/(a‴); `presence._tend_outbox`, Notion backend only) — approved direction (owner sign-off) · **Owner:** the assistant ·
 **Scope:** a durable local write queue for the assistant's **act-low Notion writes** (reminder acks,
 med-intake rows, the register → Tasks status projection; run-log finalize in phase 2), plus the flush
 mechanism that lands them. **Decisions locked (§10): flush = (a) opportunistic first; store = sqlite;
