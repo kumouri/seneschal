@@ -80,7 +80,7 @@ name: seneschal-dream
 description: Have the assistant consolidate the day and learn from it
 ---
 
-Run the Dream consolidation (seneschal/SKILL.md): refresh reminders and the open-work register, propose learnings.
+Run the Dream consolidation (seneschal/SKILL.md -> seneschal/modes/dream.md): refresh reminders and the open-work register, propose learnings. Work EVERY step in that file, in order — there is no such thing as a scoped Dream, and a step being within its `dream_steps.py` window is not a reason to skip it. Any step you genuinely cannot run must be recorded with `python seneschal/scripts/dream_steps.py record <step> --skip --reason "<why>"`.
 
 Then follow the Dream PR step in seneschal/SKILL.md: open a PR **only if a tracked source file changed** —
 built in a transient worktree off main — and **merge it on green** (`gh pr merge --merge` once every CI
