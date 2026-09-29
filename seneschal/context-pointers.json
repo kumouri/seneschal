@@ -1,0 +1,454 @@
+{
+  "_note": [
+    "Allowlist + extra resolution bases for check_context_pointers.py, the dangling-pointer check",
+    "(seneschal/scripts/check_context_pointers.py's docstring is the design record).",
+    "",
+    "`reason` is REQUIRED and non-empty per entry: an exemption should be a decision someone wrote",
+    "down, not a silent pass. Same principle as context-budget.json's raises[].",
+    "",
+    "Entries are EXACT STRINGS, not patterns. A pattern-based allowlist grows to cover things nobody",
+    "examined, and the whole point is that each exemption was looked at once. Adding an entry here is",
+    "a claim that the pointer is legitimately unresolvable, not a way to quiet a finding.",
+    "",
+    "`bases` declares extra resolution roots per document. No single base works: a doc in",
+    "`seneschal/docs/` writing `state/run-log.md` means `seneschal/state/run-log.md`, while the root",
+    "CLAUDE.md writing `scripts/presence.py` means `seneschal/scripts/presence.py`."
+  ],
+  "bases": {
+    "CLAUDE.md": [
+      "seneschal/"
+    ],
+    "README.md": [
+      "seneschal/"
+    ],
+    "archons/CLAUDE.md": [
+      "archons/proteus/"
+    ],
+    "seneschal/references/archons.md": [
+      "archons/proteus/"
+    ],
+    "seneschal/docs/asyncio-daemon-design.md": [
+      "seneschal/",
+      "seneschal/state/"
+    ],
+    "seneschal/docs/asyncio-daemon-plan.md": [
+      "seneschal/",
+      "seneschal/state/"
+    ],
+    "seneschal/references/memory.md": [
+      "seneschal/",
+      "seneschal/state/"
+    ],
+    "seneschal/references/databases.md": [
+      "seneschal/",
+      "seneschal/state/"
+    ],
+    "seneschal/references/reminders-policy.md": [
+      "seneschal/",
+      "seneschal/state/"
+    ],
+    "subagents/journal-steward/daily-journal-steward/SKILL.md": [
+      "seneschal/"
+    ],
+    "subagents/message-archivist/SKILL.md": [
+      "seneschal/"
+    ],
+    "subagents/morning-briefing/SKILL.md": [
+      "subagents/",
+      "seneschal/"
+    ],
+    "subagents/reminders/SKILL.md": [
+      "seneschal/"
+    ],
+    "subagents/store-setup/SKILL.md": [
+      "seneschal/"
+    ],
+    "subagents/email-triage/SKILL.md": [
+      "subagents/",
+      "seneschal/"
+    ],
+    "subagents/archon-forge/SKILL.md": [
+      "subagents/",
+      "seneschal/",
+      "archons/"
+    ]
+  },
+  "allow": [
+    {
+      "pointer": "**/.obsidian",
+      "reason": "A glob describing an Obsidian vault's marker directory on the owner's disk (the store-setup probe), not a repo path."
+    },
+    {
+      "pointer": "../../seneschal/docs/carry-over-region-spec.md",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "../../seneschal/docs/observation-gate-spec.md",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "../../seneschal/docs/reminder-premise-spec.md",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "../../seneschal/docs/tomorrow-marker-spec.md",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "../../seneschal/references/reminder-aliases.json",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "../../seneschal/scripts/SEND_GATE_SETUP.md",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "../../seneschal/scripts/ack.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "../../seneschal/scripts/reminder_premise.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "../../seneschal/scripts/send_gate.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "../demiurge",
+      "reason": "An example sibling-checkout path (the public archon-forge code repo lives beside this one, not inside it). Relative to the repo root rather than to the doc, and never a pointer into this tree."
+    },
+    {
+      "pointer": "../docs/ack-system-ownership-spec.md",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "../docs/ask-provenance-spec.md",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "../docs/carry-over-region-spec.md",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "../docs/context-budget-collisions-spec.md",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "../docs/observation-gate-spec.md",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "../docs/pre-exposure-threat-model.md",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "../docs/proposed-learnings-lifecycle-spec.md",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "../docs/read-first-retirement-spec.md",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "../docs/reminder-cadence-mechanism-spec.md",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "../docs/reminder-premise-spec.md",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "../docs/session-job-watcher-spec.md",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "../docs/state-durability-spec.md",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "../docs/tomorrow-marker-spec.md",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "../scripts/MERGE_GUARD_SETUP.md",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "../scripts/SEND_GATE_SETUP.md",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "../scripts/ack.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "../scripts/archon_sites.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "../scripts/brief_prestage.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "../scripts/loops.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "../scripts/merge_guard.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "../scripts/pending_approvals.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "../scripts/provenance_guard.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "../scripts/reminders_cadence.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "../scripts/send_gate.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "../scripts/send_gate_hook.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "../scripts/send_recipients.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "../scripts/standing_safety.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "../scripts/telegram_format.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "../scripts/telegram_topics.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "../scripts/watch_reconcile.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "../scripts/watch_suppress.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": ".claude/rules/",
+      "reason": "`.claude/` paths are allowlisted rather than resolved: whether `.claude/worktrees/` is ignored depends on an untracked `.git/info/exclude`, so rung 2's answer there is machine-dependent and a blocking gate may not depend on it. The rules directory is discussed as a design option; no rule file ships."
+    },
+    {
+      "pointer": ".claude/rules/**/*.md",
+      "reason": "Same as `.claude/rules/`: a glob naming the scanned/budgeted shape for path-scoped rule files, none of which ship."
+    },
+    {
+      "pointer": ".claude/rules/*.md",
+      "reason": "Same as `.claude/rules/`: a glob describing path-scoped rule files as a design option, not a pointer to a file that ships."
+    },
+    {
+      "pointer": "archons/*/site.json",
+      "reason": "Same convention as `archons/<id>/site.json`: the glob has nothing to match until an archon that serves a site is added."
+    },
+    {
+      "pointer": "archons/<id>/site.json",
+      "reason": "Names the per-archon `site.json` convention - a file an archon ships once it serves a site. No archon in this tree ships one yet, so the glob has nothing to match."
+    },
+    {
+      "pointer": "archons/proteus/tools/record_intel.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "cockpit/server/jobs.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "docs/background-jobs-spec.md",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "docs/carry-over-region-spec.md",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "docs/job-origin-routing-spec.md",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "docs/mouth-spec.md",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "docs/observation-gate-spec.md",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "docs/proposed-learnings-lifecycle-spec.md",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "docs/session-coupling-spec.md",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "docs/state-durability-spec.md",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "docs/substance-or-silence-spec.md",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "docs/tomorrow-marker-spec.md",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "docs/voice-call-spec.md",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "references/proposed-learnings-archive.md",
+      "reason": "Created by `learnings.py retire` the first time a closed learning is archived; absent on a fresh install by design."
+    },
+    {
+      "pointer": "references/reminder-aliases.json",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "references/telegram-topics.example.json",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "references/telegram-topics.json",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "scripts/ack.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "scripts/brief_prestage.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "scripts/carryover_region.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "scripts/develop_ci_status.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "scripts/job_analysis.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "scripts/jobs.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "scripts/loops.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "scripts/mouth.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "scripts/pending_approvals.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "scripts/pending_checks.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "scripts/picker_retire.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "scripts/pr_sweep.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "scripts/provenance_guard.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "scripts/send_gate.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "scripts/standing_safety.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "scripts/tomorrow_marker.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "scripts/watch_pr.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "scripts/worktree_gc.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "seneschal/docs/background-jobs-spec.md",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "seneschal/docs/session-trace-spec.md",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "seneschal/scripts/advisors.py",
+      "reason": "Deferred advisor rails (references/advisor-chain.md's later phase and slack-draft-and-hold-spec.md). A design doc naming a module it PROPOSES is legitimate; silently passing it is not. This row is a to-do with a home."
+    },
+    {
+      "pointer": "seneschal/scripts/backends/",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "seneschal/scripts/cockpit_site.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "server/doc_status.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "server/trace.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "tools/<id>_paths.py",
+      "reason": "A template path: each archon's own `<id>_paths.py` module, named generically in the Forge's instructions. The shipped instance is `archons/proteus/tools/proteus_paths.py`."
+    },
+    {
+      "pointer": "tools/promote_intel.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "tools/record_intel.py",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "web/src/components/DocStatusPanel.tsx",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "web/src/node-test-shim.d.ts",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    }
+  ]
+}

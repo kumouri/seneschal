@@ -20,6 +20,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history + every branch, so `origin/develop` exists in this job. Three gates below
+          # diff against it and silently degrade to "no answer" on the default shallow fetch: the
+          # budget ratchet's merge-base read and after-merge measurement, the rulings ledger's diff
+          # scan, and count_tests' per-suite deltas. Costs a few seconds on a repo this size.
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -29,6 +35,18 @@ jobs:
         # The repo is a Markdown skill suite with helper scripts (stdlib-first).
         # py_compile catches syntax breakage without installing anything.
         run: git ls-files '*.py' -z | xargs -0 --no-run-if-empty python -m py_compile
+
+      - name: Measure the test suites (and refuse a count written in prose)
+        # The suite total lives in no tracked file: this step measures it every run (unittest's loader
+        # counts a suite without running it) and writes it to the job summary. --check fails the build
+        # (exit 2) if a total is written back into the root CLAUDE.md or the README, because two PRs
+        # that each add a test would both rewrite that line and collide by construction.
+        # --compare-to reports per-suite deltas against the merge base — REPORT-ONLY, so a module
+        # that vanished is visible without a stored number (count_tests.py's docstring says why).
+        run: |
+          python seneschal/scripts/count_tests.py --check \
+            --compare-to origin/develop \
+            --summary-file "$GITHUB_STEP_SUMMARY"
 
       - name: Run unit tests
         # stdlib unittest only — no pip install.
@@ -44,6 +62,47 @@ jobs:
         # No real workspace/account UUID may be committed — docs and registries use
         # 00000000-… placeholders that setup fills into gitignored local copies.
         run: python seneschal/scripts/check_placeholders.py
+
+      - name: Context budget, pointers, doc status, state writes, clocks
+        # Each module owns its own exit-code decision; `|| true` is deliberately NOT used, so moving a
+        # check between report-only and enforcing is a flag here, never a workflow rewrite.
+        #   - check_context_budget: the grounding byte budget is REPORT-ONLY; --enforce-headroom blocks
+        #     only on a NEW raises[] entry whose `to` does not match the computed headroom.
+        #   - check_context_pointers: BLOCKING — a dangling pointer in the routed grounding.
+        #   - check_doc_status: BLOCKING — every seneschal/docs/ file declares a readable status.
+        #   - check_state_writes: BLOCKING — no in-place truncating write to a state/ path.
+        #   - check_no_utcnow: report-only — deprecated naive `.utcnow(` in tracked Python.
+        #   - check_wall_clock: BLOCKING — a bare wall-clock read inside checkers/tests/this file.
+        # Every enforcing one shipped green: a gate red on the day it lands is a gate someone disables.
+        run: |
+          python seneschal/scripts/check_context_budget.py --enforce-headroom
+          python seneschal/scripts/check_context_pointers.py --enforce
+          python seneschal/scripts/check_doc_status.py --enforce
+          python seneschal/scripts/check_state_writes.py --enforce
+          python seneschal/scripts/check_no_utcnow.py
+          python seneschal/scripts/check_wall_clock.py --enforce
+
+      - name: Context stores (report-only)
+        # `--venue ci`: runtime pairs live in the gitignored seneschal/state/, which no CI runner can
+        # read, so they are declared `venue: dream` and the checker prints the split every run. It
+        # also prints how many declared pairs are machine-verified — a green step here is a count,
+        # not coverage.
+        run: python seneschal/scripts/check_context_stores.py --venue ci
+
+      - name: Carry-over prose (report-only)
+        # The Wrap's instructions must name carryover_region.py and never a raw `memory_write.py
+        # write` over the whole carry-over file (the unbounded-growth shape the regions replaced).
+        run: python seneschal/scripts/check_carryover_prose.py
+
+      - name: Rulings ledger — new ruling language must touch the ledger
+        # Diffs against origin/develop (fetch-depth 0 above) for newly ADDED "ruling"/"ruled" lines in
+        # tracked *.md and requires the same diff to touch seneschal/docs/rulings.md. BLOCKING.
+        run: python seneschal/scripts/check_rulings.py --enforce
+
+      - name: Dates in grounding (report-only)
+        # A bare YYYY-MM-DD in tier A/B grounding outside a rulings.md id. No --enforce flag exists
+        # in the module at all; printed for visibility, never gating.
+        run: python seneschal/scripts/check_grounding_dates.py
 
       - name: PowerShell syntax check
         # AST-parse every tracked .ps1 (ubuntu pwsh — immune to Windows AMSI wedges that
@@ -62,10 +121,17 @@ jobs:
   references:
     name: Reference data check
     runs-on: ubuntu-latest
+    # This job's NAME may be a required status check in branch protection, so when the last thing it
+    # validates goes away it is repointed, never deleted. It validates every tracked .json file
+    # (autonomy-config.json included), discovered fresh each run, so no single file's deletion can
+    # silently empty its scope.
     steps:
       - uses: actions/checkout@v4
-      - name: Validate machine-readable references (JSON)
-        run: python -c "import json; json.load(open('seneschal/references/autonomy-config.json')); print('autonomy-config.json OK')"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate every tracked JSON file parses
+        run: python seneschal/scripts/check_json_files.py --enforce
 
   screener:
     name: Call screener typecheck + test
