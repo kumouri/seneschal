@@ -7,7 +7,8 @@ merged to `main`**. After it, every future merge reloads the daemon automaticall
 ## Why a manual cutover is needed
 
 Before Path A the daemon ran from this working tree on a feature branch, with `run-log.md` /
-`carry-over.md` / `context-digest.md` **tracked** under `references/`. Path A deletes those tracked files
+`carry-over.md` / `context-digest.md` **tracked** under `references/` (the digest has since been
+retired — see `../references/memory.md` — but a pre-Path-A tree still carries it). Path A deletes those tracked files
 (their content moves to gitignored `state/`) and puts the daemon on `main`. A naive `git pull` would
 **delete the live copies**, so we back them up and restore them into `state/` first.
 
@@ -79,7 +80,7 @@ name: seneschal-dream
 description: Have the assistant consolidate the day and learn from it
 ---
 
-Run the Dream consolidation (seneschal/SKILL.md): rebuild state/context-digest.md, refresh reminders, propose learnings.
+Run the Dream consolidation (seneschal/SKILL.md): refresh reminders and the open-work register, propose learnings.
 
 Then follow the Dream PR step in seneschal/SKILL.md: open a PR **only if a tracked source file changed** —
 built in a transient worktree off main — and **merge it on green** (`gh pr merge --merge` once every CI
@@ -96,7 +97,7 @@ memory logs are not committed. Report the PR URL + merge outcome if one was open
 
 ```powershell
 git -c core.fsmonitor=false -C $repo rev-parse --abbrev-ref HEAD   # → main
-Get-ChildItem "$repo\seneschal\state\*.md"                         # run-log.md / carry-over.md / context-digest.md present
+Get-ChildItem "$repo\seneschal\state\*.md"                         # run-log.md / carry-over.md present
 Get-ScheduledTask seneschald, seneschald-update                    # both Ready/Running
 ```
 
@@ -117,7 +118,7 @@ the active store (e.g. Notion).
   6 h; an unexpected crash still stamps a blocked heartbeat via the catch-all, so the health file can
   never freeze silently at `ok`.
 - **Manual hard restart** (rare) → `reseneschald` / `seneschald-control.ps1 -Action Restart`.
-- **Runtime memory** (`state/run-log.md`, `carry-over.md`, `context-digest.md`) is gitignored and never
+- **Runtime memory** (`state/run-log.md`, `carry-over.md`, `open-loops.json`) is gitignored and never
   conflicts on a pull; the active store (Run Log + carry-over) stays the system of record. See
   `../references/memory.md`.
 

@@ -115,8 +115,8 @@ session's own judgment, or a force-route (`!fable` prefix / the cockpit's "Send 
 
 Once the shadow log shows the classifier is reliably right on the whitelist — in particular, near-zero
 false-trivials — phase 2 adds `--router-mode live`: the daemon handles clearly-trivial turns locally (an
-`ack` writes the reminder ack + dequeues the nudge; `status`/`recall` answer from the cached
-`context-digest.md`), and escalates everything else to the warm Opus session unchanged. That's the payoff:
+`ack` writes the reminder ack + dequeues the nudge; `status`/`recall` answer from local state —
+the run-log, carry-over, and the open-work register), and escalates everything else to the warm Opus session unchanged. That's the payoff:
 instant, offline, zero-Notion trivial turns, and fewer Notion reads overall (a rate-limit win). Flipping
 shadow → live is **the owner's decision** on the evidence; a future **Dream** rollup can summarize router
 accuracy from `router-log.jsonl` to tee up the call. Live handling is **not** implemented in this phase.

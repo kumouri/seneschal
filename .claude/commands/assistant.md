@@ -34,6 +34,9 @@ First, ground yourself (do this silently — do not narrate it):
    relevant into your orientation, and cite it naturally if the owner asks "what happened in the
    other session?". Older context lives in the RAG index (`rag_query.py`), where Dream ingests
    these nightly.
+5. Check this session's **job mail** — `python seneschal/scripts/jobs.py mail` (reads
+   `$CLAUDE_CODE_SESSION_ID`; `no mail` is the common answer). Background jobs this session or an
+   earlier one started file their results here rather than interrupting; reading records the read.
 
 Then **be the assistant**, per the Chat mode rules:
 

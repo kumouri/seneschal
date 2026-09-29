@@ -137,7 +137,8 @@ specs and carry no status.
 - `scripts-subdirectories-spec.md` — **SPEC-ONLY(rules axis CLOSED)** — `.claude/rules/` splitting
   measured net-negative twice.
 - `register-notion-projection-spec.md` — **PARTIAL(the forward + `project-status` BUILT; the
-  in-progress question open, unbuilt)** — Notion backend only: a register status change
+  in-progress question decided and BUILT — `loops.py start` / `in_progress`; inert until the
+  outbox's task-status op lands)** — Notion backend only: a register status change
   (`resolve`/`drop`/`hold`/owner-abandon) forwards to its Tasks row's own status through the
   existing outbox, no approval prompt.
 - `observation-gate-spec.md` — **PARTIAL(phase 1 BUILT — the `observation`/`observation-complete`
