@@ -436,9 +436,9 @@ on the form.
     `metered: "unavailable"` and *no* token count. A 0 is indistinguishable from "measured, and free"
     — and the fable_oneshot gate trusts what it reads. Rollups accrue tokens from **any** row that
     carries them, not only `kind: "tokens"` rows, so a `fable_oneshot` row that reports its own usage
-    counts. (`fable_delegate.py` still runs `claude -p` in text mode, which returns no usage block, so
-    today its row counts the delegation but carries no token figure; asking for `--output-format json`
-    and recording `usage` is the open follow-up.)
+    counts. `fable_delegate.py` runs `claude -p --output-format json` and records the result's `usage`
+    block on its `fable_oneshot` row; when that block can't be read the row is marked
+    `metered: "unavailable"` rather than zeroed.
   - `spend-levers-spec.md` adds *why* a turn cost what it cost (a `turn_id` and a `levers` block on
     the same row) — diagnosis only; this section remains the only place a rail lives.
 - **Knobs shipped:**

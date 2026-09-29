@@ -241,7 +241,9 @@ just the daemon-side flow, for readers of this file.
   own tool use (a subprocess one-shot, never a session handoff) — it re-reads `model-config.json` and
   refuses (exit 2) on its own if the ceiling doesn't admit Fable, belt-and-braces with the arm-gating
   above. It scrubs `ANTHROPIC_API_KEY` from the child env (the same subscription-billing rule as the
-  warm session and `mini_dream.py`), seeds a budget-bounded `telegram-thread.json` tail, and
+  warm session and `mini_dream.py`), seeds a budget-bounded tail of the main-chat conversation cache (`telegram-threads/main.json`,
+  legacy `telegram-thread.json` as a second rung), meters its own spend (`--output-format json` → the
+  `usage` block on its `fable_oneshot` ledger row, or `metered: "unavailable"`, never a zero), and
   best-effort badges its answer into the cockpit transcript (`model: "claude-fable-5"`) so the seam
   stays visible.
 - **Status/transcript honesty:** `_status_snapshot`'s `model` field prefers the live session's own
