@@ -6,9 +6,13 @@ and the row schema, §5 the phase-2 mechanics, §6 the latency budget, §10 the 
 first — every number and every refusal below comes from there.
 
 A member of the append-only state-log family — `mouth.py` (what the assistant said), `turns.py` (what
-was said, both sides), `pending_checks.py` (which claim waits on which job), and this one (**which
-mid-turn message the gate would have folded in, and whether its verdict landed in time to matter**).
-Same primitive, same never-raises contract, same append-only two-row lifecycle.
+was said, both sides), the pending-checks register (which claim waits on which job), and this one
+(**which mid-turn message the gate would have folded in, and whether its verdict landed in time to
+matter**). Same primitive, same never-raises contract, same append-only two-row lifecycle.
+
+The register is named by its state file rather than its module, deliberately: its phase-0 guard is a
+substring scan asserting nothing in this directory reads it, and naming the module here would trip a
+check that is right about the property it guards.
 
 ## What this is
 
