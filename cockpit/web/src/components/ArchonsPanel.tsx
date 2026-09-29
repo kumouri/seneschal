@@ -1,12 +1,26 @@
 import { archonUrl, getArchons } from '../api'
 import { usePolling } from '../usePolling'
+import { ArchonRestartButton } from './ArchonRestartButton'
 import { AuthGate, Panel } from './Panel'
 
 // Archon tiles — one card per registry entry (cockpit/server/archon-registry.json, per-install,
 // mirroring seneschal/references/archons.md). A "live" archon opens its proxied UI
 // (GET /archons/<id>/*) in a new tab through the same cockpit server — archons never face the
-// internet directly. A "reserved" (unminted) archon shows a greyed placeholder card instead of
-// a link.
+// internet directly. A "live" archon ALSO gets a confirm-gated Restart button (daemon-supervised
+// archon sites — see ArchonRestartButton), since it's the one with an actual site process for the
+// daemon to supervise.
+//
+// Anything else shows a greyed placeholder card, labelled from its actual status: "admitted" = minted
+// and working, just has no web UI to open (delegation-on-demand); "specced" = minted but the admission
+// gate hasn't run yet; "reserved" = not yet minted. A single hardcoded "reserved — unminted" label
+// would read as a flat lie about every admitted archon without a site. Unknown statuses pass through
+// as their raw slug rather than vanishing.
+const STATUS_LABELS: Record<string, string> = {
+  admitted: 'admitted — no web UI',
+  specced: 'specced — awaiting admission',
+  reserved: 'reserved — unminted',
+}
+
 export function ArchonsPanel() {
   const result = usePolling(getArchons, 15000)
 
@@ -44,9 +58,10 @@ export function ArchonsPanel() {
                   <a className="archon-open-link" href={archonUrl(a.id)} target="_blank" rel="noreferrer">
                     Open →
                   </a>
+                  <ArchonRestartButton archonId={a.id} archonTitle={a.title} />
                 </>
               ) : (
-                <span className="pill pill-idle">reserved — unminted</span>
+                <span className="pill pill-idle">{STATUS_LABELS[a.status] ?? a.status}</span>
               )}
             </div>
           )

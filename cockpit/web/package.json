@@ -4,11 +4,12 @@
   "private": true,
   "type": "module",
   "description": "Seneschal Cockpit frontend (Vite + TypeScript + React). See ../README.md.",
-  "engines": { "node": ">=20" },
+  "engines": { "node": ">=22.18" },
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
+    "test": "node --test \"src/**/*.test.ts\"",
     "preview": "vite preview"
   },
   "dependencies": {

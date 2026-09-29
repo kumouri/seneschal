@@ -5,10 +5,13 @@
 import type {
   ArchonsResponse,
   AuthStatusResponse,
+  DocStatusResponse,
   EmotesResponse,
   GovernorConfigResponse,
   HealthResponse,
   HealthSummaryResponse,
+  JobDetailResponse,
+  JobsResponse,
   SeneschaldHealthResponse,
   MealsResponse,
   ModelConfigResponse,
@@ -21,6 +24,8 @@ import type {
   SessionsResponse,
   SleepResponse,
   StatusResponse,
+  TraceSessionResponse,
+  TraceSessionsResponse,
   TranscriptResponse,
   UsageResponse,
   WorkoutsResponse,
@@ -80,11 +85,17 @@ export const emoteUrl = (file: string) => `${BASE}/emotes/${encodeURIComponent(f
 
 // v3: model dials + Fable delegation + the router dashboard.
 export const getModelConfig = () => request<ModelConfigResponse>('/model-config')
-export const putModelConfig = (warmModel: string, maxRoutableModel: string) =>
+// `backend` is optional and only sent when set, so a backend that predates the pluggable-backend
+// axis still accepts the PUT unchanged.
+export const putModelConfig = (warmModel: string, maxRoutableModel: string, backend?: string) =>
   request<ModelConfigResponse>('/model-config', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ warm_model: warmModel, max_routable_model: maxRoutableModel }),
+    body: JSON.stringify({
+      warm_model: warmModel,
+      max_routable_model: maxRoutableModel,
+      ...(backend ? { backend } : {}),
+    }),
   })
 export const getRouterStats = (limit = 20) => request<RouterStatsResponse>(`/router-stats?limit=${limit}`)
 
@@ -104,6 +115,22 @@ export const getHealthNutrition = (days = 14) => request<NutritionResponse>(`/he
 export const getHealthSummary = () => request<HealthSummaryResponse>('/health/summary')
 export const getMeals = () => request<MealsResponse>('/meals')
 
+// Jobs panel (seneschal/docs/background-jobs-spec.md) — read-only; no cancel/start bindings by design.
+export const getJobs = (limit = 40) => request<JobsResponse>(`/jobs?limit=${limit}`)
+export const getJob = (jobId: string, tailLines = 60) =>
+  request<JobDetailResponse>(`/jobs/${encodeURIComponent(jobId)}?tail_lines=${tailLines}`)
+
+/** The open-spec ledger (`seneschal/docs/*`), derived from each document's own status header.
+ *  Read-only by design: a status changes by editing the document, in the change that changes the
+ *  thing. There is deliberately no write route. */
+export const getDocStatus = () => request<DocStatusResponse>('/doc-status')
+
+// The session trace (cockpit/server/trace.py) — the Trace panel's sessions list + one session's log.
+export const getTraceSessions = (limit = 40) =>
+  request<TraceSessionsResponse>(`/trace/sessions?limit=${limit}`)
+export const getTraceSession = (id: string, limit = 1500) =>
+  request<TraceSessionResponse>(`/trace/sessions/${encodeURIComponent(id)}?limit=${limit}`)
+
 /** ws:// (or wss:// over https) same-origin URL for the chat pane's live socket. */
 export function chatSocketUrl(): string {
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -113,6 +140,12 @@ export function chatSocketUrl(): string {
 // v5: real OIDC auth + archon SSO tiles/proxy (cockpit-spec.md "Auth (Zitadel) & the archon SSO portal").
 export const getAuthStatus = () => request<AuthStatusResponse>('/auth/status')
 export const getArchons = () => request<ArchonsResponse>('/archons')
+
+// Daemon-supervised archon sites: the per-archon Restart button (queues a `restart-site` control the
+// daemon's archon-sites task applies on its next reconcile pass; same response shape as postRestart
+// above).
+export const postArchonRestart = (id: string) =>
+  request<RestartResponse>(`/archons/${encodeURIComponent(id)}/restart`, { method: 'POST' })
 
 /** Opens an archon's proxied UI in a new tab — a plain navigation, not a fetch (it's an HTML page, and
  * the browser needs to actually load it, cookies and all). */
