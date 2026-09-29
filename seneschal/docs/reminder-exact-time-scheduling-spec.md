@@ -1,6 +1,6 @@
 # Exact-time reminders — retire the 4-slot model — design
 
-**Status:** approved direction — the owner signed off on the shape (2026-07-14); since **implemented**
+**Status:** `BUILT` — approved direction — the owner signed off on the shape (2026-07-14); since **implemented**
 (`presence.maybe_seed_day` + `reminders_seed.py`; reminders-policy.md is the living model) · **Owner:** the assistant · **Scope:**
 `seneschal/references/reminders-policy.md`, `seneschal/references/databases.md` (⏰ schema), the Reminders
 subagent (`subagents/reminders/SKILL.md`), `seneschal/scripts/presence.py` (`SLOTS` + a new seed trigger),

@@ -1,6 +1,6 @@
 # The Seneschal Cockpit — design spec
 
-**Status: BUILT** — v1 (read-only monitor), v2 (daemon pipe + chat pane), v3 (model dials + Fable
+**Status:** `BUILT(v1-v5; public exposure deferred)` — v1 (read-only monitor), v2 (daemon pipe + chat pane), v3 (model dials + Fable
 delegation), v3.5 (Oikonomos, the budget governor), v4 (health/workout/meal panels + store-staged
 meals), and **v5 (the real OIDC auth stack, the archon SSO proxy, the break-glass recovery ladder,
 and the decoy)** have shipped. Public exposure (a tunnel + DNS) remains deferred — everything binds

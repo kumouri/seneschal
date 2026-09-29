@@ -1,6 +1,6 @@
 # Telegram inbound enhancements — spec
 
-**Status:** §2 attachment intake (PR 1), §4 reply-context (PR 2), §3 reactions Phase A+B (PR 3), §5
+**Status:** `BUILT(Phase C §3.4 deferred, the only open item)` — §2 attachment intake (PR 1), §4 reply-context (PR 2), §3 reactions Phase A+B (PR 3), §5
 backlog-ack (PR 4), and §3.6 custom-emoji resolution (PR 5) are all **built** — see §7. **Phase C (§3.4)
 remains ask-high and unbuilt**, the only deferred item.
 **Author:** the assistant, on the owner's ask (2026-07-16)

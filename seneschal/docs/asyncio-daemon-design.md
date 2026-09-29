@@ -1,6 +1,7 @@
 # Asyncio reactive daemon — design
 
-**Status:** approved direction; **sixth task (cockpit pipe) shipped** · **Scope:**
+**Status:** `PARTIAL(phases 0-3 BUILT; deferred phase-3+ items open)` — approved direction;
+**sixth task (cockpit pipe) shipped** · **Scope:**
 `seneschal/scripts/presence.py` and its launcher/update plumbing. Companion implementation plan:
 [asyncio-daemon-plan.md](asyncio-daemon-plan.md). The sixth task's own protocol module is
 `seneschal/scripts/cockpit_pipe.py`; its design doc is [cockpit-spec.md](cockpit-spec.md)'s "The daemon

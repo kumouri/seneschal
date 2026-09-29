@@ -1,6 +1,6 @@
 # Slack draft-and-hold — reply drafting design
 
-**Status:** BUILT — Phase 1 shipped (owner sign-off; SSOT seeded + Q4 revised during sign-off). ·
+**Status:** `BUILT(phase 1 is the whole feature)` — Phase 1 shipped (owner sign-off; SSOT seeded + Q4 revised during sign-off). ·
 **Owner:** the assistant · **Scope:** `subagents/slack-triage/SKILL.md`, `seneschal/references/` (a new
 pinned SSOT reference + small edits to `comms-mapping.md` / `memory.md` / `advisor-chain.md` /
 `autonomy-policy.md`), additive fields on `seneschal/state/pending-approvals.json`, and the daemon
