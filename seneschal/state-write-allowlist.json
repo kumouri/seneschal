@@ -5,6 +5,11 @@
       "path": "seneschal/scripts/cockpit_pipe.py",
       "symbol": "drain_inbox",
       "reason": "Deliberate truncate-to-EMPTY, not a truncate-then-write, and the distinction is the whole reason this is allowed rather than fixed. The lines have already been read into memory under `_inbox_lock`, and the call writes no bytes at all — so there is no content that can fail to encode, which is the failure mode this check exists for. Staging an empty temp file and `os.replace`-ing it would be strictly more machinery for an identical result. The real hazard here is a DIFFERENT one: a crash between the truncate and the caller enqueueing the returned items drops them. Atomicity cannot close that window — only writing the items somewhere durable before clearing can — so fixing it belongs with the inbox's own design."
+    },
+    {
+      "path": "seneschal/scripts/presence.py",
+      "symbol": "_open_slot_log",
+      "reason": "Not a content write at all — the open file object is handed to Popen as a live subprocess's stdout/stderr target, then closed in the parent immediately (the child keeps writing via its own duplicated handle for the run's whole duration, sometimes 15-20 minutes). There is no blob to build in a temp file and atomically swap in: the content does not exist yet at open time, it accrues incrementally from a process this code does not control the pacing of. Truncating on open is the correct behavior (only the LATEST attempt's output is ever read, by _read_slot_log_tail on a failed reap, to find a usage-limit reset time), and the target is disposable, regenerated on every slot launch; nothing durable is ever at risk of the partial-write failure mode this check exists for."
     }
   ]
 }

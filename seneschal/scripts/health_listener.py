@@ -24,6 +24,17 @@ Endpoints:
   POST /health-ingest     body = NDJSON    -> {"ok":true,"imported":{...}}
   POST /presence-ingest   body = NDJSON    -> {"ok":true,"imported":{...}}  (presence feed, same token)
   GET  /health            -> {"ok":true,"db":"...","last_ingest":"..."}
+
+**Restart-on-merge.** This listener runs as its own always-on scheduled task, independent of the
+presence daemon, so the daemon's graceful restart never reaches it — without a hook of its own, a
+listener-code PR would need a human to remember a manual restart, and a stale process keeps answering
+with old code until someone does. A background thread (``watch_restart_control``) polls
+``state/health-listener-control.json`` every ``RESTART_POLL_SEC`` and calls ``server.shutdown()`` the
+moment it sees a ``restart`` request stamped after this process's own start — ``run-health-listener.cmd``'s
+respawn loop then re-execs python with whatever code is on disk. ``seneschald-control.ps1``'s Update
+path writes that file on every successful pull to the deploy branch, unconditionally, the same trigger
+as the daemon's own graceful restart request — but through a SEPARATE file, so a request meant for one
+process can never bounce the other.
 """
 from __future__ import annotations
 
@@ -33,6 +44,8 @@ import json
 import os
 import socket
 import sys
+import threading
+import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -45,6 +58,83 @@ from presence_import import import_events  # noqa: E402
 FEED_LOG = os.path.join(DEFAULT_STATE_DIR, "health-feed.ndjson")
 PRESENCE_FEED_LOG = os.path.join(DEFAULT_STATE_DIR, "presence-feed.ndjson")
 MAX_BODY = 64 * 1024 * 1024  # 64 MB — a fat nightly batch is a few MB; this is just a runaway guard.
+
+#: The listener's OWN restart-request file — deliberately separate from presence.py's
+#: `state/control-queue.json`. This listener runs as its own always-on scheduled task, independent of
+#: the presence daemon by design (SCHEDULING.md §3: a seneschald reload never drops the listener, and
+#: vice-versa), so sharing a queue would let a request meant for one process also bounce the other.
+#: `seneschald-control.ps1`'s Update path (`Request-HealthListenerRestart`) writes this on every pull to
+#: the deploy branch, unconditionally.
+RESTART_CONTROL_FILE = os.path.join(DEFAULT_STATE_DIR, "health-listener-control.json")
+#: How often the background thread checks RESTART_CONTROL_FILE. Matches `run-health-listener.cmd`'s
+#: own 5s respawn delay — polling faster than the wrapper that will actually relaunch us buys nothing.
+RESTART_POLL_SEC = 5.0
+
+
+def _parse_restart_iso(value) -> datetime | None:
+    """An ISO-8601 instant -> aware UTC, accepting a trailing ``Z``; a naive stamp is read as UTC.
+    Kept self-contained (no sentinel import) so this listener keeps working regardless of unrelated
+    changes elsewhere in this directory. Never raises: every caller here treats an unparseable stamp as
+    "no request seen"."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    s = value.strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def read_restart_request(path: str = RESTART_CONTROL_FILE) -> datetime | None:
+    """The `requested_at` of a `restart` request in `path`, or `None` on anything absent/unreadable/
+    not-a-restart. Never raises — this is read from a background thread with nobody to catch it, and
+    a request that can't be read now is simply read again next poll. ``utf-8-sig`` because PowerShell
+    writers may prepend a BOM."""
+    try:
+        with open(path, "r", encoding="utf-8-sig") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(doc, dict) or doc.get("action") != "restart":
+        return None
+    return _parse_restart_iso(doc.get("requested_at"))
+
+
+def restart_requested_since(started_at: datetime, path: str = RESTART_CONTROL_FILE) -> bool:
+    """True iff `path` holds a restart request stamped strictly AFTER `started_at`.
+
+    Comparing against this process's own start time — rather than clearing/consuming the file — is
+    deliberate: the NEXT process's `started_at` is always later than a request already applied, so a
+    stale request already acted on is never re-applied. Same "compare an instant, don't mutate a
+    queue" shape `seneschald-control.ps1`'s credential guard uses for the same reason.
+    """
+    requested_at = read_restart_request(path)
+    return bool(requested_at and requested_at > started_at)
+
+
+def watch_restart_control(server: ThreadingHTTPServer, started_at: datetime,
+                          poll_sec: float = RESTART_POLL_SEC,
+                          path: str = RESTART_CONTROL_FILE) -> None:
+    """Background-thread body: shut the server down once a restart request newer than `started_at`
+    appears. Runs until it fires — meant as a daemon thread for the process's whole lifetime.
+
+    `server.shutdown()` only stops the accept loop (`serve_forever()` returns); an in-flight request
+    thread finishes on its own, never killed mid-response. `main()` then returns and the wrapper's own
+    `:loop` (`run-health-listener.cmd`) re-execs python within ~5s — THAT is the actual restart. This
+    thread never re-execs, forks, or touches a PID itself, which is also why it needs no elevation on
+    the `seneschald-control.ps1` side that requests it.
+    """
+    while True:
+        time.sleep(poll_sec)
+        if restart_requested_since(started_at, path):
+            print(f"restart requested via {path} — shutting down for the wrapper to relaunch", flush=True)
+            server.shutdown()
+            return
 
 
 def tailscale_ip() -> str | None:
@@ -168,6 +258,9 @@ def main() -> int:
     scope = "tailnet" if host == tailscale_ip() else ("localhost" if _is_local_or_tailnet(host) else host)
     print(f"health listener on http://{host}:{args.port}  ({scope}"
           f"{', token required' if args.token else ''})  POST /health-ingest", flush=True)
+    started_at = datetime.now(timezone.utc)
+    watcher = threading.Thread(target=watch_restart_control, args=(server, started_at), daemon=True)
+    watcher.start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

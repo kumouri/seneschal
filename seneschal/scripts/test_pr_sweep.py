@@ -68,17 +68,7 @@ import telegram_ask as ta  # noqa: E402 — the question store the moved-head re
 import tz_common  # noqa: E402 — the owner-zone seam every quiet-window reading goes through
 import watch_pr  # noqa: E402
 
-try:
-    import presence  # noqa: E402 — the daemon task that runs the sweep (wave 26 wiring)
-except Exception:  # noqa: BLE001 — a presence that cannot import is simply not wired yet
-    presence = None
-
-#: The PR-watch daemon task lands in `presence.py` in a later wave; until it does, the tests that
-#: drive or scan it skip rather than fail.
-HAS_PR_WATCH_TASK = presence is not None and hasattr(presence, "pr_watch_task")
-#: `merge_guard.record_approval`'s single caller is the daemon's Telegram callback path.
-HAS_APPROVAL_CALLER = presence is not None and hasattr(presence, "_merge_approval_clause")
-PR_WATCH_SKIP = "presence.pr_watch_task (the PR-watch daemon task) lands in wave 26"
+import presence  # noqa: E402 — the daemon task that runs the sweep (presence.pr_watch_task)
 
 REPO = "example/repo"
 OTHER_REPO = "example/other"
@@ -813,7 +803,6 @@ class AskingIsAllItCanDoTest(SweepCase):
         self.assertNotIn("pr merge", src)
         self.assertNotIn("decide_command", src)
 
-    @unittest.skipUnless(HAS_PR_WATCH_TASK, PR_WATCH_SKIP)
     def test_the_daemon_task_calls_neither_either(self):
         body = source("presence.py")
         start = body.index("async def pr_watch_task")
@@ -823,9 +812,6 @@ class AskingIsAllItCanDoTest(SweepCase):
         self.assertNotIn("pr merge", task)
         self.assertTrue(hasattr(presence, "pr_watch_task"))
 
-    @unittest.skipUnless(HAS_APPROVAL_CALLER,
-                         "presence._merge_approval_clause (the approval writer's one caller) lands "
-                         "in wave 26")
     def test_record_approval_still_has_exactly_one_caller_after_this_lands(self):
         """`merge_guard`'s own ``ApprovalIsNotAgentMintableTest`` scans every sibling script; this
         re-asserts it here so adding a finder can never be the thing that quietly widens it."""
@@ -2014,7 +2000,6 @@ def _args(state_dir, **over):
     return argparse.Namespace(**base)
 
 
-@unittest.skipUnless(HAS_PR_WATCH_TASK, PR_WATCH_SKIP)
 class DaemonTaskTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()

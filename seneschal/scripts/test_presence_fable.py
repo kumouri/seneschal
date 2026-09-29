@@ -211,7 +211,7 @@ class EnqueueInboundForceRouteAndFableArm(unittest.IsolatedAsyncioTestCase):
         await pr._enqueue_inbound(state, args, lambda *_: None,
                                   [("telegram", "!fable draft the Q3 plan", 0)])
         self.assertEqual(len(state.pending), 1)
-        channel, text, attempts = state.pending[0]
+        channel, text, attempts, _topic = state.pending[0]
         self.assertEqual(channel, "telegram")
         self.assertEqual(attempts, 0)
         self.assertIn("force-fable", text)
@@ -224,7 +224,7 @@ class EnqueueInboundForceRouteAndFableArm(unittest.IsolatedAsyncioTestCase):
         args = _args(self.dir, router_mode="off")
         state = pr.DaemonState()
         await pr._enqueue_inbound(state, args, lambda *_: None, [("telegram", "what's next?", 0)])
-        self.assertEqual(state.pending, [("telegram", "what's next?", 0)])
+        self.assertEqual(state.pending, [("telegram", "what's next?", 0, None)])
 
     async def test_fable_hint_is_queued_when_ceiling_admits_and_verdict_is_fable(self):
         mc.save(self.dir, "opus", "fable")
@@ -273,12 +273,18 @@ class _CapturingSession:
 
     def send(self, text: str, on_event=None) -> str:
         self.prompts.append(text)
+        # Opens with a compliant channel declaration (message-routing-spec.md §1) AND a compliant
+        # reply-marker line (reply-marker-forcing-function-spec.md §1) so this fixture doesn't trip
+        # either half of the phase-1 retry loop and double up on `send()` calls for a "telegram" turn —
+        # the channel line is stripped before it reaches any consumer; the marker line is not, but
+        # nothing here asserts the exact reply text, so that is harmless.
+        reply = "[[channel:main]]\n*(answering ok)*\nok"
         if on_event is not None:
             try:
-                on_event({"type": "result", "is_error": False, "result": "ok"})
+                on_event({"type": "result", "is_error": False, "result": reply})
             except Exception:  # noqa: BLE001
                 pass
-        return "ok"
+        return reply
 
     def close(self) -> None:
         pass

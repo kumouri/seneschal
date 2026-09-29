@@ -46,8 +46,6 @@ import presence as pr  # noqa: E402
 
 # The daemon side of this feature (the drainer opening/closing the pointer, the inbound reverse
 # lookup) lands with the newer presence.py; until then those classes skip rather than fail.
-_PRESENCE_WIRED = hasattr(pr, "resolve_inbound_message_id")
-_PRESENCE_SKIP = "presence wiring lands in wave 26"
 
 
 class _FakeProc:
@@ -602,7 +600,6 @@ class SelfStartReasonClassTests(unittest.TestCase):
 
 # ------------------------------------------------------- presence: which message was the request
 
-@unittest.skipUnless(_PRESENCE_WIRED, _PRESENCE_SKIP)
 class InboundMessageIdResolutionTests(unittest.TestCase):
     """The reverse lookup, and why it proves uniqueness instead of assuming it."""
 
@@ -659,7 +656,6 @@ async def _drain_one(state, args, timeout=5.0):
         await asyncio.wait_for(task, timeout=5.0)
 
 
-@unittest.skipUnless(_PRESENCE_WIRED, _PRESENCE_SKIP)
 class TurnPointerWiringTests(unittest.IsolatedAsyncioTestCase):
     """End to end through the real drainer: a turn opens the pointer, a job started inside it
     resolves, and the turn closes it on the way out.

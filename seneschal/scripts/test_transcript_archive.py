@@ -569,10 +569,6 @@ class ProducerCoverage(ArchiveBase):
     def test_the_daemon_backfills_at_boot(self):
         with open(os.path.join(SCRIPT_DIR, "presence.py"), encoding="utf-8") as fh:
             body = fh.read()
-        if "import transcript_archive" not in body:
-            # The boot-time backfill lands with the daemon wiring; until then the ring is rescued by
-            # hand (`transcript_archive.py backfill`). Once presence imports the module, this bites.
-            self.skipTest("presence.py does not wire the transcript archive yet")
         self.assertIn("transcript_archive.backfill_from_ring", body)
         self.assertIn("import transcript_archive", body)
 

@@ -41,16 +41,6 @@ def tearDownModule():
     for p in reversed(_PATCHES):
         p.stop()
 
-
-def _presence_wires_pr_repair() -> bool:
-    """Does this checkout's `presence.py` call `pr_repair.sweep` from its PR-watch task yet? Read from
-    the source rather than imported, so collecting this module never pays presence's import cost."""
-    try:
-        with open(os.path.join(HERE, "presence.py"), encoding="utf-8") as fh:
-            src = fh.read()
-    except OSError:
-        return False
-    return "pr_repair" in src and "def pr_watch_task" in src
 BASE1 = "b" * 40
 BASE2 = "c" * 40
 HEAD = "a" * 40
@@ -567,9 +557,6 @@ class ConflictPathsTest(unittest.TestCase):
                                                  "a\nb\nc\nd\nY\n", pr_repair._run))
 
 
-@unittest.skipUnless(_presence_wires_pr_repair(),
-                     "presence wiring (pr_watch_task calls pr_repair.sweep after pr_sweep.sweep) "
-                     "lands in wave 26")
 class DaemonWiringTest(unittest.IsolatedAsyncioTestCase):
     async def test_repair_runs_after_the_sweep_and_its_crash_is_contained(self):
         import argparse

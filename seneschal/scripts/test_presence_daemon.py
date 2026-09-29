@@ -4,15 +4,20 @@
 Stdlib only. Uses a throwaway state dir; the **deferred** path never reaches delivery, so nothing sends
 Telegram (the exact behavior we care about). The freshness helper is tested directly.
 """
+import io
 import json
 import os
 import shutil
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import reminders_acks as ra  # noqa: E402
+import reminders_dequeue  # noqa: E402
 import sentinel  # noqa: E402
 
 
@@ -103,7 +108,7 @@ class PresenceDeferGateTest(unittest.TestCase):
         self.assertIsNone(self._saved()[0]["fired_at"])
 
     def test_asleep_does_not_defer(self):
-        # Sleep gate RETIRED (2026-07-13): a fresh asleep=True context must not hold a nudge — the
+        # Sleep gate retired: a fresh asleep=True context must not hold a nudge — the
         # phone-only Sleep API flags an idle phone as a sleeping owner. Delivery proceeds (and fails
         # here only because the test points at a nonexistent telegram env).
         self.write("reminders.json", [{
@@ -120,9 +125,13 @@ class PresenceDeferGateTest(unittest.TestCase):
         self.assertIn("reminder_send_failed", kinds)  # it reached delivery, not the defer branch
 
 
-class CatchupStaggerTest(unittest.TestCase):
-    """A released backlog (defer lifts / several nudges come due at once) must DRIP, not fire as a wall.
-    Delivery is mocked to succeed so we can watch fired_at / held signals directly."""
+def _iso(dt):
+    return dt.isoformat().replace("+00:00", "Z")
+
+
+class _StaggerHarness(unittest.TestCase):
+    """Shared harness for the catch-up stagger suites: delivery is mocked to succeed so we can watch
+    fired_at / held signals directly, and `self.now` is the clock `check_reminders` sees."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="stagger-test-")
@@ -151,6 +160,10 @@ class CatchupStaggerTest(unittest.TestCase):
 
     def _kinds(self, signals, kind):
         return [s["id"] for s in signals if s["kind"] == kind]
+
+
+class CatchupStaggerTest(_StaggerHarness):
+    """A released backlog (defer lifts / several nudges come due at once) must DRIP, not fire as a wall."""
 
     def test_backlog_fires_one_holds_the_rest(self):
         # Three ordinary nudges all overdue → exactly one fires, the other two are held (drip, not wall).

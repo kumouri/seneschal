@@ -62,7 +62,6 @@ NOW = datetime(2026, 7, 28, 20, 0, 0, tzinfo=timezone.utc)
 
 # The daemon-side wiring (the scheduler tick's reconcile, the wake enqueue) lands with the newer
 # presence.py; the tests that drive it skip until those functions exist.
-_PRESENCE_SKIP = "presence wiring lands in wave 26"
 
 # The verbatim transient line `--retry` was built for — a job that died in 1 second with 161 bytes
 # and nothing else in the log. It is a test fixture, not a paraphrase.
@@ -2741,20 +2740,17 @@ class PresenceWiringTests(unittest.TestCase):
         state.pending = []
         return state
 
-    @unittest.skipUnless(hasattr(pr, "_reconcile_jobs"), _PRESENCE_SKIP)
     def test_reconcile_is_skipped_when_disabled(self):
         self.args.no_jobs = True
         with mock.patch.object(jobs, "reconcile") as rec:
             asyncio.run(pr._reconcile_jobs(self._state(), self.args, self.logs.append))
         rec.assert_not_called()
 
-    @unittest.skipUnless(hasattr(pr, "_reconcile_jobs"), _PRESENCE_SKIP)
     def test_a_broken_store_never_breaks_the_tick(self):
         with mock.patch.object(jobs, "reconcile", side_effect=RuntimeError("store on fire")):
             asyncio.run(pr._reconcile_jobs(self._state(), self.args, self.logs.append))
         self.assertTrue(any("job reconcile failed" in m for m in self.logs))
 
-    @unittest.skipUnless(hasattr(pr, "_reconcile_jobs"), _PRESENCE_SKIP)
     def test_wake_jobs_are_enqueued_into_the_action_queue(self):
         done = {"id": "j1", "title": "waker", "status": jobs.DONE, "wake": True,
                 "exit_code": 0, "log_path": "x.log", "notify": {"channel": "telegram"}}
@@ -2767,7 +2763,6 @@ class PresenceWiringTests(unittest.TestCase):
         self.assertEqual(channel, "telegram")
         self.assertIn("waker", text)
 
-    @unittest.skipUnless(hasattr(pr, "_reconcile_jobs"), _PRESENCE_SKIP)
     def test_reconcile_refreshes_the_cached_active_count_for_the_status_frame(self):
         """`jobs_active` rides the cockpit pipe's status frame, which is a hot path (every turn
         start/end + every queue change) — so it's fed from this tick-refreshed cache rather than
@@ -2782,7 +2777,6 @@ class PresenceWiringTests(unittest.TestCase):
             asyncio.run(pr._reconcile_jobs(state, self.args, self.logs.append))
         self.assertEqual(state.jobs_active, 2)
 
-    @unittest.skipUnless(hasattr(pr, "_reconcile_jobs"), _PRESENCE_SKIP)
     def test_status_snapshot_carries_jobs_active_without_touching_disk(self):
         state = self._state()
         state.jobs_active = 3
@@ -3126,7 +3120,6 @@ class CancelWakeSuppressionTests(unittest.TestCase):
 
     # ---- the end-to-end wake enqueue, via presence.job_wakes ----
 
-    @unittest.skipUnless(hasattr(pr, "job_wakes"), _PRESENCE_SKIP)
     def test_job_wakes_excludes_a_suppressed_cancel(self):
         suppressed = self._rec(id="a", title="suppressed one", wake=True,
                                cancelled_by={"session_id": "s1", "source": "daemon"})
@@ -3136,14 +3129,12 @@ class CancelWakeSuppressionTests(unittest.TestCase):
         self.assertIn("kept one", wakes[0][1])
         self.assertNotIn("suppressed one", wakes[0][1])
 
-    @unittest.skipUnless(hasattr(pr, "job_wakes"), _PRESENCE_SKIP)
     def test_job_wakes_keeps_an_owner_requested_cancel(self):
         rec = self._rec(wake=True, cancelled_by={"session_id": "s1", "source": "daemon"},
                         cancel_request={"by": "owner"})
         wakes = pr.job_wakes([rec])
         self.assertEqual(len(wakes), 1)
 
-    @unittest.skipUnless(hasattr(pr, "job_wakes"), _PRESENCE_SKIP)
     def test_job_wakes_skips_records_with_no_wake_flag_regardless(self):
         rec = self._rec(wake=False, cancelled_by={"session_id": "s1", "source": "daemon"},
                         cancel_request={"by": "owner"})

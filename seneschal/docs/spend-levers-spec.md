@@ -1,12 +1,13 @@
 # Spend levers — logging *why* a turn cost what it cost
 
-**Status:** `PARTIAL(phase 0's ledger field + phase 1's counter and report BUILT; the stream-tee call sites that feed them are not yet wired into presence.py; phases 2-4 designed, not built)` —
+**Status:** `PARTIAL(phase 0's ledger field + phase 1's counter, report and stream-tee call sites BUILT; phases 2-4 designed, not built)` —
 **phase 0** is the join key: `governor.append_spend` accepts `turn_id=` (R2). **Phase 1** is the levers
 that existed nowhere: `seneschal/scripts/spend_levers.py`'s `TurnLevers` counter (`levers.tool_calls`
 / `tool_result_bytes` / `tool_result_images`, written through `governor.append_spend(levers=…)`) plus
-`spend_levers.py report`, the reader that runs the join. **What is not wired yet** is the caller half:
-`presence._make_stream_tee` passing the `turn_id` it already holds and feeding each raw event to the
-counter. §8's phase-0 note explains why that half is the load-bearing one. Zero behaviour change
+`spend_levers.py report`, the reader that runs the join. The caller half is wired:
+`presence._make_stream_tee` feeds each raw event to the counter and passes its `turn_id` and the
+flushed levers to `governor.append_spend` on every `turn_done` (§8's phase-0 note explains why that half
+is the load-bearing one). Zero behaviour change
 either way; no lever gates, refuses or alerts anything. §7's decisions are this spec's own and
 revisable; §11 holds the owner's open questions.
 **Sibling designs:** the context-budget checks (`../scripts/check_context_budget.py` — the

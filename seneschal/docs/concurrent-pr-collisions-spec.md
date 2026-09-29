@@ -4,9 +4,9 @@
 — the design below describes the whole system. What exists: `pr_overlap.py` + `merge_guard.overlap_band`
 (phase 1), `check_context_budget.py`'s `reconcile()` (§1.4's measure-don't-sum rule, report-only),
 `pr_rebase.py` (2R), `pr_repair.py` (2b as a delegated job, plus 2a's detection rows in
-`state/pr-repair-log.jsonl`) and `job_pr_draft.py` (§5B). **The daemon's call into `pr_repair.sweep`
-arrives with the presence port** (the PR-watch task in `presence.py`, §5A.9); until then the pass runs
-on demand (`python seneschal/scripts/pr_repair.py --dry-run`). §7 is a decision about the approval gate
+`state/pr-repair-log.jsonl`) and `job_pr_draft.py` (§5B). The daemon's PR-watch task
+(`presence.pr_watch_task`, §5A.9) calls `pr_sweep.sweep` then `pr_repair.sweep` every pass, each in its
+own try; `python seneschal/scripts/pr_repair.py --dry-run` still runs the pass on demand. §7 is a decision about the approval gate
 that belongs to the owner, and it is **held**, not answered (§7.6).
 
 **Scope:** one stdlib module per phase, their tests, one new band in an existing picker, and — for

@@ -291,7 +291,6 @@ class TerminalChoices(Base):
             self.assertIn(label, flat)
 
 
-@unittest.skipUnless(hasattr(presence, "_owi_unknowns_clause"), "presence wiring lands in wave 26")
 class DaemonReportLine(Base):
     """`presence._owi_unknowns_clause` — the answered-batch continuation's report line carries
     `mirror` so the assistant can tell the owner which store rows to update themselves. Driven with

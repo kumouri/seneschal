@@ -28,8 +28,30 @@ class _FakeCompleted:
         self.stderr = stderr
 
 
-def _fake_runner(returncode=0, stdout="the delegate's answer", stderr=""):
+# A realistic `claude -p --output-format json` result object, trimmed to the fields this script reads.
+# The delegate asks for json mode precisely so `usage` comes back — see run_claude.
+FAKE_USAGE = {
+    "input_tokens": 12,
+    "output_tokens": 300,
+    "cache_read_input_tokens": 20_000,
+    "cache_creation_input_tokens": 1_000,
+    "cache_creation": {"ephemeral_1h_input_tokens": 1_000, "ephemeral_5m_input_tokens": 0},
+}
+
+
+def _fake_result_json(text="the delegate's answer", usage=None, is_error=False):
+    return json.dumps({
+        "type": "result", "subtype": "success", "is_error": is_error,
+        "result": text, "usage": FAKE_USAGE if usage is None else usage,
+    })
+
+
+def _fake_runner(returncode=0, stdout=None, stderr=""):
+    """Injected stand-in for subprocess.run. `stdout` defaults to a well-formed json-mode result; pass
+    a plain string to simulate an older/text-mode CLI."""
     calls = []
+    if stdout is None:
+        stdout = _fake_result_json()
 
     def runner(cmd, **kwargs):
         calls.append({"cmd": cmd, "kwargs": kwargs})
@@ -45,7 +67,7 @@ class ChildEnv(unittest.TestCase):
         os.environ["ANTHROPIC_API_KEY"] = "sk-should-never-appear"
         try:
             env = fd.child_env()
-            self.assertNotIn("ANTHROPIC_API_KEY", env)
+            self.assertNotIn("ANTHROPIC_API_KEY", sorted(env.keys()))
         finally:
             if old is None:
                 os.environ.pop("ANTHROPIC_API_KEY", None)
@@ -97,16 +119,50 @@ class ThreadSeed(unittest.TestCase):
         # budget-bounded: nowhere near the full 1000+ chars all ten turns would cost
         self.assertLess(len(seed), 500)
 
+    def _write_main_topic(self, entries):
+        os.makedirs(os.path.join(self.dir, fd.THREAD_DIR), exist_ok=True)
+        with open(os.path.join(self.dir, fd.THREAD_DIR, "main.json"), "w", encoding="utf-8") as fh:
+            json.dump(entries, fh)
+
+    def test_reads_the_per_topic_main_cache(self):
+        # The cache went per-topic; a reader left on the legacy path would seed "" forever, silently.
+        self._write_main_topic([{"role": "owner", "text": "from the main topic"}])
+        self.assertIn("from the main topic", fd.thread_seed(self.dir))
+
+    def test_main_cache_wins_over_the_legacy_file(self):
+        self._write_main_topic([{"role": "owner", "text": "new layout"}])
+        self._write_thread([{"role": "owner", "text": "legacy layout"}])
+        seed = fd.thread_seed(self.dir)
+        self.assertIn("new layout", seed)
+        self.assertNotIn("legacy layout", seed)
+
+    def test_legacy_file_is_the_second_rung(self):
+        self._write_thread([{"role": "owner", "text": "legacy layout"}])
+        self.assertIn("legacy layout", fd.thread_seed(self.dir))
+
+    def test_spellings_match_the_daemon_when_it_declares_them(self):
+        # Drift between this module's duplicated path and the daemon's is SILENT, so pin it.
+        import presence  # noqa: WPS433
+        self.assertEqual(fd.THREAD_DIR, presence.THREAD_DIR)
+        self.assertEqual(fd.LEGACY_THREAD_FILE, presence.LEGACY_THREAD_FILE)
+
 
 class RunClaude(unittest.TestCase):
-    def test_success_returns_stdout(self):
-        runner = _fake_runner(returncode=0, stdout="  hello from fable  \n")
-        ok, out = fd.run_claude("do the thing", "claude-fable-5", "claude", 60, runner=runner)
+    def test_success_returns_answer_and_usage(self):
+        runner = _fake_runner(returncode=0, stdout=_fake_result_json("  hello from fable  \n"))
+        ok, out, usage = fd.run_claude("do the thing", "claude-fable-5", "claude", 60, runner=runner)
         self.assertTrue(ok)
         self.assertEqual(out, "hello from fable")
-        self.assertEqual(len(runner.calls), 1)
-        cmd = runner.calls[0]["cmd"]
-        self.assertEqual(cmd, ["claude", "-p", "--model", "claude-fable-5", "do the thing"])
+        self.assertEqual(usage, FAKE_USAGE)
+
+    def test_asks_the_cli_for_json_so_there_is_usage_to_meter(self):
+        # THE metering regression guard. Drop --output-format json and the CLI returns prose only, so
+        # the delegation silently meters nothing against the tightest budget on the board.
+        runner = _fake_runner()
+        fd.run_claude("do the thing", "claude-fable-5", "claude", 60, runner=runner)
+        self.assertEqual(runner.calls[0]["cmd"], [
+            "claude", "-p", "--model", "claude-fable-5", "--output-format", "json", "do the thing",
+        ])
 
     def test_scrubs_api_key_from_child_env(self):
         old = os.environ.get("ANTHROPIC_API_KEY")
@@ -115,7 +171,7 @@ class RunClaude(unittest.TestCase):
             runner = _fake_runner()
             fd.run_claude("task", "claude-fable-5", "claude", 60, runner=runner)
             env = runner.calls[0]["kwargs"]["env"]
-            self.assertNotIn("ANTHROPIC_API_KEY", env)
+            self.assertNotIn("ANTHROPIC_API_KEY", sorted(env.keys()))
         finally:
             if old is None:
                 os.environ.pop("ANTHROPIC_API_KEY", None)
@@ -124,22 +180,43 @@ class RunClaude(unittest.TestCase):
 
     def test_nonzero_exit_is_a_failure(self):
         runner = _fake_runner(returncode=1, stdout="", stderr="boom")
-        ok, out = fd.run_claude("task", "claude-fable-5", "claude", 60, runner=runner)
+        ok, out, usage = fd.run_claude("task", "claude-fable-5", "claude", 60, runner=runner)
         self.assertFalse(ok)
         self.assertIn("boom", out)
+        self.assertIsNone(usage)
 
     def test_empty_stdout_on_success_is_still_a_failure(self):
         runner = _fake_runner(returncode=0, stdout="   ")
-        ok, out = fd.run_claude("task", "claude-fable-5", "claude", 60, runner=runner)
+        ok, out, usage = fd.run_claude("task", "claude-fable-5", "claude", 60, runner=runner)
         self.assertFalse(ok)
+
+    def test_empty_result_field_is_a_failure(self):
+        runner = _fake_runner(stdout=_fake_result_json("   "))
+        ok, out, usage = fd.run_claude("task", "claude-fable-5", "claude", 60, runner=runner)
+        self.assertFalse(ok)
+
+    def test_is_error_result_falls_through_rather_than_being_read_as_an_answer(self):
+        runner = _fake_runner(stdout=_fake_result_json("nope", is_error=True))
+        ok, out, usage = fd.run_claude("task", "claude-fable-5", "claude", 60, runner=runner)
+        self.assertIsNone(usage)  # not parsed as a success result
+
+    def test_plain_text_stdout_still_answers_but_yields_no_usage(self):
+        # An older CLI, or json mode going away. The answer is still delivered; usage is honestly None
+        # so the caller marks the row unmetered instead of inventing a zero.
+        runner = _fake_runner(stdout="just prose, no json here")
+        ok, out, usage = fd.run_claude("task", "claude-fable-5", "claude", 60, runner=runner)
+        self.assertTrue(ok)
+        self.assertEqual(out, "just prose, no json here")
+        self.assertIsNone(usage)
 
     def test_runner_raising_oserror_is_caught(self):
         def boom(cmd, **kwargs):
             raise OSError("no such binary")
 
-        ok, out = fd.run_claude("task", "claude-fable-5", "claude", 60, runner=boom)
+        ok, out, usage = fd.run_claude("task", "claude-fable-5", "claude", 60, runner=boom)
         self.assertFalse(ok)
         self.assertIn("failed to run", out)
+        self.assertIsNone(usage)
 
 
 class Delegate(unittest.TestCase):
@@ -170,6 +247,17 @@ class Delegate(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(msg, "here's the plan")
         self.assertEqual(len(runner.calls), 1)
+
+    def test_refuses_cleanly_on_a_non_claude_cli_backend(self):
+        """Fable has no meaning off claude-cli, and the refusal must say so rather than read as an
+        ordinary ceiling-too-low message."""
+        mc.save(self.dir, "gpt-5.5", "gpt-6-astra", backend="codex-cli")
+        runner = _fake_runner()
+        ok, msg = fd.delegate("do a hard thing", state_dir=self.dir, runner=runner)
+        self.assertFalse(ok)
+        self.assertIn("codex-cli", msg)
+        self.assertIn("claude-cli", msg)
+        self.assertEqual(runner.calls, [])
 
     def test_seeds_thread_context_by_default(self):
         mc.save(self.dir, "opus", "fable")
@@ -264,7 +352,7 @@ class GovernorGate(unittest.TestCase):
         self.assertEqual(runner.calls, [])
 
     def test_succeeds_and_appends_ledger_line_on_success(self):
-        runner = _fake_runner(stdout="the answer")
+        runner = _fake_runner(stdout=_fake_result_json("the answer"))
         ok, msg = fd.delegate("task", state_dir=self.dir, runner=runner, conversation_id="c1")
         self.assertTrue(ok)
         recs = gv._read_ledger(self.dir)
@@ -272,6 +360,51 @@ class GovernorGate(unittest.TestCase):
         self.assertEqual(len(fable_recs), 1)
         self.assertEqual(fable_recs[0]["conversation_id"], "c1")
         self.assertEqual(fable_recs[0]["model"], "claude-fable-5")
+
+    def test_a_delegation_records_non_zero_spend(self):
+        """End to end: a delegation must meter real tokens against Fable's budget — the tightest on
+        the board and the ONLY token budget that hard-blocks. A rail that meters zero cannot bite, and
+        worse, the gate trusts the zero."""
+        runner = _fake_runner()
+        ok, _ = fd.delegate("task", state_dir=self.dir, runner=runner, conversation_id="c1")
+        self.assertTrue(ok)
+        rec = [r for r in gv._read_ledger(self.dir) if r.get("kind") == "fable_oneshot"][0]
+        self.assertGreater(rec["tokens"], 0)
+        self.assertGreater(rec["billable_tokens"], 0)
+        # 12 + 300 + 20000*0.1 + 1000*2 = 4312
+        self.assertEqual(rec["billable_tokens"], 4312)
+        self.assertNotIn("metered", rec)
+
+    def test_that_spend_actually_reaches_the_rollup(self):
+        # The other half: rollups must accrue tokens from any row carrying them, not only
+        # kind == "tokens", or a fable_oneshot row's spend is dropped even though it carries a count.
+        runner = _fake_runner()
+        fd.delegate("task", state_dir=self.dir, runner=runner, conversation_id="c1")
+        roll = gv.rollups(self.dir)
+        self.assertEqual(roll["billable_by_model"]["day"]["claude-fable-5"], 4312)
+        self.assertEqual(roll["basis_by_model"]["day"]["claude-fable-5"], gv.BASIS_BILLABLE)
+
+    def test_unreadable_usage_is_marked_unmetered_never_recorded_as_zero(self):
+        runner = _fake_runner(stdout="prose, no usage anywhere")
+        ok, _ = fd.delegate("task", state_dir=self.dir, runner=runner, conversation_id="c1")
+        self.assertTrue(ok)  # the answer still gets delivered
+        rec = [r for r in gv._read_ledger(self.dir) if r.get("kind") == "fable_oneshot"][0]
+        self.assertEqual(rec["metered"], gv.METERED_UNAVAILABLE)
+        self.assertNotIn("tokens", rec)
+        self.assertNotIn("billable_tokens", rec)
+        # and the gap is visible in the rollup rather than reading as free
+        self.assertEqual(gv.rollups(self.dir)["unmetered_by_model"]["day"]["claude-fable-5"], 1)
+
+    def test_metered_spend_can_exhaust_the_hard_gate(self):
+        # The point of metering at all: once it records real tokens, the budget can actually refuse.
+        gv.save(self.dir, {"daily_token_budget_by_model": {"claude-fable-5": 1000}})
+        runner = _fake_runner()
+        ok, _ = fd.delegate("task one", state_dir=self.dir, runner=runner, conversation_id="c1")
+        self.assertTrue(ok)
+        ok2, msg = fd.delegate("task two", state_dir=self.dir, runner=runner, conversation_id="c2")
+        self.assertFalse(ok2)
+        self.assertIn("daily token budget", msg)
+        self.assertEqual(len(runner.calls), 1)  # the second never spawned
 
     def test_failure_does_not_append_ledger_line(self):
         runner = _fake_runner(returncode=1, stderr="boom")
@@ -315,6 +448,50 @@ class GovernorGate(unittest.TestCase):
         fd.delegate("task one", state_dir=self.dir, runner=runner, conversation_id="explicit-1")
         ok, _ = fd.delegate("task two", state_dir=self.dir, runner=runner, conversation_id="explicit-2")
         self.assertTrue(ok)  # different explicit conversation id, so the cap doesn't apply
+
+
+class TheCeilingIsNotABudget(unittest.TestCase):
+    """**THE DISTINCTION THAT MUST NOT COLLAPSE.** `fable_delegate` refuses for two unrelated reasons:
+
+      1. The **max-routable-model ceiling** (`state/model-config.json`'s `max_routable_model`) is a
+         MODEL-ROUTING POLICY. It is not a budget, it is checked BEFORE the governor is consulted,
+         and its refusal must never read as a quota.
+      2. The **budget/quota refusals** (daily + per-conversation Fable quota, delegation concurrency,
+         Fable's token budget) are the governor's (`GovernorGate` above).
+
+    A change that made the ceiling stop refusing — or blurred its message into a budget message —
+    would be wrong however green the rest of the suite went."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+
+    # ---------------------------------------------------------------- the ceiling refuses
+
+    def test_ceiling_still_refuses_with_a_clear_message(self):
+        mc.save(self.dir, "opus", "opus")  # ceiling does not admit Fable-tier
+        runner = _fake_runner()
+        ok, msg = fd.delegate("do a hard thing", state_dir=self.dir, runner=runner)
+        self.assertFalse(ok)
+        self.assertIn("refused", msg)
+        self.assertIn("max_routable_model", msg)
+        self.assertIn("claude-opus-4-8", msg)   # names the ceiling it actually read
+        self.assertIn("Model dials", msg)       # and where to change it
+        self.assertEqual(runner.calls, [])      # never even attempted the subprocess
+
+    def test_ceiling_still_refuses_with_no_config_at_all(self):
+        runner = _fake_runner()
+        ok, msg = fd.delegate("task", state_dir=self.dir, runner=runner)
+        self.assertFalse(ok)
+        self.assertIn("refused", msg)
+        self.assertEqual(runner.calls, [])
+
+    def test_the_ceiling_refusal_is_not_a_governor_refusal(self):
+        """Guards against the sloppy fix: making `delegate` stop refusing at all would pass a test
+        that only asserted "budget no longer blocks". The ceiling message must not mention a quota."""
+        mc.save(self.dir, "opus", "opus")
+        _, msg = fd.delegate("task", state_dir=self.dir, runner=_fake_runner())
+        for budget_word in ("quota", "budget", "concurrency", "cap"):
+            self.assertNotIn(budget_word, msg.lower())
 
 
 class CliMain(unittest.TestCase):

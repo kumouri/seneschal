@@ -1,6 +1,7 @@
 # Asyncio reactive daemon — implementation plan
 
-**Status:** `PARTIAL(phases 0-3 BUILT; deferred phase-3+ items open)` — phases 0–3 all shipped and live.
+**Status:** `BUILT` — phases 0–3 all shipped and live; the phase-3+ items are deferred by decision (the
+design doc's last section), not backlog.
 
 > Phase 0 = packaging; phase 1 = the core port (incl. an adversarial-review fix commit — notably the cross-process `reminders.json` writer lock); phase 2 =
 > the Discord gateway; phase 3 = the docs-sync PR. The daemon reloads onto each merged phase via the
@@ -103,3 +104,9 @@ heartbeat cadence (~5 s scheduler tick) and no crash-respawn within 30 min.
    mid-turn interleave, HA/Signal tasks) in the Run Log and carry-over.
 
 **Merge gate:** CI green.
+
+## Router entry
+
+**Router status (this row covers this file + `asyncio-daemon-design.md` together):** phases 0-2 BUILT;
+tasks 6-9 added after. The fuller router content — the nine supervised tasks, their invariants and the
+loop as deployed — lives in `asyncio-daemon-design.md`'s own "Router entry" section.

@@ -1,7 +1,10 @@
 # Asyncio reactive daemon — design
 
-**Status:** `PARTIAL(phases 0-3 BUILT; deferred phase-3+ items open)` — approved direction;
-**sixth task (cockpit pipe) shipped** · **Scope:**
+**Status:** `BUILT` — approved direction; **built and live — `main_async()` supervises NINE tasks.**
+Phases 0-2 shipped the first five; the **sixth** (cockpit pipe), the **seventh** (archon-site
+supervision), the **eighth** (cockpit supervision) and the **ninth** (the resident PR watch,
+`pr_sweep.py`) followed. Each is named in the Architecture table below and detailed in "The loop as
+deployed". The phase-3+ items at the end are deferred by decision, not backlog · **Scope:**
 `seneschal/scripts/presence.py` and its launcher/update plumbing. Companion implementation plan:
 [asyncio-daemon-plan.md](asyncio-daemon-plan.md). The sixth task's own protocol module is
 `seneschal/scripts/cockpit_pipe.py`; its design doc is [cockpit-spec.md](cockpit-spec.md)'s "The daemon
@@ -54,12 +57,15 @@ from locks is preserved.
 
 | Task | Owns | Replaces |
 |---|---|---|
-| `telegram_task` | Telegram long-poll (`poll_telegram` in a thread), enqueue inbound to the durable action queue, thread-append, Router shadow-classify | the loop's blocking heartbeat |
+| `telegram_task` | Telegram long-poll (`poll_telegram` in a thread), enqueue inbound to the durable action queue (folding an `edited_message` into the entry it corrects), thread-append, Router shadow-classify | the loop's blocking heartbeat |
 | `discord_task` | Gateway websocket (identify → heartbeat → `MESSAGE_CREATE` → resume), REST `after=` catch-up on every (re)connect; **falls back to REST cadence-polling** if `websockets` is unavailable | once-per-loop `poll_discord` |
 | `drainer_task` | The warm session lifecycle + draining the durable queue front-to-back, one turn at a time; idle wind-down | the inline drain loop |
-| `scheduler_task` | ~5 s tick: lock heartbeat, `reap_finished_slots`, `check_reminders`, roll refill, `maybe_peek`, `maybe_run_slots`, drain the cockpit inbox-fallback file | the per-loop cadence work |
+| `scheduler_task` | ~5 s tick: lock heartbeat, `reap_finished_slots`, **`_reconcile_jobs`** (background-job terminal detection + completion pushes — `jobs.py`, `background-jobs-spec.md`), `check_reminders`, roll refill, `maybe_peek`, `maybe_run_slots`, **`_tend_outbox`** (Notion backend only: the write-behind outbox's supersession sweep + gated headless flush + backlog alarm — `notion-write-behind-outbox-spec.md` §9(a′); a tick *duty*, not a supervised task of its own, because it is the same "did what we started actually finish?" work as the slot reap and the job reconcile), drain the cockpit inbox-fallback file | the per-loop cadence work |
 | `control_task` | control queue + legacy `restart.request` sentinel; initiates graceful quiesce → detached-respawn restart / shutdown | the end-of-loop control block |
 | `cockpit_task` | the **Seneschal Cockpit pipe** (v2) — a localhost-only, token-authed WebSocket server (`seneschal/scripts/cockpit_pipe.py`) serving exactly one client (the cockpit backend); relays `chat.send`/`status.get`/`control.restart` in, streams `chat.event`/`status` out | nothing — net-new surface |
+| `archon_sites_task` | **archon UI supervision** (`seneschal/scripts/archon_sites.py`) — a ~20 s reconcile loop over every archon's self-declared `site.json`: health-check over HTTP, (re)spawn what's down or wedged, honor the cockpit's per-site Restart control. Detached survivors + a PID file, so a reload adopts rather than duplicates | nothing — net-new surface |
+| `cockpit_app_task` | **cockpit supervision** (`seneschal/scripts/cockpit_site.py`) — the same treatment for the cockpit backend itself: health-check `GET /api/health` on :8760, (re)spawn detached, build `cockpit/web/dist` when stale, bounce it when the checkout's git HEAD no longer matches the rev it was spawned at, and bounce-and-rotate when its log grows oversized ([log-rotation-spec.md](log-rotation-spec.md)). Auto-on when the `cockpit` extras are importable | nothing — net-new surface |
+| `pr_watch_task` | **the resident PR watch** (`seneschal/scripts/pr_sweep.py`) — the NINTH task: every ~3 min, list each watched repo's open PRs, keep the terminally-green non-drafts, hand them to `merge_guard.ask_on_green`. **It cannot merge, approve, or write an approval record.** The same pass then runs `pr_repair.py`, in its own `try`: it rebases a BEHIND PR server-side (never a head with a live approval or pending picker) and launches one worktree repair job per `(PR, base sha)` for a CONFLICTING one whose conflict is confined to the two JSON ledgers and Markdown files (both sides kept). `concurrent-pr-collisions-spec.md` §5A.9. Details, the burst bounds and the gap it closes: "The resident PR watch" below | nothing — net-new surface |
 
 **Reactive wins fall out immediately:** reminders fire within ~5 s of due *even mid-chat-turn*
 (scheduler no longer waits on the long-poll or the drain loop); inbound is read continuously; Discord
@@ -87,14 +93,27 @@ a `stop` event, and a `control_pending` flag. It is only touched from coroutines
    re-grounds from the thread tail (no phantom replies in continuity).
 4. **Delivery-gated continuity.** `append_thread(assistant, …)` only after `deliver_reply` confirms.
 5. **Slot stamping on exit-0 only**, with `slot_retries`/`SLOT_MAX_RETRIES` and the catch-up window as
-   the two backstops (a crashed morning run retries; a broken one can't respawn forever).
+   the two backstops (a crashed morning run retries; a broken one can't respawn forever). **A failed
+   exit also gets a WAIT before that retry** — `slot_hold_until`, set by `reap_finished_slots`: a
+   reset-time hold when the slot's own captured output (`slot-logs/<name>.log`, `state/README.md`)
+   names a `claude` usage-limit reset, else exponential backoff (`slot_backoff_seconds`, capped well
+   inside `--slot-catchup-min` so the two backstops above still bound the ladder). Without it, a failed
+   slot relaunched on the very next ~5 s tick with no wait at all, so `SLOT_MAX_RETRIES` burned in
+   under two minutes against a usage outage lasting hours — and the night's Dream run was lost to it.
 6. **Notion read-burst serialization.** At most one headless reader at a time, and none while a chat
    turn is mid-flight; chat is priority and is never delayed. The `warm_session_busy` /
    `heavy_run_in_flight` gates keep their exact semantics (the drainer exposes "mid-turn" state).
 7. **Graceful restart, never mid-exchange.** Controls with `defer_until_idle` apply only when the session
    is down and the queue empty; a pending control shortens the wind-down to `CONTROL_PENDING_IDLE_SEC`.
    On Windows the restart **spawns a detached successor and exits** (never `os.execv` — see the
-   incident note in the code); that mechanism is kept verbatim.
+   incident note in the code); that mechanism is kept verbatim. **"Drain, don't kill": a
+   restart/shutdown ALSO holds while `state.slot_children` is non-empty** — additional to the chat-idle
+   gate above, not a replacement, and bounded on its own cap (`SLOT_DRAIN_MAX_HOLD_SEC`, 20 min)
+   independent of `CONTROL_MAX_HOLD_SEC`. A PR merging mid-slot used to kill the child outright:
+   `reap_finished_slots` only stamps a slot done on a clean exit, so the relaunch found the journal
+   steward's already-cleared journal and no-op'd, silently losing the rest of its phases. Never applies
+   to a `jobs.py --lease` — that gate is deliberately unchanged, so a job still can never block a
+   Path-A deploy.
 8. **Billing safety.** Every child env is scrubbed of `ANTHROPIC_API_KEY`; the `apiKeySource` warning on
    session init stays.
 
@@ -104,7 +123,27 @@ a `stop` event, and a `control_pending` flag. It is only touched from coroutines
 the UTF-8 forcing); the drainer calls `send()` via `asyncio.to_thread`. The event loop stays free while
 a turn runs — that thread is parked on the child's stdout, which is exactly what threads are for. A
 native `asyncio.subprocess` port is possible later but buys nothing today and risks re-learning Windows
-pipe quirks.
+pipe quirks. (`WarmSession` and its offline twin `StubWarmSession` live in the claude-cli backend,
+`seneschal/scripts/backends/`, since the warm session became pluggable —
+[pluggable-backend-spec.md](pluggable-backend-spec.md). The drainer talks to whichever backend the
+cockpit's `backend` dial selected; everything in this section holds for each.)
+
+**The turn is bounded ([hung-turn-deadline-spec.md](hung-turn-deadline-spec.md)).** That parked thread
+had no deadline of any kind, and a child that emitted nothing and never closed held it forever —
+`session_busy` stuck on, the message pinned at `pending[0]`, and `MAX_TURN_ATTEMPTS` advancing **once
+per daemon boot**, so the same prompt replayed on every restart until three of them dead-lettered it.
+`_TurnWatchdog` now kills the child on an idle gap, producing the closed-stdout condition the read loop
+already handles, so a timeout arrives at the drainer as the mid-turn-death outcome it already knows how
+to serve rather than as a new branch.
+
+**The deadline is a GAP BETWEEN STREAM EVENTS, never a cap on the turn** — `TURN_IDLE_GAP_SEC`, 600 s —
+because a legitimate turn runs long all the time (tool use, a big read, a Fable delegation) and a total
+cap would kill exactly those. **A hang is not slow; it is silent.** Two consequences worth carrying: a
+hung turn is the ONE delivered outcome that does *not* pop the durable queue (nothing was answered, so
+the attempt stands and the poison pill becomes reachable within a single boot — the delivery-failure
+rollback in invariant 3 above is a different case and is untouched), and `CONTROL_MAX_HOLD_SEC` now
+bounds invariant 7's `defer_until_idle` hold, because one wedged turn made all three of `chat_idle()`'s
+conditions false forever and that is Path A silently not deploying.
 
 ### Session registry (defer noise into an engaged chat; see who's working on what)
 
@@ -132,7 +171,16 @@ Delivery semantics mirror the quiet-window state/helper/gate shape.
   (defer, never drop — stamps nothing → re-checked next ~5 s tick) each due **non-piercing** nudge while a
   session is live; it fires naturally once the session ages out. Piercing items (`Call Me` / Critical,
   `entry_pierces_quiet` — the **same** pierce set as quiet, not duplicated) fire immediately. Composes
-  cleanly with the quiet gate (both active = still no drops; piercing still pierces).
+  cleanly with the quiet gate (piercing still pierces both).
+  **This gate still drops nothing itself, but a long hold no longer guarantees eventual delivery.**
+  The **staleness cutoff** sits immediately after it, so a non-piercing nudge held past 2 h is consumed
+  rather than dripping out overnight — a multi-hour session hold is exactly what once built a
+  two-dozen-entry queue whose tail landed in the small hours. The **presence** gate is the deliberate
+  contrast: its held time is accumulated on the entry and netted out of lateness, so it keeps NO DROPS
+  in full. Full gate order — `acked → quiet → curfew → presence → live-session → staleness → stagger` —
+  and why each position is load-bearing: `seneschal/references/reminders-policy.md` → "Night curfew +
+  staleness cutoff". The scheduler tick also **captures** `check_reminders`' return value and logs one
+  `presence.log` line per suppressed nudge, which is the observability half of that fix.
 - **Chokepoint 2 — Watch peek.** `maybe_peek` skips the cheap comms-peek cycle while a session is live (a
   human is already engaged); it resumes on the next cadence.
 - **Fail-open-SAFE.** Absent / malformed / stale entries → not live, so the signal's absence can never
@@ -228,6 +276,19 @@ just the daemon-side flow, for readers of this file.
   with an explicit MUST-delegate directive baked directly into the same text that gets threaded/
   persisted/retried — durable across a restart for free, exactly like the existing attachment/reaction
   text-synthesis precedent (`telegram_inbound_text`).
+- **An inbound EDIT is the one thing that rewrites a queue entry after it is persisted**
+  (`apply_inbound_edit`, [telegram-inbound-spec.md](telegram-inbound-spec.md) §6a). An
+  `edited_message` whose original is still queued and un-answered replaces that entry's text in place
+  rather than enqueuing a second item; anything else arrives as its own annotated inbound. Three
+  properties make it safe to let it near the durable queue at all: it runs **synchronously** on the
+  event loop, so it cannot interleave with the drainer mid-decision; it matches on the
+  **post-transform** text (the force-route bullet above is why — the queue holds the directive, not the
+  raw `!fable` line); and it **refuses the in-flight head**, because `drainer_task` claims `pending[0]`
+  into local variables and pops index 0 *by position* on delivery, so rewriting it would answer the old
+  text and discard the correction. `state.inflight_text` carries that claim — set where the head is
+  taken, cleared at the top of every drainer iteration, so no exit path has to remember to.
+  Deliberately keyed on text rather than `session_busy`: the drainer awaits a session spawn between
+  claiming the head and setting that flag.
 - **The router's fable arm** (`presence.fable_arm_classify`, `router.classify_fable`) runs in the SAME
   post-persist classify loop as the pre-existing triage shadow-classify, gated on the LIVE ceiling
   (`model_config.admits_fable`) — it never calls Ollama at all when the ceiling isn't Fable-tier. A
@@ -241,7 +302,9 @@ just the daemon-side flow, for readers of this file.
   own tool use (a subprocess one-shot, never a session handoff) — it re-reads `model-config.json` and
   refuses (exit 2) on its own if the ceiling doesn't admit Fable, belt-and-braces with the arm-gating
   above. It scrubs `ANTHROPIC_API_KEY` from the child env (the same subscription-billing rule as the
-  warm session and `mini_dream.py`), seeds a budget-bounded `telegram-thread.json` tail, and
+  warm session and `mini_dream.py`), seeds a budget-bounded tail of the main-chat conversation cache (`telegram-threads/main.json`,
+  legacy `telegram-thread.json` as a second rung), meters its own spend (`--output-format json` → the
+  `usage` block on its `fable_oneshot` ledger row, or `metered: "unavailable"`, never a zero), and
   best-effort badges its answer into the cockpit transcript (`model: "claude-fable-5"`) so the seam
   stays visible.
 - **Status/transcript honesty:** `_status_snapshot`'s `model` field prefers the live session's own
@@ -300,7 +363,179 @@ The repo gains `pyproject.toml` + `uv.lock` (uv on the host) with the sanctioned
 
 - **Exact-time reminder timers** (sleep-until-next-due instead of the 5 s tick) — the tick already beats
   the old worst case by minutes; a timer wheel is polish.
-- **Mid-turn interleaving** (surfacing a "cancel that" to the in-flight turn) — needs product thinking
-  about conversation semantics, not just plumbing.
+- **Mid-turn interleaving** — BUILT; the authority is [`mid-turn-interleave-spec.md`](mid-turn-interleave-spec.md).
+  The CLI offers no in-turn injection point (a mid-turn stdin write runs as the next turn), so an
+  interleave is necessarily *interrupt-then-continue*. The motivating case is *additive context*
+  ("oh, and also X"), not "cancel that"; the serialization invariant survives it (one consumer, one
+  turn in flight, one reply per delivery). The daemon ships in `observe`; `live` is an explicit opt-in.
 - **Native `asyncio.subprocess` warm session**, HA/Signal/health-listener tasks — the substrate is ready
   for them; they are their own projects.
+
+---
+
+## The loop as deployed
+
+The long-form description of the daemon as it runs, consolidated here because this file is the
+daemon's design authority (detail belongs in the leaf — `context-budget-spec.md` §5). The root
+`CLAUDE.md` carries only the short version; this is the long form behind it, including the tasks added
+after the sections above were written, the job/retry/lease rules, the session registry, resume gating
+and the observability rows.
+
+- **Local-first proactive loop.** The assistant wakes itself with no server. A resident **presence
+daemon** (`seneschal/scripts/presence.py`) is the always-on nerve center — a **reactive asyncio core**
+(nine supervised tasks: Telegram long-poll, Discord inbound, chat drainer, ~5 s scheduler tick, control
+watcher, the cockpit pipe, archon-site supervision, cockpit supervision, and the resident PR watch): it
+holds a **warm Telegram Chat session** via the `claude` **CLI** (stream-json mode —
+**subscription-billed**, not the metered API; it scrubs `ANTHROPIC_API_KEY` to enforce that) or, when
+the cockpit's `backend` dial says so, another subscription CLI
+([pluggable-backend-spec.md](pluggable-backend-spec.md)), fires reminders (act-low — within ~5 s of
+due, even mid-chat-turn), and runs a cheap **Watch** comms-peek on cadence. It also **owns the
+completion push for background jobs** (`seneschal/scripts/jobs.py` +
+[background-jobs-spec.md](background-jobs-spec.md)): work the assistant starts from a warm turn is
+spawned **detached** and recorded in `state/jobs/`, so it outlives the session (which dies on idle
+wind-down, any turn error, and every merge reload — a large share of session deaths), and the daemon's
+tick — not the turn that made the promise — pushes the owner the outcome on **every** terminal state
+(done / failed / timed-out / ended-unreadably / cancelled), stamped only once the send actually landed.
+That closes the "I'll tell you when it's done" gap in code rather than in the prompt (a prompt-side-only
+metrics contract that produced zero rows in a month is the cautionary precedent). `--wake` also
+re-enqueues so the assistant reads the result in voice; `--lease` holds the warm session open for work
+that genuinely can't detach — bounded, and a pending control always wins, so a job can never block a
+Path-A deploy. The same tick also **launches a due retry** (spec §7): `--retry N` / `--retry-backoff` /
+`--retry-window` absorb transient API failures that would otherwise lose a whole job to a one-second
+`API Error: 500` — but **only** on a recognised transient signature (`jobs.TRANSIENT_SIGNATURES`: API
+5xx/overloaded/429, connection reset, DNS, TLS, transport timeout). Unrecognised output is TERMINAL
+first time — a blanket "exit != 0 ⇒ retry" would re-run a broken command's damage N times — and so are
+`timed-out`/`ended-unknown`/`cancelled`; dying fast only *corroborates*, never decides; each attempt is
+classified on its own log span, so attempt 1's 500 can't excuse attempt 2's real failure. It's **off by
+default** (an untouched caller behaves exactly as it did: one attempt, terminal first time, no delimiter
+in its log) — but **the classification is recorded either way** (spec §7.4.1): every job carries an
+`attempts[]` whose entries name the transient/terminal verdict, the signature that matched, and
+`retry_enabled`, so `state/jobs/` can answer *"has any job failed transiently without retry enabled?"* —
+which is the diagnostic that says which callers should opt in. Recording only for jobs that already
+opted in would be data collected after the decision it was meant to inform. `--retry` is the caller's
+**assertion that the command is safe to re-run from scratch** (named, not solved — a retry re-runs the
+whole argv), the wait is a `retry-pending` record + `next_attempt_at` rather than a `sleep`, so a
+mid-backoff restart resumes it, and it is still **exactly one push** — at the real outcome, naming the
+attempt count so a try-4 success never reads as a clean first try. While an interactive `/assistant`
+chat is **live** (the **session registry**, `state/sessions/<id>.json` — one entry per live session,
+refreshed around every warm turn; the machine-wide `session_stamp.py` hook stamps every *other* Claude
+Code session as awareness-only `build` entries with a `working_on`, so sessions can see who's on what
+and not collide), it **defers** non-piercing nudges and skips the redundant peek so a buzz never lands
+mid-conversation; `Call Me` + Critical still pierce. The same hook fire-and-forgets the **mini-dream**
+on every SessionEnd (`mini_dream.py`): each ended session is distilled — salience-laddered
+deterministic/LLM — into `state/session-distillations.jsonl` (anchored to the assistant's home
+regardless of the session's project), every surface tails it at orientation, and Dream compacts it
+nightly into the RAG index (+ `--prune-days 30`) — the LSM shape (`sentinel.session_is_live`, same
+pierce set as the quiet window). Discord inbound is **gateway websocket push** (needs the uv venv's
+`websockets`; falls back to REST polling without it; `discord.env` is auto-detected like the store's
+MCP config). It's event-driven, so idle ≈ free; the warm session winds down after idle and re-spawns.
+- **Archon-site supervision** is the seventh task (`seneschal/scripts/archon_sites.py`): it discovers
+every archon's self-declared human-facing UI (`archons/<id>/site.json`), health-checks it over HTTP on a
+~20 s reconcile cadence, and (re)spawns one that's down or wedged — **detached**, so it survives the
+daemon's own merge-reloads (adopt-not-duplicate via `state/archon-sites.pids.json`); a healthy site is
+a complete no-op across a reload. Auto-on whenever a `site.json` exists; `--no-archon-sites` opts out.
+The cockpit's Archons tile gets a matching per-site **Restart** button
+(`POST /api/archons/{id}/restart`, CSRF-guarded + audited) that queues a `restart-site` control this
+task picks up next pass. See `seneschal/references/archons.md`'s `site.json` convention.
+- **Cockpit supervision** is the eighth task (`seneschal/scripts/cockpit_site.py`): the daemon starts
+and keeps up **the cockpit backend itself** on `127.0.0.1:8760`, so the observatory doesn't depend on a
+human leaving `uvicorn` open in a window. Same reconcile-not-spawn discipline (health-check
+`GET /api/health` — the public route, so a 503 auth wall can't read as a dead process — respawn
+detached, adopt via `state/cockpit-site.pid.json`, which matters more here since the pipe serves
+exactly one client and a rival backend would fight the adopted one for it), plus things archon sites
+don't need: it **bounces the backend when the checkout's git HEAD moves** (the PID file records the rev
+at spawn — that's what makes a merged cockpit change load, and it covers `seneschald-update`, a manual
+restart, break-glass force-pull and crash-restart alike without hooking any of them; `read_head_rev`
+reads `.git` directly, never shelling out to a `git` that hangs on fsmonitor); it **builds
+`cockpit/web/dist`** when missing or stale (`npm ci` + `npm run build` as **async subprocesses** a
+shutdown abandons rather than waits on — a worker thread would have held a graceful reload hostage,
+since `asyncio.run` waits for its default executor at exit; `app.py` mounts dist at import time, so a
+finished build earns one bounce, and attempts are capped per boot); and it **rotates the backend's log**
+at the same kill-then-respawn point when it grows oversized ([log-rotation-spec.md](log-rotation-spec.md)).
+Auto-on whenever the `cockpit` extras are importable. The daemon itself never installs anything;
+without the extras it logs one line and sends **one Telegram nudge per boot**. Auth: it passes
+`cockpit/server/cockpit.env` through when present (real OIDC always wins) and sets
+`COCKPIT_DEV_NO_AUTH=1` only when no client id ended up configured, so an unprovisioned box gets a
+working localhost dashboard instead of a wall of 503s (the backend still binds loopback and rejects
+non-loopback clients). Knobs: `--no-cockpit-app`, `--cockpit-app-port`, `--no-cockpit-web-build`. See
+[cockpit-spec.md](cockpit-spec.md) + `seneschal/scripts/SCHEDULING.md`.
+- **The resident PR watch** is the ninth task (`seneschal/scripts/pr_sweep.py`): every ~3 min it lists
+each watched repo's open PRs, keeps the ones that are **terminally green and not drafts**, and hands
+them to `merge_guard.ask_on_green` — so the merge-approval picker that is supposed to auto-send actually
+does, without an agent remembering to start a watcher. **The gap it closes was measured:**
+`ask_on_green` had exactly one caller, `watch_pr.py`, which runs only when somebody starts it, so PRs
+with a watcher started produced pickers and PRs that went green with nothing watching produced none.
+**It asks and nothing else** — it cannot merge, approve, or write an approval record, and
+`record_approval`'s single-caller property (the daemon's Telegram callback path) is untouched. It
+decides exactly ONE thing, *is CI terminally green*, and that is `watch_pr.classify` **imported rather
+than restated**; docs-only, still-open, no-live-approval, not-already-asked and quiet-hours all remain
+the guard's own five refusals, because a second classifier here could drift from the one doing the
+blocking.
+**The burst is the design problem**, since a resident sweep sees every open PR at once on its first
+pass, after a restart and after an outage — four bounds, in the order they apply: **(1)** the quiet
+window suppresses the *asking* (`merge_guard.in_quiet_hours`, the same predicate over `sentinel`'s
+curfew, not a second copy — a resident watcher makes 3 AM far likelier than a hand-started one did).
+It no longer short-circuits the whole pass: a reaction (`picker_mark`) raises no notification, so
+withholding it overnight bought nothing, and the pass now looks and tidies; only the picker is held,
+and held rather than dropped. **The hold stands down while the owner is demonstrably awake** (a row of
+theirs in `turns.jsonl` within 30 min, via `merge_guard.picker_quiet_hours`; fails toward quiet);
+**(2)** the guard's `(repo, pr, head_sha)` ask log lives on disk, so the reboot that follows every merge
+re-sees the same PRs and asks about **none** — bound 2 needed no new mechanism at all; **(3)** at most
+**one picker actually goes out per pass** — the stagger-don't-batch reminders rule applied to a
+different queue, so five PRs going green together become five pickers across five passes rather than
+five buzzes in one second; and **(4)** a capped pass **names what it held over**, because a silent
+truncation reads as "covered everything". **It deliberately does NOT seed its first run**: seeding
+would write ask-log rows for pickers that never went out, and the PR would then never get its question
+— the cap is a *queue*, a seed would be a *drop*. Fail-open per repo and per pass (absent/unauth'd/
+rate-limited `gh` costs the pass), and a repeated error logs **once** rather than every 3 minutes
+forever. The watched set is configuration (`pr_sweep.default_repos` → the owner's `watched_repos` in their
+per-install `pr-guard.json`, seeded from `seneschal/references/pr-guard.example.json`, else this checkout's own `origin`) rather than discovery, so it
+is reviewable and cannot widen without a diff; a subtree mirror is deliberately left out, being a push
+target rather than a deploy target.
+**The tidyings reach further than the asking**: the same pass also lists every repository a *pending
+picker* names — `picker_retire.pending_repos`, the hand-run CLI's own enumeration, at most 10 extra per
+pass with the rest named as held — and hands those rows to `picker_mark` and `picker_retire` **only**,
+never to the ask path or the red-CI notice. A picker from another session used to stand after its PR
+merged until the owner tapped *Not now* on it; now a merged PR's picker in any repository is edited to
+*"merged at …"* within minutes, while which repositories get *asked about* is still exactly the watched
+set.
+**It is also off under `--stub-send`, unlike its siblings**: they never send, while a sweep's whole
+purpose is to reach the owner's phone, and `telegram_ask.py` is a subprocess that has never heard of
+that flag. Knob: `--no-pr-watch`. See `seneschal/scripts/MERGE_GUARD_SETUP.md` §4b.
+- **It runs off `main`** and reloads itself when a PR merges (a `seneschald-update` task ff-pulls +
+enqueues a graceful restart the daemon applies once its warm session is idle — see
+`seneschal/scripts/PATH_A_CUTOVER.md` + `seneschal/scripts/seneschald-control.ps1`). Its runtime memory
+logs live in gitignored `state/` so the pull never conflicts. Scheduled Desktop tasks
+(Brief/Wrap/Dream/Journal) run the orchestrator directly. `sentinel.py` is a helper library + manual
+one-shot (not the heartbeat). Interaction is `/assistant` chat + the Telegram bot (+ store comments on
+the Notion backend). See `seneschal/scripts/SCHEDULING.md`.
+- **The warm session is observable.** Its age, turns served, context-fill **estimate**, session cost,
+and *why the last session ended* ride the status snapshot into the cockpit's Status panel + Context
+gauge, and one row per turn lands in `state/metrics.jsonl` — **in code**, not prompt-side. A `!status`
+(or `/status`) message on any channel is intercepted at intake and answered **locally**: no warm
+session spawned, no turn spent, no thread-tail entry — so it still answers when the warm session itself
+is the problem.
+- **And it RESUMES rather than re-grounding where it safely can.** A respawn passes
+`claude --resume <last_session_id>` and sends a short `RESUME_PREAMBLE` (restated clock + "re-check
+anything time-sensitive") instead of the full `GROUNDING`, so a Path A reload — a large share of
+session deaths — no longer drops a live conversation to a short thread tail. **Gated, because resume is
+not free:** it restores the OLD context, so `presence.resume_decision` requires a *clean* death
+(`idle_winddown`/`daemon_shutdown` — never a turn error, never an undelivered reply, never a
+`RESPAWN_TURN_TIMEOUT`), recency (`RESUME_MAX_AGE_SEC`, 2 h), **and** a context below Oikonomos's
+`context_fill_winddown_pct` — which is where that advisory knob finally earns its keep. A stale id fails
+in ~3 s and falls back to a cold grounded start (`send`'s `cold_retry_text`), ahead of the older
+bad-model rung. The ended session's record lives in `state/presence-state.json`'s `last_session`, since
+a reload keeps nothing in RAM. **`CONTEXT_WINDOW_TOKENS` is 1_000_000**, the model's window — an
+earlier 200_000 ceiling made the gauge's 80% mean 160k, so roughly a third of sessions were refused
+`context_too_full` at ~16% real fill. Still an ESTIMATE, still labelled one; the knob's number is
+untouched and now means 800k (the owner's to lower). Evidence + phase impact:
+[session-continuity-spec.md](session-continuity-spec.md) §3.2.1.
+
+## Router entry
+
+**Router status (covers this file + `asyncio-daemon-plan.md`):** phases 0-2 BUILT; tasks 6-8 added
+after; **task 9, the resident PR watch**. **What it decided:** the reactive core — nine supervised
+tasks, their invariants, the merge-on-green plan, the loop as deployed. **Task 9 is the measured half of
+an already-shipped decision** — auto-send-on-green had one caller that only ran when somebody started
+it, so PRs went green unwatched and got no picker. It finds; the guard still decides, and still cannot
+be made to approve.

@@ -128,7 +128,8 @@ The safe fallback is **`hold`** (the status quo): a false steer would cut off th
 waiting for, a false hold only costs a short wait. It reuses `ROUTER_CONF_THRESHOLD` for a `steer`
 verdict. Its first phase is **observe-only** — the daemon's mid-turn gate logs what it would have done
 and nothing acts on it; that daemon wiring lands separately, so until it does this arm is callable but
-idle. Smoke test:
+idle. The gate around it (the carve-out, the log, the read-out) is `interleave.py`; the design is
+`../docs/mid-turn-interleave-spec.md`. Smoke test:
 
 ```
 python seneschal/scripts/router.py --steer "The owner asked: review the job queue" "also add an applied button"

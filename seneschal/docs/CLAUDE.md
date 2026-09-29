@@ -30,19 +30,18 @@ specs and carry no status.
 
 ## The daemon and its lifecycle
 
-- `asyncio-daemon-design.md` + `asyncio-daemon-plan.md` — **PARTIAL(phases 0-3 BUILT)** — the
-  reactive core: supervised tasks under one `asyncio.gather`, each behind `_supervise`.
+- `asyncio-daemon-design.md` + `asyncio-daemon-plan.md` — **BUILT** — the reactive core: nine
+  supervised tasks under one `asyncio.gather`, each behind `_supervise`; the loop as deployed.
 - `how-to-add-a-daemon-task.md` — REFERENCE — the explicit gather-and-`_supervise` mechanism, the
   steps, and what not to do.
-- `hung-turn-deadline-spec.md` — **PARTIAL(P1+P2 BUILT; §4 decided)** — a hang is a gap between
+- `hung-turn-deadline-spec.md` — **BUILT(P1, P2; P3 is deliberately nothing)** — a hang is a gap between
   stream events, never a cap.
-- `seneschald-revive-spec.md` — **PARTIAL(BUILT + §8/§9)** — revives a dead daemon; §9 catches it
-  alive on the wrong account.
+- `seneschald-revive-spec.md` — **PARTIAL(watchdog side BUILT; the presence.py halves of §8/§9
+  pending)** — revives a dead daemon; §9 catches it alive on the wrong account.
 - `stacked-pr-branch-deletion-spec.md` — **BUILT** — deleting a branch used to close every PR stacked
   on it.
-- `mid-turn-interleave-spec.md` — **PARTIAL(phases 0+1 BUILT; phase 2 BUILT behind
-  `--interleave-mode live`, shipped OFF)** — no true in-turn injection exists on this CLI; the
-  classifier isn't reliable enough yet, so `live` stays off.
+- `mid-turn-interleave-spec.md` — **PARTIAL(gate module BUILT; daemon wiring pending)** — no true
+  in-turn injection exists on this CLI; `live` (interrupt, then continue) ships off.
 - `state-durability-spec.md` — **PARTIAL(core BUILT)** — zero-byte `state/` losses; `write_text` now
   refuses an empty overwrite.
 - `log-rotation-spec.md` — **BUILT** — rotates a log around Windows's held-open-file rename limit.
@@ -111,8 +110,8 @@ specs and carry no status.
   turn cost; diagnosis only.
 - `usage-telemetry-spec.md` — **PARTIAL(phase 1 BUILT, loop wiring pending)** — reads the real
   plan meters; never speaks except on failure.
-- `grounding-restructure-spec.md` — **PARTIAL(mode router + modes/ + sub-routers BUILT)** — the root split into a
-  router + sub-routers.
+- `grounding-restructure-spec.md` — **PARTIAL(mode router + modes/ + sub-routers + InstructionsLoaded logger
+  BUILT)** — the root split into a router + sub-routers.
 - `read-first-retirement-spec.md` — **PARTIAL(the store + CLI BUILT — `standing_safety.py` /
   `state/standing-safety.json`; the digest itself RETIRED; the §4 classification/compression process
   and §6's completeness check remain unbuilt design)** — the READ FIRST digest section only ever
@@ -130,11 +129,11 @@ specs and carry no status.
   range + a CRLF-normalized `sha256` in an HTML-comment JSON block; an (unbuilt) checker reports
   FRESH/MOVED/STALE/GONE per entry, reusing `check_context_pointers.py`'s path resolution,
   report-only until an allowlist exists.
-- `budget-headroom-spec.md` — **BUILT(phase 0; further phases archived)** — headroom is generated in
-  code and validated, independent of the byte cap.
-- `context-budget-collisions-spec.md` — **PARTIAL(phases 1-3 BUILT; `--enforce-chain` unwired)** —
-  chain-continuity + a rechain helper.
-- `concurrent-pr-collisions-spec.md` — **PARTIAL(phase 1, 2R, 2b-as-a-job, 2a's detection + §5B BUILT as modules; daemon wiring pending)** — a
+- `budget-headroom-spec.md` — **PARTIAL(validator BUILT; no generator here)** — headroom is computed
+  in code and validated, independent of the byte cap.
+- `context-budget-collisions-spec.md` — **PARTIAL(phase 1 BUILT; `--enforce-chain` unwired; the
+  phase-2 rechain helper not in this tree)** — chain-continuity for the one ledger every PR edits.
+- `concurrent-pr-collisions-spec.md` — **PARTIAL(phase 1, 2R, 2b-as-a-job, 2a's detection + §5B BUILT, run by the daemon's PR watch; phase 1.5 and 2a's report unbuilt)** — a
   picker names which other open PR shares its files; the daemon rebases BEHIND PRs and repairs
   ledger and Markdown conflicts, keeping both sides (§5A.9); a PR a still-running job opened is a
   draft until that job ends (§5B, `job_pr_draft.py`).

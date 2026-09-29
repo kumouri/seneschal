@@ -1,13 +1,13 @@
 # Tomorrow's Lead — a first-class "prioritize tomorrow" marker
 
 **Status:** `PARTIAL(§6 decided, all six option A; phases 0-2 BUILT in tomorrow_marker.py and the
-chat/brief/wrap/dream mode files, with the Dream prune wired; the presence.py morning-slot injection of
-the brief line and the Wrap picker callback dispatch not yet landed)` — the store, the CLI
+chat/brief/wrap/dream mode files, with the Dream prune wired; the daemon's morning-slot injection of the
+brief line and the Wrap/lead picker callback dispatch BUILT in presence.py)` — the store, the CLI
 (`mark` / `close` / `roll` / `drop` / `list` / `brief-line` / `render-for-wrap` / `prune` / `wrap-ask`
 / `wrap-apply` / `lead-ask` / `lead-apply` / `reconcile`) and its tests ship; the modes already call
-it. What waits on the daemon wiring is the scheduled Brief receiving the rendered line in its prompt
-(a chat-invoked Brief calls `brief-line` directly today) and a picker tap being routed back into
-`apply_wrap_grid` / `apply_lead_answer`.
+it. The scheduled Brief receives the rendered line in its prompt (`presence._brief_context`; a
+chat-invoked Brief calls `brief-line` directly) and a picker tap is routed back into `apply_wrap_grid` /
+`apply_lead_answer` (`presence._tomorrow_wrap_clause` / `_tomorrow_lead_clause`).
 
 **The request:** a way for the owner to mark things to prioritize the next day — a tag they can put on
 a Task/Reminder (or a `<tomorrow>` chat tag) that the Brief leads with and the Wrap rolls forward or

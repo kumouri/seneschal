@@ -87,14 +87,6 @@
       "reason": "An example sibling-checkout path (the public archon-forge code repo lives beside this one, not inside it). Relative to the repo root rather than to the doc, and never a pointer into this tree."
     },
     {
-      "pointer": "../docs/context-budget-collisions-spec.md",
-      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
-    },
-    {
-      "pointer": "../docs/state-durability-spec.md",
-      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
-    },
-    {
       "pointer": ".claude/rules/",
       "reason": "`.claude/` paths are allowlisted rather than resolved: whether `.claude/worktrees/` is ignored depends on an untracked `.git/info/exclude`, so rung 2's answer there is machine-dependent and a blocking gate may not depend on it. The rules directory is discussed as a design option; no rule file ships."
     },
@@ -115,10 +107,6 @@
       "reason": "Names the per-archon `site.json` convention - a file an archon ships once it serves a site. No archon in this tree ships one yet, so the glob has nothing to match."
     },
     {
-      "pointer": "docs/state-durability-spec.md",
-      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
-    },
-    {
       "pointer": "references/proposed-learnings-archive.md",
       "reason": "Created by `learnings.py retire` the first time a closed learning is archived; absent on a fresh install by design."
     },
@@ -133,10 +121,6 @@
     {
       "pointer": "seneschal/scripts/advisors.py",
       "reason": "Deferred advisor rails (references/advisor-chain.md's later phase and slack-draft-and-hold-spec.md). A design doc naming a module it PROPOSES is legitimate; silently passing it is not. This row is a to-do with a home."
-    },
-    {
-      "pointer": "seneschal/scripts/backends/",
-      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
     },
     {
       "pointer": "tools/<id>_paths.py",

@@ -1,14 +1,13 @@
 # The session trace — an agent debug log for the cockpit
 
-**Status:** `PARTIAL(phase 0's readers + phase 1's panel and session-aware trim BUILT; the daemon-side join keys not yet wired into presence.py; phases 2-4 designed, not built)` —
+**Status:** `PARTIAL(phase 0's readers and daemon-side join keys + phase 1's panel and session-aware trim BUILT; phases 2-4 designed, not built)` —
 the readers ship: `seneschal/scripts/trace.py` (the phase-0 CLI join) and `cockpit/server/trace.py`
 + `TracePanel.tsx` (the phase-1 panel, with the §10 layout, the §11 turn grouping and the §11.1
-presentation fixes). What they join is **written by the daemon**, and that half is not wired on this
-branch yet: `session_id` on transcript rows, the `decision` → `opened` pair in `session-starts.jsonl`,
-and the per-turn `metrics.jsonl` rows the sessions list is built from. The transcript ring's
-session-aware trim (§9.3) is built in `cockpit_pipe.py`, but it buckets by the `session_id` the daemon
-has yet to stamp, so until then the row cap governs. Until the wiring lands, every reader degrades to
-less data — never an error — which is exactly the tolerance §6 requires. §9's three decisions are closed, so no phase is gated on a decision.
+presentation fixes). What they join is **written by the daemon** (`presence.py`): `session_id` on
+transcript rows, the `decision` → `opened` pair in `session-starts.jsonl`, and the per-turn
+`metrics.jsonl` rows (`writer: "daemon"`, `session_id`, `turn_id`) the sessions list is built from. The
+transcript ring's session-aware trim (§9.3, `cockpit_pipe.py`) buckets by that `session_id`. Every
+reader still degrades to less data — never an error — on rows that predate the stamp (§6). §9's three decisions are closed, so no phase is gated on a decision.
 **Two later decisions bind anyone editing the panel: §10 — the Trace is NOT a grid tile**, it is a
 collapsible section under the chat pane, and anything that re-places a panel like it queries the
 **container**, never the window; **§11 — the TURN is the unit of the reader, not the event.** An edit

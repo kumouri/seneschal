@@ -40,6 +40,9 @@ cd "$SCRIPT_DIR/../.." || exit 1
 #    scripts/notion-mcp.json. Override:  --store-mcp /path/to/mcp.json   ·  force OFF:  --no-notion
 #  * Discord two-way channel (DISCORD_SETUP.md): AUTO-DETECTED — just create scripts/discord.env
 #    (gateway push when the venv is live, REST fallback otherwise). To force OFF:  --no-discord
+#  * Archon-site supervision (seneschal/references/archons.md): AUTO-DETECTED — on whenever any
+#    archons/*/site.json exists (an archon's own local web app). To force OFF:  --no-archon-sites
+#    ·  to scan a different root (mainly for tests):  --archons-dir "<path>"
 #  * Phone-call reminders (Call Me):  --call-env "$SCRIPT_DIR/push-call.env"
 #  * Internal scheduled runs (brief/wrap/dream/journal + the once-per-day exact-time reminder SEED)
 #    are ON by default; --no-slots disables them all, --no-seed-day disables only the seed,

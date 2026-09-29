@@ -1,6 +1,6 @@
 # The Seneschal Cockpit — design spec
 
-**Status:** `PARTIAL(v1-v5 + the Jobs, Trace and Open-specs panels BUILT; the cockpit supervision task, the transcript archive's boot backfill and its Dream size check not yet wired; public exposure deferred)` —
+**Status:** `PARTIAL(v1-v5 + the Jobs, Trace and Open-specs panels, the cockpit supervision task and the transcript archive BUILT; public exposure deferred)` —
 v1 (read-only monitor), v2 (daemon pipe + chat pane), v3 (model dials + Fable delegation), v3.5
 (Oikonomos, the budget governor), v4 (health/workout/meal panels + store-staged meals), and **v5 (the
 real OIDC auth stack, the archon SSO proxy, the break-glass recovery ladder, and the decoy)** have
@@ -10,11 +10,9 @@ shipped. So have the **Jobs panel**, the **Trace panel** (`session-trace-spec.md
 derived** from each document's own status header via `seneschal/scripts/check_doc_status.py`, storing
 nothing, read-only with no route to edit a status, and a **grid tile**, deliberately unlike the Trace
 panel: a reference list the owner goes looking for rather than a read-along of the conversation.
-**Not yet wired:** the supervision module (`seneschal/scripts/cockpit_site.py`) and the transcript
-archive's boot-time backfill both need their `presence.py` call sites, and the archive's size sensor
-needs its Dream step (§"Cockpit supervision", §"The
-transcript archive"); until then the backend is started by hand as `cockpit/README.md` describes.
-Public exposure (a tunnel + DNS) remains deferred — everything binds `127.0.0.1`, and dev-no-auth
+The daemon supervises the backend (`cockpit_app_task` over `seneschal/scripts/cockpit_site.py`,
+§"Cockpit supervision") and backfills the transcript archive at boot, and Dream runs the archive's
+size sensor (§"The transcript archive"). Public exposure (a tunnel + DNS) remains deferred — everything binds `127.0.0.1`, and dev-no-auth
 remains the default until the owner provisions an OIDC app (see `cockpit/README.md` for the shipped
 surface, which is authoritative where this spec and the build differ). Per-directory rules a tidy-up
 could undo: `cockpit/CLAUDE.md`.
@@ -436,9 +434,9 @@ on the form.
     `metered: "unavailable"` and *no* token count. A 0 is indistinguishable from "measured, and free"
     — and the fable_oneshot gate trusts what it reads. Rollups accrue tokens from **any** row that
     carries them, not only `kind: "tokens"` rows, so a `fable_oneshot` row that reports its own usage
-    counts. (`fable_delegate.py` still runs `claude -p` in text mode, which returns no usage block, so
-    today its row counts the delegation but carries no token figure; asking for `--output-format json`
-    and recording `usage` is the open follow-up.)
+    counts. `fable_delegate.py` runs `claude -p --output-format json` and records the result's `usage`
+    block on its `fable_oneshot` row; when that block can't be read the row is marked
+    `metered: "unavailable"` rather than zeroed.
   - `spend-levers-spec.md` adds *why* a turn cost what it cost (a `turn_id` and a `levers` block on
     the same row) — diagnosis only; this section remains the only place a rail lives.
 - **Knobs shipped:**
