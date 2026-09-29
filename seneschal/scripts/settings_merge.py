@@ -17,6 +17,22 @@ What one run ensures (and nothing more):
     when absent — an existing value, whatever it is, is never clobbered);
   * everything else in the file — other hooks, unknown keys, ordering — survives untouched.
 
+**Optional guard hooks** (``--guard NAME``, repeatable; ``--guard all``). The PR/shell guards are
+``PreToolUse`` / ``PostToolUse(Failure)`` hooks the owner may opt into; each ``*_SETUP.md`` guide
+documents its block and this tool writes exactly that block, under the same contracts below
+(diff-first, append-only, idempotent, foreign-checkout entries reported and left alone unless
+``--force-path``). :data:`GUARDS` is the table:
+
+  * ``bash-path``     — ``PreToolUse`` ``Bash`` → ``bash_path_guard.py`` (BASH_PATH_GUARD_SETUP.md)
+  * ``script-file``   — ``PreToolUse`` ``Bash|PowerShell`` → ``script_file_guard.py``
+  * ``merge``         — ``PreToolUse`` ``Bash|PowerShell`` → ``merge_guard.py``, plus
+    ``PostToolUseFailure`` → ``merge_guard.py --post-tool-use`` (MERGE_GUARD_SETUP.md)
+  * ``branch-delete`` — ``PreToolUse`` ``Bash|PowerShell`` → ``branch_delete_guard.py``
+  * ``query-shape``   — ``PostToolUse`` on the Notion query tool → ``query_shape_hook.py``.
+    **Notion backend only**, so ``all`` does not include it; name it explicitly.
+
+None of them is installed unless named: they refuse commands, and refusing is the owner's call.
+
 Contracts:
   * **Dry-run by default.** ``--dry-run`` (the default) prints a unified diff of what would
     change and writes nothing; only ``--apply`` writes, and an apply first backs the file up
@@ -35,7 +51,7 @@ Contracts:
 CLI::
 
     python seneschal/scripts/settings_merge.py [--dry-run | --apply] [--force-path]
-                                               [--settings F] [--repo DIR]
+                                               [--guard NAME ...] [--settings F] [--repo DIR]
 """
 from __future__ import annotations
 
@@ -57,6 +73,20 @@ STAMP_MARKER = "session_stamp.py"
 HOOK_TIMEOUT = 10
 ENV_DEFAULTS = {"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
 
+#: The optional guard hooks: name -> [(event, matcher, script, extra args, timeout)]. Each row is
+#: the block its ``*_SETUP.md`` documents; a test pins the two against each other.
+GUARDS = {
+    "bash-path": [("PreToolUse", "Bash", "bash_path_guard.py", "", 10)],
+    "script-file": [("PreToolUse", "Bash|PowerShell", "script_file_guard.py", "", 10)],
+    "merge": [("PreToolUse", "Bash|PowerShell", "merge_guard.py", "", 90),
+              ("PostToolUseFailure", "Bash|PowerShell", "merge_guard.py", " --post-tool-use", 90)],
+    "branch-delete": [("PreToolUse", "Bash|PowerShell", "branch_delete_guard.py", "", 60)],
+    "query-shape": [("PostToolUse", "mcp__notion__notion-query-data-sources",
+                     "query_shape_hook.py", "", 10)],
+}
+#: What ``--guard all`` means: every guard except the Notion-only one.
+ALL_GUARDS = ("bash-path", "script-file", "merge", "branch-delete")
+
 
 class SettingsMergeError(Exception):
     """A condition this tool refuses to push through (corrupt file, unmergeable shape)."""
@@ -66,9 +96,9 @@ def default_settings_path() -> Path:
     return Path.home() / ".claude" / "settings.json"
 
 
-def expected_command(repo: Path) -> str:
+def expected_command(repo: Path, script_name: str = STAMP_MARKER) -> str:
     """The documented hook command, forward-slashed (works everywhere, incl. Windows)."""
-    script = (Path(repo) / "seneschal" / "scripts" / STAMP_MARKER)
+    script = (Path(repo) / "seneschal" / "scripts" / script_name)
     return "python " + str(script).replace("\\", "/")
 
 
@@ -92,6 +122,53 @@ def _iter_command_items(event_groups):
                 yield item
 
 
+def resolve_guards(names) -> list[str]:
+    """``["all"]`` / names -> the ordered, de-duplicated guard list. Unknown -> SettingsMergeError."""
+    out: list[str] = []
+    for name in names or ():
+        for n in (ALL_GUARDS if name == "all" else (name,)):
+            if n not in GUARDS:
+                raise SettingsMergeError(
+                    f"unknown guard {n!r} - choose from: all, {', '.join(sorted(GUARDS))}.")
+            if n not in out:
+                out.append(n)
+    return out
+
+
+def _merge_guard_rows(hooks: dict, repo: Path, guards, force_path: bool, notes: list) -> None:
+    """Append each named guard's documented block where absent (same rules as the stamp hooks)."""
+    for name in guards:
+        for event, matcher, script, extra, timeout in GUARDS[name]:
+            groups = hooks.setdefault(event, [])
+            if not isinstance(groups, list):
+                raise SettingsMergeError(
+                    f"hooks.{event} is not a list - refusing to modify a shape I don't understand.")
+            base_cmd = expected_command(repo, script)
+            want_cmd = base_cmd + extra
+            want_script = _norm(base_cmd.split(" ", 1)[1])
+            ours, foreign = [], []
+            for item in _iter_command_items(groups):
+                if script not in item["command"]:
+                    continue
+                (ours if want_script in _norm(item["command"]) else foreign).append(item)
+            if ours:
+                continue
+            if foreign:
+                for item in foreign:
+                    if force_path:
+                        notes.append(f"{event}: repointed the existing {script} hook at this "
+                                     f"checkout (was: {item['command']})")
+                        item["command"] = want_cmd
+                        item.setdefault("timeout", timeout)
+                    else:
+                        notes.append(f"{event}: an existing {script} hook points at a DIFFERENT "
+                                     f"checkout ({item['command']}) - left unchanged. Re-run with "
+                                     "--force-path to repoint it here.")
+                continue
+            groups.append({"matcher": matcher,
+                           "hooks": [{"type": "command", "command": want_cmd, "timeout": timeout}]})
+
+
 def load_settings(path: Path) -> dict:
     """Read the settings file. Absent -> {}. Corrupt / non-object -> SettingsMergeError."""
     try:
@@ -113,8 +190,10 @@ def load_settings(path: Path) -> dict:
     return data
 
 
-def merge(settings: dict, repo: Path, force_path: bool = False) -> tuple[dict, list[str]]:
-    """Pure merge: returns (new_settings, notes). Never mutates the input."""
+def merge(settings: dict, repo: Path, force_path: bool = False,
+          guards=()) -> tuple[dict, list[str]]:
+    """Pure merge: returns (new_settings, notes). Never mutates the input. ``guards`` names the
+    optional guard hooks to add as well (see :data:`GUARDS`; resolve ``all`` first)."""
     out = copy.deepcopy(settings)
     notes: list[str] = []
     want_cmd = expected_command(repo)
@@ -165,6 +244,7 @@ def merge(settings: dict, repo: Path, force_path: bool = False) -> tuple[dict, l
         groups.append(
             {"hooks": [{"type": "command", "command": want_cmd, "timeout": HOOK_TIMEOUT}]}
         )
+    _merge_guard_rows(hooks, repo, guards, force_path, notes)
     return out, notes
 
 
@@ -212,6 +292,9 @@ def _main(argv: list[str]) -> int:
     mode.add_argument("--apply", action="store_true", help="back up + write the merged settings")
     p.add_argument("--force-path", action="store_true",
                    help="repoint an existing session_stamp.py hook from another checkout at this repo")
+    p.add_argument("--guard", action="append", default=[], metavar="NAME",
+                   help="also add an optional guard hook (repeatable): "
+                        + ", ".join(sorted(GUARDS)) + ", or all (every one but query-shape)")
     p.add_argument("--settings", default=None, help="settings.json path override (tests)")
     p.add_argument("--repo", default=None, help="repo root override (default: this checkout)")
     args = p.parse_args(argv[1:])
@@ -221,7 +304,8 @@ def _main(argv: list[str]) -> int:
 
     try:
         settings = load_settings(path)
-        merged, notes = merge(settings, repo, force_path=args.force_path)
+        merged, notes = merge(settings, repo, force_path=args.force_path,
+                              guards=resolve_guards(args.guard))
     except SettingsMergeError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
