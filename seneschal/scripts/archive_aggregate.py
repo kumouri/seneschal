@@ -15,6 +15,9 @@ USAGE:
   python archive_aggregate.py --person alex --tz UTC     # deterministic times (tests)
 
 Prints a one-line JSON result {ok, person, count, services, media_copied, outputs}. Exit 0/non-zero.
+
+Part of Archive mode's cluster; the cluster overview (which ingesters feed it, and the one
+normalized-record schema they share) lives in archive_common.py's module docstring.
 """
 from __future__ import annotations
 

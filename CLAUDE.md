@@ -68,6 +68,10 @@ seneschal/
                    (state/failures.jsonl), dream_steps.py (Dream step ledger), state_backup.py,
                    notes.py, learnings.py (proposed-learnings close/retire/audit), log_rotation.py,
                    gate_git.py, domain_age.py, _http_test_server.py (test fixture),
+                   send_gate.py + send_gate_hook.py + pending_approvals.py + send_recipients.py
+                   (the outbound approval gate, its one approval store, the non-content send
+                   ledger — SEND_GATE_SETUP.md; _owner_fixture.py is their test fixture),
+                   provenance_guard.py (the RAG index's writer-provenance registry),
                    check_placeholders.py (CI guard), *_SETUP.md guides + INTEGRATIONS.md (index),
                    seneschald-control.ps1 + run-*.cmd (Windows scheduled-task wrappers)
   setup/           env-manifest.json — the machine-readable manifest of every configurable env

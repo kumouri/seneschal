@@ -31,7 +31,13 @@ else (the `proton_send.py` / `proton_read.py` scripts and the email-triage skill
    ```sh
    python proton_read.py --mailbox INBOX --limit 5 --env-file proton.env
    ```
-6. **Tell the assistant "Proton is up."** It will run the email-triage skill against the live inbox; the
+6. **Attachments** (`--attach PATH`, repeatable) work with no extra setup — `proton_send.py` builds a
+   standard MIME attachment locally and refuses before ever connecting if a path is missing/unreadable
+   or the total exceeds 20 MB (Proton's own cap is 25 MB; this leaves headroom):
+   ```sh
+   python proton_send.py --to t@x.com --subject "Spec" --body "attached" --attach spec.md --env-file proton.env
+   ```
+7. **Tell the assistant "Proton is up."** It will run the email-triage skill against the live inbox; the
    first real send still goes out only on your approval (ask-high).
 
 ## Notes
@@ -42,3 +48,8 @@ else (the `proton_send.py` / `proton_read.py` scripts and the email-triage skill
 - **Unattended/scheduled runs:** Bridge must be running for scheduled sends/reads to work. If a
   scheduled run can't reach Bridge, the assistant falls back to the Gmail MCP (draft-only) and notes it.
 - **Security:** the Bridge password grants access to the mailbox — treat `proton.env` like a secret.
+- **The send gate.** `proton_send.py` refuses (exit 3, nothing sent) any send that reaches someone
+  other than the owner unless `state/pending-approvals.json` holds an approved row covering every
+  such recipient. The owner's own addresses come from `owner.email` / `owner.emails` in
+  `persona/identity.json`; a send only to them (or a cc to the assistant's own address) passes
+  untouched. See `SEND_GATE_SETUP.md`.

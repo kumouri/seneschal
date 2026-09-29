@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Shared plumbing for the assistant's person-centric message archiver. Standard library only.
 
-Every service collector/ingester (Telegram today, Discord/SMS/Email next) emits the **same flat
-normalized record** so the aggregator is service-agnostic — it merges records from any source by
-``ts_utc`` (integer epoch, UTC) onto one timeline. This module owns:
+Every service collector/ingester (``telegram_ingest.py``, ``discord_export_ingest.py``,
+``sms_ingest.py``; Email later) emits the **same flat normalized record** so the aggregator is
+service-agnostic — it merges records from any source by ``ts_utc`` (integer epoch, UTC) onto one
+timeline. This module owns:
 
   * the normalized-record builder + light validation (``make_record`` / ``REQUIRED_FIELDS``),
   * the **person registry** loader (``load_people`` and its lookups) — maps a person key to per-service
@@ -18,6 +19,13 @@ normalized record** so the aggregator is service-agnostic — it merges records 
 
 No credentials here — this module is I/O-light and pure enough to unit-test with no network. The only
 config it reads is non-secret (``ARCHIVE_OUT_DIR``).
+
+ARCHIVE MODE is the person-centric cross-service message archiver behind this module cluster:
+archive_common.py (this file — the schema, the person registry, the shared helpers) + the per-service
+ingesters (telegram_ingest.py, discord_export_ingest.py, sms_ingest.py) + archive_aggregate.py (the
+merge and the rendered transcripts). Stdlib only, throughout. The ingesters and the aggregator carry
+no cluster narrative of their own: they produce and consume the one normalized-record schema defined
+here (``make_record`` / ``REQUIRED_FIELDS``), which is what keeps the aggregator service-agnostic.
 """
 from __future__ import annotations
 
