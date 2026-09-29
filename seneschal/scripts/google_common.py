@@ -158,7 +158,11 @@ def http_json(method: str, url: str, *, data: bytes | None = None, headers: dict
             raw = resp.read().decode("utf-8")
             return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as e:
-        raw = e.read().decode("utf-8", "replace")
+        # `with e:` — an HTTPError IS the response (it inherits `urllib.response.addinfourl`, itself a
+        # `tempfile._TemporaryFileWrapper`), so reading the body without closing holds the connection
+        # until the cycle collector reaches it.
+        with e:
+            raw = e.read().decode("utf-8", "replace")
         try:
             body = json.loads(raw)
         except Exception:  # noqa: BLE001

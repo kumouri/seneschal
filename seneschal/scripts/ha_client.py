@@ -59,6 +59,16 @@ def call_service(domain: str, service: str, data: dict | None = None,
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return {"ok": 200 <= resp.status < 300, "status": resp.status}
     except urllib.error.HTTPError as e:
-        return {"ok": False, "status": e.code, "error": e.reason}
+        # An HTTPError IS the response (it inherits `urllib.response.addinfourl`, itself a
+        # `tempfile._TemporaryFileWrapper`), so it holds its connection until closed even though only
+        # `e.code`/`e.reason` are read here. Closed guarded and only AFTER the verdict is built rather
+        # than via `with e:` — `call_service` promises it never raises, and `__exit__` would propagate
+        # a failing close.
+        result = {"ok": False, "status": e.code, "error": e.reason}
+        try:
+            e.close()
+        except Exception:  # noqa: BLE001 — closing is advisory; call_service must never raise
+            pass
+        return result
     except (urllib.error.URLError, OSError) as e:
         return {"ok": False, "error": str(e)}

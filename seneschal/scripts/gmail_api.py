@@ -26,6 +26,8 @@ import sys
 from email.message import EmailMessage
 
 import google_common as gc
+import send_gate
+import send_recipients
 
 API = "https://www.googleapis.com/gmail/v1/users/me"
 
@@ -148,6 +150,15 @@ def cmd_draft(c, args) -> dict:
 
 
 def cmd_send_draft(c, args) -> dict:
+    # A draft's recipient lives in the draft body on Google's side, not in this call's own
+    # arguments — reading it would cost an extra fetch on every send, so this site is structurally
+    # undecidable and always classifies `unknown`. The send gate keys it on the DRAFT ID instead: a
+    # held draft that recorded `draftId`, or `send_gate.py grant --kind email --recipient <draftId>`.
+    # Unknown is not owner — fail-closed.
+    verdict = send_gate.require_approval("email", args.id, recipient_class="unknown", channel="gmail_send_draft")
+    send_recipients.record("gmail_send_draft", "unknown", gate=verdict)
+    if not verdict["allowed"]:
+        return send_gate.refusal_payload(verdict, account=args.account, draftId=args.id)
     res = gc.authorized_request(c, args.account, "POST", f"{API}/drafts/send",
                                 body={"id": args.id}, where="drafts.send")
     return {"ok": True, "account": args.account, "sent": True, "messageId": res.get("id"),
@@ -159,6 +170,16 @@ def cmd_send(c, args) -> dict:
     body = {"raw": raw}
     if args.thread_id:
         body["threadId"] = args.thread_id
+    try:
+        cls = send_recipients.classify_emails(args.to, args.cc, args.bcc)
+    except Exception:  # noqa: BLE001 — a classification failure logs unknown, never raises into the send
+        cls = "unknown"
+    # The send gate: owner-class passes untouched; anything else needs an approved row (send_gate.py).
+    verdict = send_gate.require_approval("email", [args.to, args.cc, args.bcc], recipient_class=cls,
+                                         channel="gmail_send")
+    send_recipients.record("gmail_send", cls, gate=verdict)
+    if not verdict["allowed"]:
+        return send_gate.refusal_payload(verdict, account=args.account)
     res = gc.authorized_request(c, args.account, "POST", f"{API}/messages/send", body=body, where="messages.send")
     return {"ok": True, "account": args.account, "sent": True, "messageId": res.get("id"),
             "threadId": res.get("threadId")}
@@ -215,7 +236,10 @@ def main() -> int:
         "draft": cmd_draft, "modify": cmd_modify, "send-draft": cmd_send_draft, "send": cmd_send,
     }
     try:
-        print(json.dumps(handlers[args.command](c, args), ensure_ascii=False))
+        res = handlers[args.command](c, args)
+        print(json.dumps(res, ensure_ascii=False))
+        if res.get("refused") == "send_gate":
+            return send_gate.EXIT_REFUSED  # the send gate refused: nothing left the machine
         return 0
     except Exception as e:  # noqa: BLE001
         print(json.dumps({"ok": False, "account": args.account, "command": args.command, "error": str(e)}))

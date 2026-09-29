@@ -568,6 +568,13 @@
           "secret": false,
           "prompt": "Recipient E.164 (omit to use the Worker's USER_CELL_E164 default)",
           "validate": "^\\+\\d{7,15}$"
+        },
+        {
+          "name": "PUSH_CALL_CALENDAR_ACCOUNT",
+          "required": false,
+          "secret": false,
+          "prompt": "Google account label whose calendar a --talk call's context snapshot reads (omit to use the only connected account)",
+          "validate": "^\\S+$"
         }
       ],
       "verify": {

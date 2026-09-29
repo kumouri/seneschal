@@ -16,6 +16,10 @@ warning) and the refresh token becomes durable. This script always requests acce
 prompt=consent so Google actually returns a refresh token. Full walkthrough: GOOGLE_SETUP.md.
 
 Standard library only (http.server for the loopback catch, urllib for the exchange).
+
+This is the one-time per-account consent half of the shared OAuth plumbing (google_common.py holds
+the rest). `--account` is a LABEL keyed to a stored refresh token, and running this script is the
+OWNER'S to do — the assistant never re-consents on the owner's behalf.
 """
 from __future__ import annotations
 
