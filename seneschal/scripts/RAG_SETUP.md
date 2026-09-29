@@ -33,7 +33,7 @@ the index is empty, the retriever falls back to phase-A Notion-search. The seman
 
 | Script | Role |
 |--------|------|
-| `rag_index.py` | Build/update the index. `--local` indexes run-log/carry-over/context-digest; `--ingest F.jsonl` indexes records `{"source","ref","text"}` (how journal/notes get in). Incremental by doc hash; `--rebuild` starts clean; `--stats` reports. |
+| `rag_index.py` | Build/update the index. `--local` indexes run-log/carry-over (plus a leftover `context-digest.md` on an upgraded install — the file is retired and nothing writes it any more); `--ingest F.jsonl` indexes records `{"source","ref","text"}` (how journal/notes get in). Incremental by doc hash; `--rebuild` starts clean; `--stats` reports. |
 | `rag_query.py` | `rag_query.py "<query>" [--k N] [--source journal]` → top-k chunks as JSON on stdout. Exit **3** + `[]` when the embedder/index is unavailable (caller falls back). Every query also bumps the observe-only **salience access counters** (`--no-record` for analysis/debug reads) — see `SALIENCE_SETUP.md`. |
 
 ## How the corpus stays fresh — nightly in Dream

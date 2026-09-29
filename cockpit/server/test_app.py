@@ -132,6 +132,33 @@ class CockpitAppTests(unittest.TestCase):
         resp = self.client.get("/api/health")
         self.assertEqual(resp.status_code, 200)
 
+    # --- jobs ------------------------------------------------------------------------------------
+
+    def test_jobs_route_is_gated(self):
+        self.assertEqual(self.client.get("/api/jobs").status_code, 503)
+
+    def test_jobs_missing_dir_is_unavailable_not_500(self):
+        self._allow()
+        resp = self.client.get("/api/jobs")
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.json()["available"])
+
+    def test_jobs_lists_a_running_job_and_serves_its_detail(self):
+        self._allow()
+        (self.state_dir / "jobs").mkdir()
+        self._write_json("jobs/20260101-000000-abcd.json",
+                         {"id": "20260101-000000-abcd", "title": "t", "status": "running"})
+        body = self.client.get("/api/jobs").json()
+        self.assertTrue(body["available"])
+        self.assertEqual([j["id"] for j in body["active"]], ["20260101-000000-abcd"])
+        detail = self.client.get("/api/jobs/20260101-000000-abcd").json()
+        self.assertTrue(detail["available"])
+        self.assertEqual(detail["job"]["title"], "t")
+
+    def test_job_detail_refuses_an_unsafe_id(self):
+        self._allow()
+        self.assertFalse(self.client.get("/api/jobs/..%2Fsecrets").json().get("available", False))
+
     # --- sessions --------------------------------------------------------------------------------
 
     def test_sessions_empty_dir(self):

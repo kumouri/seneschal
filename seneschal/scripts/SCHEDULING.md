@@ -62,7 +62,7 @@ invokes the orchestrator in one mode — but with the daemon owning them, that's
 |------|--------------|--------|
 | `seneschal-morning-brief` | ~6:30 AM daily | "Run the morning **Brief** (`seneschal/SKILL.md`). Deliver in chat + push highlights to Telegram + email via Proton + write the Run Log." |
 | `seneschal-eod-wrap` | ~9:07 PM daily | "Run the **Wrap** (`seneschal/SKILL.md`)." |
-| `seneschal-dream` | nightly, after Wrap (e.g. ~9:30 PM) | "Run the **Dream** consolidation (`seneschal/SKILL.md`): rebuild `state/context-digest.md`, refresh reminders, propose learnings, then commit + open a PR." |
+| `seneschal-dream` | nightly, after Wrap (e.g. ~9:30 PM) | "Run the **Dream** consolidation (`seneschal/SKILL.md`): refresh reminders and the open-work register, propose learnings, then commit + open a PR." |
 | `seneschal-daily-journal` | 5:00 AM daily | "Run the **Daily Journal** (`subagents/journal-steward/daily-journal-steward/SKILL.md`)." |
 
 ### 2. The presence daemon — always-on service

@@ -70,7 +70,11 @@ archons/*/voice-profile.md
 # The runtime memory logs (state/run-log.md, state/carry-over.md,
 # state/standing-safety.json, state/brief-prestage.json, state/open-loops.json) live here so the daemon can run off main without pull
 # conflicts on files the assistant rewrites at runtime; the active store is the
-# system of record. See seneschal/state/README.md.
+# system of record. So do the background-job records and their bookkeeping (state/jobs/,
+# state/job-pushes/, state/session-mail/, state/current-turn.json, state/pending-checks.jsonl,
+# state/owi-*). A job's --worktree checkout lives OUTSIDE the repo (a sibling
+# `seneschal-worktrees/` dir, or $SENESCHAL_WORKTREE_ROOT), so it never needs a rule here.
+# See seneschal/state/README.md.
 seneschal/state/*
 !seneschal/state/README.md
 !seneschal/state/*.example.json

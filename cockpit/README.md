@@ -51,6 +51,7 @@ cockpit/
     model_config.py  the two-dial rank/coherence table, duplicated from seneschal/scripts/model_config.py
     governor.py      Oikonomos's SCHEMA + config load/save/rollups, duplicated from seneschal/scripts/governor.py
     health.py        tolerant reads over state/health.db (sleep/workouts/nutrition) + state/meals.json
+    jobs.py          tolerant read-only view of state/jobs/ (the durable background jobs) — never imports the daemon's jobs.py
     archons.py       the archon registry reader + GET-only reverse-proxy client
     test_parity.py   CI tripwire: asserts the duplicated model_config/governor tables still match the daemon side
     archon-registry.example.json   tracked seed for the per-install (gitignored) archon-registry.json
@@ -183,6 +184,8 @@ session in `oidc` mode or `COCKPIT_DEV_NO_AUTH=1` in dev mode (mode precedence: 
 | `GET /seneschald-health` | `state/seneschald-health.json` | Passthrough + a derived `last_ok_age_seconds` — the watch-the-watcher field. |
 | `GET /presence` | `state/presence-context.json` | Passthrough (`at_place`/`activity`/`asleep`/`since`). |
 | `GET /reminders` | `state/reminders.json` | Summarized: pending count + next 5 by `due_at`. |
+| `GET /jobs?limit=N&tail_lines=M` | `state/jobs/*.json` + `*.log` | Durable background jobs: everything running (never truncated) + the last N finished, each with a short log tail; `awaiting_push` counts terminal jobs whose completion push hasn't landed. Missing dir -> `{"available": false}`. Read-only — there is no cancel route (`jobs.py cancel` is a decision, not a click). |
+| `GET /jobs/{job_id}` | `state/jobs/<id>.json` + `.log` | One job with a longer log tail; the id is validated against a strict alphabet before any filesystem access. |
 | `GET /usage` | `state/metrics.jsonl` | Best-effort turns/tokens per day/model. Always `"estimated": true` (`tokens_available` tells the UI whether the schema carried tokens). |
 | `GET /status` | daemon pipe (live) or `state/sessions/*.json` (fallback) | Once at least one `status` frame has arrived over the pipe, this returns that live snapshot (turn-in-flight, model, queue depth) — either way, honestly labeled `"pipe": "up"\|"down"`. |
 | `GET /transcript?limit=N` | `state/warm-transcript.jsonl` | Tolerant tail backfill of the chat-pane transcript ring buffer (default 200, capped ~2000). |

@@ -58,6 +58,13 @@ assertion (`cockpit/breakglass/assertion.py`) the frontend hands to the SEPARATE
 supervisor (`cockpit/breakglass/supervisor.py`, deliberately stdlib-only — see its module docstring)
 for rung 3.
 
+**Jobs:** `GET /api/jobs` (+ `GET /api/jobs/{job_id}` for a longer log tail) is a tolerant read-only
+view of the durable background jobs `seneschal/scripts/jobs.py` writes to `<state dir>/jobs/`
+(`seneschal/docs/background-jobs-spec.md`, via `jobs.py` here — an independent reader, never an
+import of the daemon's module): what's running, what recently finished and how, and
+`awaiting_push` (terminal jobs whose completion push hasn't landed yet). There is deliberately no
+cancel route — cancelling a job is `jobs.py cancel`, a decision rather than a dashboard click.
+
 Run (dev): see ../README.md. Serves the built frontend (cockpit/web/dist) as static files when present.
 """
 from __future__ import annotations
@@ -73,7 +80,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import archons as archons_mod
-from . import auth, control, emotes, governor, health, model_config, oidc, readers, transcript
+from . import auth, control, emotes, governor, health, jobs, model_config, oidc, readers, transcript
 from . import session as session_mod
 from .auth import require_auth
 from .config import (
@@ -205,6 +212,21 @@ def api_oneiroi(limit: int = 20):
 @app.get("/api/seneschald-health", dependencies=[Depends(require_auth)])
 def api_seneschald_health():
     return readers.read_seneschald_health(get_state_dir())
+
+
+@app.get("/api/jobs", dependencies=[Depends(require_auth)])
+def api_jobs(limit: int = jobs.DEFAULT_LIMIT, tail_lines: int = jobs.DEFAULT_TAIL_LINES):
+    """Durable background jobs (`seneschal/docs/background-jobs-spec.md`): everything still running,
+    plus the most recent `limit` finished ones with a short log tail each. Running jobs are never
+    truncated by `limit`. A missing `state/jobs/` dir -> `{"available": false}` rather than a 500."""
+    return jobs.read_jobs(get_state_dir(), limit, tail_lines)
+
+
+@app.get("/api/jobs/{job_id}", dependencies=[Depends(require_auth)])
+def api_job(job_id: str, tail_lines: int = jobs.DEFAULT_DETAIL_LINES):
+    """One job with a longer log tail. The id arrives from the URL, so `jobs.read_job` validates it
+    against a strict alphabet before touching the filesystem (the path-traversal guard)."""
+    return jobs.read_job(get_state_dir(), job_id, tail_lines)
 
 
 @app.get("/api/presence", dependencies=[Depends(require_auth)])

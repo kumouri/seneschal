@@ -77,7 +77,10 @@ DEFAULT_KEEP = 7
 FILES = (
     "carry-over.md",           # the open-loops log; hand- and mode-written, rewritten whole
     "run-log.md",              # the store is the record, but re-deriving the local mirror is hours
-    "context-digest.md",       # Dream overwrites it nightly; the morning Brief reads it first
+    "context-digest.md",       # RETIRED (nothing writes it); kept while an upgraded install still has
+                               # one for `standing_safety.py import-digest` to migrate from
+    "standing-safety.json",    # the owner's hand-curated READ FIRST items — one home, no other copy
+    "open-loops.json",         # the work-item register; loops.py rewrites it whole on every verb
     "reminders.json",          # wholesale-rewritten by every reconcile
     "reminders-id-cache.md",   # ⏰ page ids; rebuilding means re-querying the store row by row
     "acks.json",               # which nudges were already acked today — losing it re-fires them

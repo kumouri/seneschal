@@ -68,7 +68,7 @@ class RulingTests(unittest.TestCase):
             self.assertEqual(cp.should_skip(token), "external", token)
 
     def test_git_refs_are_skipped_but_narrowly(self):
-        for token in ("origin/develop", "feat/archon-tiresias", "docs/spend-levers-spec",
+        for token in ("origin/develop", "feat/archon-example", "docs/spend-levers-spec",
                       "chore/whatever"):
             self.assertEqual(cp.should_skip(token), "git-ref", token)
         # Narrow ON PURPOSE: `seneschal/SKILL.md` has an extension and must NOT be skipped as a branch.

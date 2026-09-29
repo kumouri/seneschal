@@ -133,7 +133,7 @@ PATH_SHAPED_RE = re.compile(r"^[A-Za-z0-9_.~*<>/@-]+$")
 # --- skip rules. Each exists because of a measured false-positive class. ----------------------------
 # Schema identifiers: `seneschal.job-leads/1` — the largest single FP class without this rule.
 SCHEMA_ID_RE = re.compile(r"^[a-z][a-z0-9.-]*/\d+$")
-# Git refs: `origin/develop`, `feat/archon-tiresias`. Narrow on purpose — `seneschal/SKILL.md` has an
+# Git refs: `origin/develop`, `feat/archon-example`. Narrow on purpose — `seneschal/SKILL.md` has an
 # extension and is NOT skipped by this.
 BRANCHY_FIRST = ("feat", "fix", "docs", "chore", "feature", "port", "rescue")
 KNOWN_TLDS = (".com", ".org", ".net", ".io", ".dev", ".ai", ".sh", ".md")  # `.md` guards `foo.md/bar`
