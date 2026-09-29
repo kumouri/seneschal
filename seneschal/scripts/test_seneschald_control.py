@@ -36,6 +36,10 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import tmproot  # noqa: E402  — rmtree that clears git's read-only objects (see below)
+
 PWSH = shutil.which("pwsh")
 GIT = shutil.which("git")
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -80,7 +84,10 @@ class SeneschaldControlUpdateTest(unittest.TestCase):
         with the real scripts copied in so sentinel's claim check is exercised for real. `origin/main` is
         faked via update-ref so `git fetch` failing (no remote) is irrelevant — the ref still resolves."""
         repo = tempfile.mkdtemp(prefix="seneschald_test_")
-        self.addCleanup(shutil.rmtree, repo, ignore_errors=True)
+        # Not `shutil.rmtree(..., ignore_errors=True)`: git writes its objects read-only, which that
+        # silently skips on Windows, so every `seneschald_test_*/.git` used to leak into Temp.
+        # `tmproot.rmtree` clears the bit and retries.
+        self.addCleanup(tmproot.rmtree, repo)
         scripts_dst = os.path.join(repo, "seneschal", "scripts")
         state_dst = os.path.join(repo, "seneschal", "state")
         shutil.copytree(SCRIPTS_DIR, scripts_dst)
