@@ -40,9 +40,8 @@ specs and carry no status.
   pending)** — revives a dead daemon; §9 catches it alive on the wrong account.
 - `stacked-pr-branch-deletion-spec.md` — **BUILT** — deleting a branch used to close every PR stacked
   on it.
-- `mid-turn-interleave-spec.md` — **PARTIAL(phases 0+1 BUILT; phase 2 BUILT behind
-  `--interleave-mode live`, shipped OFF)** — no true in-turn injection exists on this CLI; the
-  classifier isn't reliable enough yet, so `live` stays off.
+- `mid-turn-interleave-spec.md` — **PARTIAL(gate module BUILT; daemon wiring pending)** — no true
+  in-turn injection exists on this CLI; `live` (interrupt, then continue) ships off.
 - `state-durability-spec.md` — **PARTIAL(core BUILT)** — zero-byte `state/` losses; `write_text` now
   refuses an empty overwrite.
 - `log-rotation-spec.md` — **BUILT** — rotates a log around Windows's held-open-file rename limit.
@@ -130,8 +129,8 @@ specs and carry no status.
   range + a CRLF-normalized `sha256` in an HTML-comment JSON block; an (unbuilt) checker reports
   FRESH/MOVED/STALE/GONE per entry, reusing `check_context_pointers.py`'s path resolution,
   report-only until an allowlist exists.
-- `budget-headroom-spec.md` — **BUILT(phase 0; further phases archived)** — headroom is generated in
-  code and validated, independent of the byte cap.
+- `budget-headroom-spec.md` — **PARTIAL(validator BUILT; no generator here)** — headroom is computed
+  in code and validated, independent of the byte cap.
 - `context-budget-collisions-spec.md` — **PARTIAL(phases 1-3 BUILT; `--enforce-chain` unwired)** —
   chain-continuity + a rechain helper.
 - `concurrent-pr-collisions-spec.md` — **PARTIAL(phase 1, 2R, 2b-as-a-job, 2a's detection + §5B BUILT as modules; daemon wiring pending)** — a

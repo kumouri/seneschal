@@ -241,7 +241,9 @@ just the daemon-side flow, for readers of this file.
   own tool use (a subprocess one-shot, never a session handoff) — it re-reads `model-config.json` and
   refuses (exit 2) on its own if the ceiling doesn't admit Fable, belt-and-braces with the arm-gating
   above. It scrubs `ANTHROPIC_API_KEY` from the child env (the same subscription-billing rule as the
-  warm session and `mini_dream.py`), seeds a budget-bounded `telegram-thread.json` tail, and
+  warm session and `mini_dream.py`), seeds a budget-bounded tail of the main-chat conversation cache (`telegram-threads/main.json`,
+  legacy `telegram-thread.json` as a second rung), meters its own spend (`--output-format json` → the
+  `usage` block on its `fable_oneshot` ledger row, or `metered: "unavailable"`, never a zero), and
   best-effort badges its answer into the cockpit transcript (`model: "claude-fable-5"`) so the seam
   stays visible.
 - **Status/transcript honesty:** `_status_snapshot`'s `model` field prefers the live session's own
@@ -300,7 +302,9 @@ The repo gains `pyproject.toml` + `uv.lock` (uv on the host) with the sanctioned
 
 - **Exact-time reminder timers** (sleep-until-next-due instead of the 5 s tick) — the tick already beats
   the old worst case by minutes; a timer wheel is polish.
-- **Mid-turn interleaving** (surfacing a "cancel that" to the in-flight turn) — needs product thinking
-  about conversation semantics, not just plumbing.
+- **Mid-turn interleaving** — designed in [`mid-turn-interleave-spec.md`](mid-turn-interleave-spec.md).
+  The motivating case turned out to be *additive context* ("oh, and also X"), not the "cancel that"
+  this bullet first imagined; the serialization invariant survives it (one consumer, one turn in
+  flight, one reply per delivery).
 - **Native `asyncio.subprocess` warm session**, HA/Signal/health-listener tasks — the substrate is ready
   for them; they are their own projects.
