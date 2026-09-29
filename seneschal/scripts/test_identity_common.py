@@ -118,5 +118,32 @@ class AccessorTest(unittest.TestCase):
         self.assertIsNone(ic.get_str([], "owner", "name"))
 
 
+class DayBoundaryHourTest(unittest.TestCase):
+    """``owner.dayBoundaryHour`` — the after-midnight cut clock/activity_day read."""
+
+    def test_default_is_five(self):
+        self.assertEqual(ic.DEFAULTS["owner"]["dayBoundaryHour"], 5)
+        self.assertEqual(ic.day_boundary_hour(ic.DEFAULTS), 5)
+        self.assertEqual(ic.day_boundary_hour({}), 5)
+        self.assertEqual(ic.day_boundary_hour([]), 5)
+
+    def test_configured_values_in_range(self):
+        for hour in (0, 3, 5, 12):
+            self.assertEqual(ic.day_boundary_hour({"owner": {"dayBoundaryHour": hour}}), hour)
+
+    def test_a_quoted_whole_number_is_accepted(self):
+        self.assertEqual(ic.day_boundary_hour({"owner": {"dayBoundaryHour": " 4 "}}), 4)
+
+    def test_unusable_values_fall_back(self):
+        for bad in (None, -1, 13, 24, True, False, 4.0, "four", "", [4]):
+            self.assertEqual(ic.day_boundary_hour({"owner": {"dayBoundaryHour": bad}}), 5, bad)
+
+    def test_the_example_file_matches_the_defaults(self):
+        path = os.path.join(ic.REPO_ROOT, "persona", "identity.example.json")
+        with open(path, encoding="utf-8") as fh:
+            example = json.load(fh)
+        self.assertEqual(example["owner"]["dayBoundaryHour"], ic.DEFAULTS["owner"]["dayBoundaryHour"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -436,7 +436,8 @@ no `claude` spawn.
 When the owner uses a relative day-word — *"tomorrow," "in the morning," "first thing"* — resolve it
 against the **wake-day**, not a naïve calendar+1:
 
-- **Post-midnight sessions** (~00:00–05:00 local, before they've slept): a relative day-word binds to the
+- **Post-midnight sessions** (00:00 up to the owner's day boundary — `owner.dayBoundaryHour` in
+  `persona/identity.json`, default 05:00 — before they've slept): a relative day-word binds to the
   **upcoming wake-day = the current local calendar date**, *not* date+1. If they say "remind me tomorrow
   morning" at 02:30, that's **today's** date (the day they're about to wake into), the same way the
   timezone rule already counts after-midnight activity as the prior day.
@@ -491,5 +492,6 @@ This governs how `reminders_enqueue` computes `due_at` and how the Reminders mod
   only ever a **pull** reply to the owner asking "what's open?", never a queued push.
 - **Reversible writes only** without asking; never touch a linked Task/Goal status unprompted.
 - **One rib max per reminder per day**, low-importance non-nag only, factual.
-- Times and date logic in **the owner's configured timezone**; after-midnight counts as the prior day.
+- Times and date logic in **the owner's configured timezone**; after-midnight counts as the prior day
+  (until `owner.dayBoundaryHour`, default 05:00 — `scripts/activity_day.py` is the one definition).
 - Every substantive seed/reconcile run leaves a trace (Run Log `Mode = Reminders` + carry-over).

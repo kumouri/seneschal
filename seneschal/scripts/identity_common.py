@@ -9,6 +9,8 @@ code READS it. Consumers today:
   * ``tz_common`` — ``owner.timezone`` (an IANA string) is the source of truth for date/label
     math (local_now/local_today/offset_minutes, machine-local fallback); slot fire-times stay
     machine-local wall clock.
+  * ``clock`` / ``activity_day`` — ``owner.dayBoundaryHour`` (via :func:`day_boundary_hour`) is the
+    after-midnight cut: activity before that local hour counts as the PRIOR day.
 Skills read ``persona/persona.md`` instead (the wizard generates both from one interview so
 they never disagree — see ``persona/README.md``).
 
@@ -29,8 +31,9 @@ REPO_ROOT = os.path.normpath(os.path.join(SCRIPT_DIR, "..", ".."))
 IDENTITY_PATH = os.path.join(REPO_ROOT, "persona", "identity.json")
 
 # Mirrors persona/identity.example.json: assistant.pronouns defaults to "they/them",
-# everything else is null. owner.timezone null = machine-local semantics (slot times and
-# date math run on the machine's wall clock; see presence.py's tz-mismatch warning).
+# owner.dayBoundaryHour defaults to 5 (05:00), everything else is null. owner.timezone null =
+# machine-local semantics (slot times and date math run on the machine's wall clock; see
+# presence.py's tz-mismatch warning).
 DEFAULTS = {
     "schema": 1,
     "assistant": {
@@ -48,8 +51,15 @@ DEFAULTS = {
         "pronouns": None,
         "email": None,
         "timezone": None,
+        "dayBoundaryHour": 5,
     },
 }
+
+#: The after-midnight cut used when ``owner.dayBoundaryHour`` is absent or unusable.
+DEFAULT_DAY_BOUNDARY_HOUR = 5
+#: The accepted range, inclusive. Past noon, "after midnight counts as the prior day" stops meaning
+#: anything a person would recognise, so a larger value is treated as a typo, not a preference.
+DAY_BOUNDARY_RANGE = (0, 12)
 
 
 def _deep_merge(base: dict, over: dict) -> dict:
@@ -112,3 +122,21 @@ def owner_name(identity: dict) -> str:
 def owner_tz_label(identity: dict) -> str:
     """The owner's configured IANA timezone string, or "the machine's local timezone"."""
     return get_str(identity, "owner", "timezone") or "the machine's local timezone"
+
+
+def day_boundary_hour(identity: dict) -> int:
+    """The owner's after-midnight cut, ``owner.dayBoundaryHour``: activity before this local hour
+    belongs to the PRIOR day (a 01:30 dinner is that evening's dinner, not the next day's).
+
+    An int in :data:`DAY_BOUNDARY_RANGE` (0–12). A whole-number string (``"4"``) is accepted, since a
+    hand-edited file may quote it; anything else — absent, ``null``, a bool, a float, out of range —
+    yields :data:`DEFAULT_DAY_BOUNDARY_HOUR` (5). Never raises: a bad value must cost the preference,
+    never the caller."""
+    sec = identity.get("owner") if isinstance(identity, dict) else None
+    val = sec.get("dayBoundaryHour") if isinstance(sec, dict) else None
+    if isinstance(val, str) and val.strip().isdigit():
+        val = int(val.strip())
+    if isinstance(val, bool) or not isinstance(val, int):
+        return DEFAULT_DAY_BOUNDARY_HOUR
+    lo, hi = DAY_BOUNDARY_RANGE
+    return val if lo <= val <= hi else DEFAULT_DAY_BOUNDARY_HOUR

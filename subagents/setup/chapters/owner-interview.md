@@ -53,8 +53,9 @@ python seneschal/scripts/setup_state.py mark owner-interview in-progress --step 
    — that prints an offset name on some platforms, so have the owner confirm the proper IANA
    name, e.g. `Europe/Berlin`). Then the
    **after-midnight rule**: activity before their usual sleep hour counts as the *prior* day
-   — confirm the boundary hour (default 03:00). Date logic everywhere gates on this zone,
-   never UTC.
+   — confirm the boundary hour (default 05:00; a whole hour, 0–12). The answer is
+   `owner.dayBoundaryHour` (an int, e.g. `4` for 04:00). Date logic everywhere gates on this
+   zone and this cut, never UTC.
 4. **Work.** What they do, where, and roughly what shape their week has — two or three lines
    the briefings can lean on. Nothing sensitive is required; whatever they offer.
 5. **Top ~3 projects.** What's actually live right now, one line each (the store's In-Progress
@@ -85,7 +86,7 @@ python seneschal/scripts/setup_state.py mark owner-interview in-progress --step 
    and current beats exhaustive; the template's section headings, one owner. Show it. One
    approval → write (in the turn *after* the approval, so no question ever has a file card
    under it).
-2. Merge `owner.*` (name / nameSpoken / pronouns / email / timezone) into
+2. Merge `owner.*` (name / nameSpoken / pronouns / email / timezone / dayBoundaryHour) into
    `persona/identity.json` — read-modify-write, preserving `assistant.*` untouched. Create
    the file from `persona/identity.example.json` if it doesn't exist yet.
 3. Never write on a skipped confirmation; a fully-skipped interview marks the chapter
