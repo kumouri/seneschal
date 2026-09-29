@@ -1,6 +1,6 @@
 {
   "name": "seneschal-screener",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "description": "Tiered, cost-optimized AI call screener — Twilio ConversationRelay + Claude on Cloudflare Workers.",
