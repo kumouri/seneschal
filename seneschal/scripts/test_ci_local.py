@@ -299,6 +299,44 @@ class WorkingTreeNoteTests(unittest.TestCase):
         self.assertLess(text.index("working tree:"), text.index("PASS"))
 
 
+class TempNoteTests(unittest.TestCase):
+    """Report-only (2026-09-29 Temp flood, `tmproot.py`) — names what escaped the run root, never
+    gates: concurrent processes on the host can leak too, and the count cannot say whose."""
+
+    ROOT = cl.tmproot.RunRoot("RUNROOT", "REALTMP", owned=True, started=100.0)
+
+    def test_nothing_escaped_reads_zero_and_names_the_root(self):
+        note = cl.temp_note(self.ROOT, scan=lambda real, since: (0, []))
+        self.assertIn("temp: 0 leak-shaped entries appeared in REALTMP", note)
+        self.assertIn("RUNROOT", note)
+
+    def test_escapes_are_counted_named_and_labelled_report_only(self):
+        seen = []
+
+        def scan(real, since):
+            seen.append((real, since))
+            return 2, ["tmpaaaaaaaa", "seneschald_test_bbbbbbbb"]
+        note = cl.temp_note(self.ROOT, scan=scan)
+        self.assertEqual(seen, [("REALTMP", 100.0)])
+        self.assertIn("WARNING — 2 leak-shaped entries", note)
+        self.assertIn("tmpaaaaaaaa, seneschald_test_bbbbbbbb", note)
+        self.assertIn("Report-only", note)
+
+    def test_the_epilogue_prints_after_the_last_verdict_and_before_the_summary(self):
+        orig = cl.STEPS
+        try:
+            cl.STEPS = (fake_step("one", [["x"]]),)
+            out = io.StringIO()
+            report = cl.run(runner=FakeRunner(failing=("x",)), root="unused-for-fakes", out=out,
+                            fetch=False, tree_note=False, epilogue=lambda: "temp: EPILOGUE")
+        finally:
+            cl.STEPS = orig
+        text = out.getvalue()
+        self.assertLess(text.index("FAIL"), text.index("temp: EPILOGUE"))
+        self.assertLess(text.index("temp: EPILOGUE"), text.index("RED"))
+        self.assertEqual(report["exit_code"], 1, "the epilogue must never change the verdict")
+
+
 class BaseRefTests(unittest.TestCase):
 
     def test_present_ref_is_not_fetched(self):

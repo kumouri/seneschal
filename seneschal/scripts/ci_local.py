@@ -45,6 +45,18 @@ commit, then push — the natural order) it would pass vacuously and go red in C
 prints one line naming the tree it checked: `working tree: N modified, M untracked (gates diff the
 working tree, not HEAD)`. On CI the tree is clean and that line reads `0 modified, 0 untracked`.
 
+## One temp root for the whole run, and a count of what escaped it
+
+2026-09-29: ~1M leaked `tmp????????` test directories in the host's `%LOCALAPPDATA%\\Temp` stalled
+Windows logon for 36-50 minutes. `main()` calls `tmproot.install()` before the first step, so this
+process owns one run root and every child — each unittest root, `npm test` — inherits
+`TMP`/`TEMP`/`TMPDIR` pointing into it; each root's own `test_0_tmproot.py` adopts it rather than
+nesting another. It is removed at exit, and a line on stderr says how many entries the run's tests
+left there. After the last step, `temp_note()` prints a `temp:` line counting leak-shaped entries
+CREATED in the real temp dir during the run — report-only, because other checkouts on this host can
+leak concurrently and the count cannot say whose; the blocking guard is the redirect assertion in
+every root's `test_0_tmproot.py`. Why, in full: `tmproot.py`.
+
 USAGE:
   python seneschal/scripts/ci_local.py                 # everything, ci.yml order; exit 1 on any FAIL
   python seneschal/scripts/ci_local.py --list          # the step table, with each step's command
@@ -72,6 +84,7 @@ GIT = ["git", "-c", "core.fsmonitor=false"]
 sys.path.insert(0, SCRIPT_DIR)
 
 import gate_git  # noqa: E402  — the working-tree helper the gates share
+import tmproot  # noqa: E402  — one temp root per run, removed at exit (2026-09-29 Temp flood)
 
 PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
 
@@ -404,11 +417,13 @@ def select_steps(only) -> list:
 
 
 def run(only=None, runner=subprocess_runner, root: str = REPO_ROOT, out=None,
-        verbose: bool = False, fetch: bool = True, tree_note: bool = True) -> dict:
+        verbose: bool = False, fetch: bool = True, tree_note: bool = True,
+        epilogue=None) -> dict:
     """Run the selected steps in ci.yml order, printing one verdict line per step as it finishes
     (a run is minutes long; a silent wait is the thing that gets Ctrl-C'd). Returns the report.
     `tree_note` prints the working-tree header line (always, from the CLI — `--no-fetch` does not
-    suppress it); tests that count the runner's calls turn it off."""
+    suppress it); tests that count the runner's calls turn it off. `epilogue`, a zero-arg callable
+    returning one line, is printed after the last step and before the summary (`temp_note`)."""
     out = out or sys.stdout
     steps = select_steps(only)
     if fetch:
@@ -423,9 +438,27 @@ def run(only=None, runner=subprocess_runner, root: str = REPO_ROOT, out=None,
         if r["status"] == FAIL or (verbose and r["output"]):
             out.write(indent(r["output"]) + "\n")
         out.flush()
+    if epilogue is not None:
+        out.write(epilogue() + "\n")
     report = summarize(results, subset=bool(only))
     out.write(report["summary"] + "\n")
     return report
+
+
+def temp_note(run_root, scan=tmproot.new_leaks) -> str:
+    """Report-only, never gates: leak-shaped entries (`tmp????????`, `seneschald_*`) created in the
+    REAL temp dir while this run was going. Every process the run started had its temp pointed at
+    `run_root`, so a non-zero count means a step bypassed it (a scrubbed env, a hard-coded path) —
+    or another process on this host leaked them concurrently, which is why it cannot gate."""
+    count, names = scan(run_root.real_tmp, run_root.started)
+    if not count:
+        return ("temp: 0 leak-shaped entries appeared in %s during the run (every step's temp was %s)"
+                % (run_root.real_tmp, run_root.path))
+    return ("temp: WARNING — %d leak-shaped entr%s (tmp????????/seneschald_*) appeared in %s during "
+            "the run, e.g. %s. Every step's temp was %s, so a step bypassed it or another process on "
+            "this host made them; re-run alone to tell which. Report-only."
+            % (count, "y" if count == 1 else "ies", run_root.real_tmp, ", ".join(names),
+               run_root.path))
 
 
 def verdict_line(r: dict) -> str:
@@ -495,7 +528,11 @@ def main(argv=None, runner=subprocess_runner) -> int:
     if args.list:
         list_steps()
         return 0
-    report = run(only=args.only, runner=runner, verbose=args.verbose, fetch=not args.no_fetch)
+    run_root = tmproot.install()
+    # A faked runner started no processes, so there is no temp traffic to measure.
+    epilogue = (lambda: temp_note(run_root)) if runner is subprocess_runner else None
+    report = run(only=args.only, runner=runner, verbose=args.verbose, fetch=not args.no_fetch,
+                 epilogue=epilogue)
     return report["exit_code"]
 
 

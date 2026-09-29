@@ -36,6 +36,10 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import tmproot  # noqa: E402  — rmtree that clears git's read-only objects (see below)
+
 PWSH = shutil.which("pwsh")
 GIT = shutil.which("git")
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -80,7 +84,10 @@ class SeneschaldControlUpdateTest(unittest.TestCase):
         with the real scripts copied in so sentinel's claim check is exercised for real. `origin/main` is
         faked via update-ref so `git fetch` failing (no remote) is irrelevant — the ref still resolves."""
         repo = tempfile.mkdtemp(prefix="seneschald_test_")
-        self.addCleanup(shutil.rmtree, repo, ignore_errors=True)
+        # Not `shutil.rmtree(..., ignore_errors=True)`: git writes its objects read-only, which that
+        # silently skips on Windows, so every `seneschald_test_*/.git` used to leak into Temp.
+        # `tmproot.rmtree` clears the bit and retries.
+        self.addCleanup(tmproot.rmtree, repo)
         scripts_dst = os.path.join(repo, "seneschal", "scripts")
         state_dst = os.path.join(repo, "seneschal", "state")
         shutil.copytree(SCRIPTS_DIR, scripts_dst)
@@ -131,15 +138,15 @@ class SeneschaldControlUpdateTest(unittest.TestCase):
         what "make origin advance" needs to do below. A bare repo has no checkout to protect.
         """
         origin = tempfile.mkdtemp(prefix="seneschald_origin_")
-        self.addCleanup(shutil.rmtree, origin, ignore_errors=True)
+        self.addCleanup(tmproot.rmtree, origin)
         self._git(origin, "init", "--bare", "-b", "main")
 
         repo = tempfile.mkdtemp(prefix="seneschald_test_")
-        self.addCleanup(shutil.rmtree, repo, ignore_errors=True)
+        self.addCleanup(tmproot.rmtree, repo)
         # Seed origin's history through a throwaway clone — a bare repo has no working tree to
         # write `git add`/`commit` against directly.
         seed = tempfile.mkdtemp(prefix="seneschald_seed_")
-        self.addCleanup(shutil.rmtree, seed, ignore_errors=True)
+        self.addCleanup(tmproot.rmtree, seed)
         subprocess.run(["git", "-c", "core.fsmonitor=false", "clone", origin, seed],
                        check=True, capture_output=True, text=True)
         self._git(seed, "config", "user.email", "test@example.invalid")

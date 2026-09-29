@@ -248,3 +248,14 @@ typecheck && npm test`). Run every gate CI runs, locally, before pushing:
 python seneschal/scripts/ci_local.py            # every CI step, ci.yml order; --list / --only <step>
 python seneschal/scripts/check_docs.py          # just the doc-side gates, every finding in one pass
 ```
+
+**Test temp is run-scoped.** Each discovery root (`seneschal/scripts`, `archons/proteus/tools`,
+`cockpit/server`, `cockpit/decoy`, `cockpit/breakglass`) has a `test_0_tmproot.py`. `discover` imports it first because
+it sorts first, and it points `tempfile` and `TMP`/`TEMP`/`TMPDIR` at one
+`<system temp>/seneschal-test-runs/<pid>-<rand>` root that is removed at exit. This was added
+2026-09-29, after ~1M leaked test dirs in `%LOCALAPPDATA%\Temp` stalled Windows logon. A new root
+added to `ci.yml` needs one too, and `test_tmproot.py` fails until it has one. A test that deletes a
+tree it made uses `tmproot.rmtree`, never `shutil.rmtree(..., ignore_errors=True)`, which silently
+skips git's read-only objects on Windows. `ci_local.py` owns one root for its whole run, and each
+step adopts it. After the last step it prints a report-only `temp:` line that counts leak-shaped dirs
+created in the real temp dir during the run. Details: `seneschal/scripts/tmproot.py`.
