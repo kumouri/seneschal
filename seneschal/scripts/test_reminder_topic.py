@@ -59,7 +59,7 @@ NOW = datetime(2026, 9, 1, 15, 30, tzinfo=timezone.utc)
 THREAD = 91
 CHAT = "555"
 #: A 32-hex Notion page id shape, which is what a ⏰ row id looks like to `ack.py`'s id cache.
-ROW = "1234567890abcdef1234567890abcdef"
+ROW = "0000000000000000000000000000a1b2"
 
 
 def _cfg(chat_id=CHAT):
