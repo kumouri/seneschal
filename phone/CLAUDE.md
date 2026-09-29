@@ -19,7 +19,8 @@ Inbound call → Worker `POST /voice` runs the cheapest-first cascade (`src/scre
    keys; robots say nothing); a **wrong key** gets two strikes of grace.
 4. gate-pass → `<Connect><ConversationRelay>` → the `RelaySession` Durable Object runs the Claude
    conversation as the assistant persona, then transfers / takes a message / marks spam (via Twilio
-   REST), logs to D1, and SMSes the owner.
+   REST), logs to D1, and notifies the owner — **Telegram when configured, SMS only as the fallback**
+   (`src/notify/owner.ts`).
 
 **Critical:** the DO uses the **non-hibernating** WebSocket API (`server.accept()`), not
 `state.acceptWebSocket()` — hibernation resets `callSid`/`history` every turn and breaks everything. Don't
@@ -35,6 +36,9 @@ Inbound call → Worker `POST /voice` runs the cheapest-first cascade (`src/scre
   `ASSISTANT_TTS_PROVIDER` → `personaFromEnv` in `src/config.ts`); the canonical persona lives in
   `persona/persona.md` at the repo root, and the setup wizard emits these env values.
 - `src/relay/session.ts` — the `RelaySession` Durable Object. `src/twilio/calls.ts` — live-call transfer.
+- `src/notify/owner.ts` — the one door for owner notifications (Telegram else SMS; a failed Telegram
+  send still tries SMS); `telegram.ts` talks to the Bot API directly (the Worker can't reach the
+  daemon) and uploads voicemail audio.
 - `src/notify/call.ts` — outbound reminder calls: `placeCall` (single ring) + `placeEscalationCall`.
   **Both speak in the persona's voice** when one is configured — `<Say voice="<Provider>.<id>">`,
   derived from `personaFromEnv` via `twiml.ts::sayVoiceOf` (never a second hardcoded id). Twilio's
@@ -55,7 +59,9 @@ Inbound call → Worker `POST /voice` runs the cheapest-first cascade (`src/scre
   `DAILY_BUDGET_USD`.
 - **Secrets** (`wrangler secret put`): `ANTHROPIC_API_KEY`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`,
   `TWILIO_NUMBER_E164`, `USER_CELL_E164`, `OWNER_PROFILE`, `CONTACTS_SYNC_SECRET`, `OWNER_PASSWORD` (optional
-  easter-egg). Local copies live in `.dev.vars` (gitignored; see `.dev.vars.example`).
+  easter-egg), `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` (owner notifications; both or neither) +
+  `TELEGRAM_THREAD_ID` (optional topic). Local copies live in `.dev.vars` (gitignored; see
+  `.dev.vars.example`).
 
 ## Workflow
 - **Test:** `npm run typecheck` && `npm test` (vitest; pure logic only — no Workers runtime needed).

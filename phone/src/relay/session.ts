@@ -10,7 +10,8 @@
  *
  * Loop: caller speech -> Claude (turn engine) -> spoken reply, until Claude
  * reaches a terminal decision, which transfers the live call (REST), persists
- * the verdict to D1, and texts the owner.
+ * the verdict to D1, and notifies the owner (Telegram, or SMS as the fallback —
+ * `../notify/owner.ts`).
  */
 import type { Env } from "../config";
 import type { SetupMessage } from "./protocol";
@@ -22,7 +23,7 @@ import { buildSystemPrompt, SCREENER_TOOLS } from "../screener/prompt";
 import { configured, personaFromEnv } from "../config";
 import { estimateCallCost } from "../budget";
 import { addToBlocklist, recordCall } from "../data/db";
-import { sendSms } from "../notify/sms";
+import { notifyOwner } from "../notify/owner";
 import { formatVerdictSms } from "../notify/format";
 import { redirectToDial, redirectToHangup } from "../twilio/calls";
 
@@ -137,7 +138,7 @@ export class RelaySession {
           outcomeStage: "conversation", verdict: "message",
           callerName: terminal.callerName, reason: terminal.summary, transcript, costEstimateUsd: cost,
         });
-        await this.notifyOwner({ verdict: "message", callerName: terminal.callerName, reason: terminal.summary, callbackNumber: terminal.callbackNumber, cost });
+        await this.notifyVerdict({ verdict: "message", callerName: terminal.callerName, reason: terminal.summary, callbackNumber: terminal.callbackNumber, cost });
         return;
       }
       // spam
@@ -148,24 +149,24 @@ export class RelaySession {
         outcomeStage: "conversation", verdict: "spam",
         reason: terminal.reason, transcript, costEstimateUsd: cost,
       });
-      await this.notifyOwner({ verdict: "spam", reason: terminal.reason, cost });
+      await this.notifyVerdict({ verdict: "spam", reason: terminal.reason, cost });
     } catch (err) {
       console.log(`handleTerminal error: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
-  /** Real-time "pick up!" text so the owner knows who's being transferred to them. */
+  /** Real-time "pick up!" note so the owner knows who's being transferred to them. */
   private async alertConnecting(callerName: string, reason: string): Promise<void> {
     const who = callerName.trim() !== "" ? callerName.trim() : "a caller";
     const body = reason.trim() !== "" ? `📞 Connecting ${who} — ${reason.trim()}. Pick up!` : `📞 Connecting ${who}. Pick up!`;
     try {
-      await sendSms(this.env, this.env.USER_CELL_E164, body);
+      await notifyOwner(this.env, body);
     } catch {
-      // best-effort — don't fail the transfer on an SMS hiccup
+      // best-effort — don't fail the transfer on a notification hiccup
     }
   }
 
-  private async notifyOwner(args: {
+  private async notifyVerdict(args: {
     verdict: "message" | "spam";
     callerName?: string;
     reason?: string;
@@ -181,9 +182,9 @@ export class RelaySession {
       costEstimateUsd: args.cost,
     });
     try {
-      await sendSms(this.env, this.env.USER_CELL_E164, body);
+      await notifyOwner(this.env, body);
     } catch (err) {
-      console.log(`sms error: ${err instanceof Error ? err.message : String(err)}`);
+      console.log(`notify error: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 }

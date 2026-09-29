@@ -12,7 +12,7 @@ Every inbound call runs a cheapest-first cascade in the Worker (`src/index.ts` �
 | 3 | Unknown | `<Gather>` "press 1" gate | ~$0.01–0.02 |
 | 4 | Pressed 1 | `<Connect><ConversationRelay>` → Claude | ~$0.10 |
 
-Stage 4 decides via one tool call: `connect_call` (bridge to the user), `take_message` (store + SMS), or
+Stage 4 decides via one tool call: `connect_call` (bridge to the user), `take_message` (store + notify), or
 `mark_spam` (hang up + add to blocklist). Spam flagged here or a repeated gate-fail feeds the **learning
 blocklist**, so the number is rejected for $0 next time.
 
@@ -30,7 +30,9 @@ to the log and to Claude.
 - **`src/relay/`** — `protocol.ts` (ConversationRelay JSON frames), `session.ts` (the `RelaySession`
   Durable Object holding the WebSocket + conversation state).
 - **`src/data/`** — `db.ts` (D1 access) + `schema.sql`.
-- **`src/notify/sms.ts`** — Twilio SMS to the owner.
+- **`src/notify/`** — owner notifications: `owner.ts` is the one door (Telegram when configured, SMS as
+  the fallback), `telegram.ts` (Bot API direct; voicemail audio via multipart `sendAudio`), `sms.ts`
+  (Twilio), `call.ts` (outbound reminder calls), `format.ts` (verdict wording).
 - **`src/budget.ts`** — per-call cost estimation + the daily budget guard.
 
 ## Data model (D1)

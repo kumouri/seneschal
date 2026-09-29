@@ -17,7 +17,8 @@ import type { CallerInfo } from "./screener/decision";
 import { decideFunnel, decidePostGate } from "./screener/funnel";
 import { listBlocklist, lookupLists, recordGateFail, syncGoogleContacts, type GoogleContact } from "./data/db";
 import { connectRelay, dial, gate, hangupResponse, reject, say, sayVoiceOf, voicemail, wssOf } from "./twiml";
-import { sendSms } from "./notify/sms";
+import { notifyOwner } from "./notify/owner";
+import { sendVoicemailAudio, telegramConfigured } from "./notify/telegram";
 import { placeCall } from "./notify/call";
 
 export { RelaySession } from "./relay/session";
@@ -287,7 +288,12 @@ async function handleAfterBridge(request: Request, env: Env): Promise<Response> 
   );
 }
 
-/** Twilio transcription callback for a voicemail: text it to the owner. */
+/**
+ * Twilio transcription callback for a voicemail: the text goes to the owner
+ * first (Telegram, or SMS as the fallback), then — on Telegram only — the
+ * recording itself as a second message. An audio fetch/upload failure is
+ * logged and swallowed: the text already went, the audio is a bonus.
+ */
 async function handleVoicemail(request: Request, env: Env): Promise<Response> {
   const from = new URL(request.url).searchParams.get("from") ?? "";
   const form = await request.formData();
@@ -296,9 +302,16 @@ async function handleVoicemail(request: Request, env: Env): Promise<Response> {
   const who = from !== "" ? from : "Unknown caller";
   const body = `🎙️ Voicemail from ${who}:\n${text !== "" ? text : "(couldn't transcribe — listen via Twilio)"}\n${recordingUrl}`;
   try {
-    await sendSms(env, env.USER_CELL_E164, body);
-  } catch {
-    // best-effort
+    await notifyOwner(env, body);
+  } catch (err) {
+    console.log(`voicemail notify error: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  if (recordingUrl !== "" && telegramConfigured(env)) {
+    try {
+      await sendVoicemailAudio(env, recordingUrl, `🎙️ Voicemail audio from ${who}`);
+    } catch (err) {
+      console.log(`voicemail audio error: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
   return new Response("ok");
 }
