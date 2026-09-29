@@ -9,6 +9,13 @@ code READS it. Consumers today:
   * ``tz_common`` — ``owner.timezone`` (an IANA string) is the source of truth for date/label
     math (local_now/local_today/offset_minutes, machine-local fallback); slot fire-times stay
     machine-local wall clock.
+  * ``clock`` / ``activity_day`` — ``owner.dayBoundaryHour`` (via :func:`day_boundary_hour`) is the
+    after-midnight cut: activity before that local hour counts as the PRIOR day.
+  * ``sentinel`` — ``owner.nightCurfew`` (via :func:`night_curfew_window`) is the overnight window in
+    which a non-piercing nudge that leaked in from the evening is consumed rather than delivered.
+  * ``send_recipients`` / ``send_gate`` — ``owner.email`` + ``owner.emails`` (via
+    :func:`owner_emails`) and ``assistant.email`` decide which recipients count as the owner's own,
+    so a send to them passes the outbound approval gate untouched.
 Skills read ``persona/persona.md`` instead (the wizard generates both from one interview so
 they never disagree — see ``persona/README.md``).
 
@@ -29,8 +36,10 @@ REPO_ROOT = os.path.normpath(os.path.join(SCRIPT_DIR, "..", ".."))
 IDENTITY_PATH = os.path.join(REPO_ROOT, "persona", "identity.json")
 
 # Mirrors persona/identity.example.json: assistant.pronouns defaults to "they/them",
-# everything else is null. owner.timezone null = machine-local semantics (slot times and
-# date math run on the machine's wall clock; see presence.py's tz-mismatch warning).
+# owner.dayBoundaryHour defaults to 5 (05:00), owner.nightCurfew to 01:00-07:00, owner.emails to an empty list (the owner's OTHER
+# addresses, beside owner.email), everything else is null. owner.timezone null =
+# machine-local semantics (slot times and date math run on the machine's wall clock; see
+# presence.py's tz-mismatch warning).
 DEFAULTS = {
     "schema": 1,
     "assistant": {
@@ -47,9 +56,22 @@ DEFAULTS = {
         "nameSpoken": None,
         "pronouns": None,
         "email": None,
+        "emails": [],
         "timezone": None,
+        "dayBoundaryHour": 5,
+        "nightCurfew": {"start": "01:00", "end": "07:00"},
     },
 }
+
+#: The after-midnight cut used when ``owner.dayBoundaryHour`` is absent or unusable.
+DEFAULT_DAY_BOUNDARY_HOUR = 5
+#: The accepted range, inclusive. Past noon, "after midnight counts as the prior day" stops meaning
+#: anything a person would recognise, so a larger value is treated as a typo, not a preference.
+DAY_BOUNDARY_RANGE = (0, 12)
+
+#: The overnight reminder curfew used when ``owner.nightCurfew`` is absent or unusable, as
+#: ``(hour, minute)`` pairs: 01:00 (inclusive) to 07:00 (exclusive), owner-local.
+DEFAULT_NIGHT_CURFEW = ((1, 0), (7, 0))
 
 
 def _deep_merge(base: dict, over: dict) -> dict:
@@ -112,3 +134,76 @@ def owner_name(identity: dict) -> str:
 def owner_tz_label(identity: dict) -> str:
     """The owner's configured IANA timezone string, or "the machine's local timezone"."""
     return get_str(identity, "owner", "timezone") or "the machine's local timezone"
+
+
+def day_boundary_hour(identity: dict) -> int:
+    """The owner's after-midnight cut, ``owner.dayBoundaryHour``: activity before this local hour
+    belongs to the PRIOR day (a 01:30 dinner is that evening's dinner, not the next day's).
+
+    An int in :data:`DAY_BOUNDARY_RANGE` (0–12). A whole-number string (``"4"``) is accepted, since a
+    hand-edited file may quote it; anything else — absent, ``null``, a bool, a float, out of range —
+    yields :data:`DEFAULT_DAY_BOUNDARY_HOUR` (5). Never raises: a bad value must cost the preference,
+    never the caller."""
+    sec = identity.get("owner") if isinstance(identity, dict) else None
+    val = sec.get("dayBoundaryHour") if isinstance(sec, dict) else None
+    if isinstance(val, str) and val.strip().isdigit():
+        val = int(val.strip())
+    if isinstance(val, bool) or not isinstance(val, int):
+        return DEFAULT_DAY_BOUNDARY_HOUR
+    lo, hi = DAY_BOUNDARY_RANGE
+    return val if lo <= val <= hi else DEFAULT_DAY_BOUNDARY_HOUR
+
+
+def _hhmm(val):
+    """``"HH:MM"`` -> ``(hour, minute)``, or None for anything else (a bad value is a typo, not a
+    preference)."""
+    if not isinstance(val, str):
+        return None
+    parts = val.strip().split(":")
+    if len(parts) != 2 or not all(p.isdigit() for p in parts):
+        return None
+    h, m = int(parts[0]), int(parts[1])
+    return (h, m) if 0 <= h <= 23 and 0 <= m <= 59 else None
+
+
+def night_curfew_window(identity: dict) -> tuple:
+    """The owner's overnight reminder curfew, ``owner.nightCurfew``, as
+    ``((start_hour, start_minute), (end_hour, end_minute))`` on the owner's local wall clock.
+
+    Configured as ``{"start": "HH:MM", "end": "HH:MM"}``; start is inclusive, end exclusive. A window
+    whose start is after its end wraps midnight (``23:00``-``07:00``), which the consumer
+    (``sentinel.in_night_curfew``) handles. Start equal to end disables the curfew — an explicit
+    "never" rather than a typo, since it can only be typed on purpose. Anything absent or unusable
+    yields :data:`DEFAULT_NIGHT_CURFEW` (01:00-07:00). Never raises."""
+    sec = identity.get("owner") if isinstance(identity, dict) else None
+    val = sec.get("nightCurfew") if isinstance(sec, dict) else None
+    if not isinstance(val, dict):
+        return DEFAULT_NIGHT_CURFEW
+    start, end = _hhmm(val.get("start")), _hhmm(val.get("end"))
+    if start is None or end is None:
+        return DEFAULT_NIGHT_CURFEW
+    return (start, end)
+
+
+def owner_emails(identity: dict) -> frozenset:
+    """Every address that is the owner's own, lowercased and de-duplicated: ``owner.email`` plus
+    each entry of the optional ``owner.emails`` list (a second mailbox, a work address, the address
+    job applications go out from). Empty when nothing is configured.
+
+    This is the set the outbound send gate treats as "the owner" — a send whose every recipient is
+    in it needs no approval — so it is deliberately strict about shape: only non-blank strings
+    containing an ``@`` count, a bare string where the list belongs is accepted as a one-item list,
+    and anything else is skipped rather than guessed at. Never raises."""
+    out = set()
+    single = get_str(identity, "owner", "email")
+    if single:
+        out.add(single)
+    sec = identity.get("owner") if isinstance(identity, dict) else None
+    extra = sec.get("emails") if isinstance(sec, dict) else None
+    if isinstance(extra, str):
+        extra = [extra]
+    if isinstance(extra, (list, tuple)):
+        for val in extra:
+            if isinstance(val, str) and val.strip():
+                out.add(val.strip())
+    return frozenset(a.lower() for a in out if "@" in a)

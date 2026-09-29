@@ -3,6 +3,7 @@ import { formatTimestamp } from '../format'
 import type { RouterLogEntry } from '../types'
 import { usePolling } from '../usePolling'
 import { AuthGate, Panel } from './Panel'
+import { contextLabel, decisionLabel, decisionTitle } from './routerRow'
 
 const RECENT_LIMIT = 50 // enough to bucket a small fable-arm-over-time placeholder chart client-side
 
@@ -93,16 +94,23 @@ export function RouterPanel() {
 
           <div className="router-arm-block">
             <div className="row-main">Recent decisions</div>
+            {/* Left column = who classified it; right column = what they decided. The wording of both
+                lives in routerRow.ts, where it is tested — `arm` and `verdict` share a vocabulary
+                ("fable" is both an arm and one of that arm's two verdicts), so keeping them visibly
+                distinct is a rule, not a formatting preference. */}
             {recent.slice(0, 10).map((r, i) => (
               <div className="row" key={i}>
                 <div>
                   <div className="row-main">{r.text_preview || '(empty)'}</div>
-                  <div className="row-sub">
-                    {r.channel ?? '?'} · {r.arm} · {r.category ?? ''}
-                  </div>
+                  <div className="row-sub">{contextLabel(r)}</div>
                 </div>
                 <div style={{ textAlign: 'right' }}>
-                  <span className={`pill ${r.verdict === 'fable' ? 'pill-live' : 'pill-idle'}`}>{r.verdict}</span>
+                  <span
+                    className={`pill pill-decision ${r.verdict === 'fable' ? 'pill-live' : 'pill-idle'}`}
+                    title={decisionTitle(r)}
+                  >
+                    {decisionLabel(r)}
+                  </span>
                   <div className="row-sub">{formatTimestamp(r.ts)}</div>
                 </div>
               </div>

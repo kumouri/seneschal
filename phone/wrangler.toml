@@ -1,6 +1,6 @@
 # Cloudflare Workers config for the AI call screener.
-# Secrets (ANTHROPIC_API_KEY, TWILIO_*, USER_CELL_E164, PUBLIC_BASE_URL) are NOT
-# here — set them in .dev.vars (local) or `wrangler secret put NAME` (deployed).
+# Secrets (ANTHROPIC_API_KEY, TWILIO_*, USER_CELL_E164, PUBLIC_BASE_URL, TELEGRAM_*)
+# are NOT here — set them in .dev.vars (local) or `wrangler secret put NAME` (deployed).
 
 name = "seneschal-screener"
 main = "src/index.ts"
@@ -30,7 +30,7 @@ new_sqlite_classes = ["CallEscalation"]
 [[d1_databases]]
 binding = "DB"
 database_name = "call_screener"
-database_id = ""  # filled by `wrangler d1 create call_screener` during provisioning
+database_id = "00000000-0000-0000-0000-000000000000"  # placeholder — replace with the id `wrangler d1 create call_screener` prints
 
 [vars]
 GATE_PROMPT = "Thanks for calling. To cut down on spam, please press 1 to be connected."

@@ -248,6 +248,39 @@ class DocsAndCommands(unittest.TestCase):
                 self.assertEqual(e.get("format", "env"), "env", e["id"])
 
 
+class PendingData(unittest.TestCase):
+    """``verify.pending_data`` = "configured, nothing to show yet" (the env walker marks such
+    an entry done, not blocked). Its stderr marker must be what the verify script really prints."""
+
+    def test_pending_data_blocks_are_well_formed(self):
+        for e in ENTRIES:
+            pending = (e.get("verify") or {}).get("pending_data")
+            if pending is None:
+                continue
+            self.assertIsInstance(pending.get("exit"), int, e["id"])
+            self.assertNotEqual(pending["exit"], 0, e["id"])
+            for key in ("stderr", "summary"):
+                self.assertIsInstance(pending.get(key), str, f"{e['id']}: pending_data.{key}")
+                self.assertTrue(pending[key].strip(), f"{e['id']}: pending_data.{key}")
+
+    def test_rag_empty_index_matches_its_pending_data(self):
+        import contextlib
+        import io
+        import tempfile
+
+        import rag_query
+
+        pending = next(e for e in ENTRIES if e["id"] == "rag")["verify"]["pending_data"]
+        # main() leaves its sqlite handle open; Windows can't delete an open file
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            err = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                rc = rag_query.main(["setup smoke test", "--k", "1", "--no-record",
+                                     "--db", str(Path(tmp) / "rag.sqlite")])
+        self.assertEqual(rc, pending["exit"])
+        self.assertIn(pending["stderr"], err.getvalue())
+
+
 class SecretHygiene(unittest.TestCase):
     def test_known_credentials_are_marked_secret(self):
         expected_secret = {
@@ -265,6 +298,18 @@ class SecretHygiene(unittest.TestCase):
         chat = next(v for v in telegram["vars"] if v["name"] == "TELEGRAM_CHAT_ID")
         self.assertEqual(chat["validate"], "^-?\\d+$")
         self.assertIn("discover", chat)
+
+    def test_telegram_format_accepts_exactly_the_modes_telegram_format_knows(self):
+        """`TELEGRAM_FORMAT` is read by `telegram_format.normalize_format`; the manifest's validate
+        must admit its two spellings (plus unset) and nothing that would silently read as plain."""
+        telegram = next(e for e in ENTRIES if e["id"] == "telegram")
+        fmt = next(v for v in telegram["vars"] if v["name"] == "TELEGRAM_FORMAT")
+        self.assertFalse(fmt["required"])
+        pattern = re.compile(fmt["validate"])
+        for ok in ("", "plain", "markdown"):
+            self.assertTrue(pattern.match(ok), ok)
+        for bad in ("Markdown", "html", "MarkdownV2"):
+            self.assertFalse(pattern.match(bad), bad)
 
     def test_no_var_default_looks_like_a_credential(self):
         for e in ENTRIES:

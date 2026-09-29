@@ -129,6 +129,19 @@ def offset_minutes(when) -> int:
     return int(off.total_seconds() // 60)
 
 
+def utc_offset_on(d: date) -> timedelta:
+    """The owner-tz UTC offset in effect on a local calendar DATE (not an instant) — for a caller
+    turning a bare ``YYYY-MM-DD`` into that day's owner-local span (``gcal_api``'s ``--start``/
+    ``--end``). Read at local noon, so a DST transition day gets ONE offset for its whole span
+    rather than splitting at 02:00 — matching how a person writes the date. Machine-local fallback
+    (ladder steps 1/3) asks the OS for that date's own offset, so DST is the date's, not today's."""
+    noon = datetime(d.year, d.month, d.day, 12)
+    zone = _zone()
+    if zone is not None:
+        return noon.replace(tzinfo=zone).utcoffset()
+    return noon.astimezone().utcoffset()  # a naive datetime is read as machine-local here
+
+
 # ------------------------------------------------------------------ deterministic specs / legacy
 
 def _nth_weekday(year: int, month: int, weekday: int, n: int) -> date:

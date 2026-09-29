@@ -84,7 +84,7 @@ class BacklogAck(unittest.IsolatedAsyncioTestCase):
 
     async def test_ack_is_threaded_for_continuity(self):
         await pr._maybe_backlog_ack(self.state, self.args, self.log, _msgs(2))
-        with open(os.path.join(self.dir, "telegram-thread.json"), encoding="utf-8") as fh:
+        with open(pr.thread_path(self.dir), encoding="utf-8") as fh:
             thread = json.load(fh)
         self.assertEqual(thread[-1]["role"], "assistant")
         self.assertIn("got your 2 messages", thread[-1]["text"])

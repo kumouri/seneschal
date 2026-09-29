@@ -5,10 +5,14 @@ README and the `*.example.json` / `*.example.md` seed files is git-ignored** —
 and machine-specific. Durable "system of record" memory still lives in the active store (Run Log,
 carry-over); this directory is the cheap local cache the no-LLM sentinel and the modes read and write.
 
-> **The memory logs live here now.** `run-log.md`, `carry-over.md`, and `context-digest.md` were split
-> out of `../references/` (where they were tracked) into this gitignored directory so the daemon can run
-> off `main` without a `git pull` conflicting on an append log. Their protocol/doc is
-> `../references/memory.md`; each has a tracked `*.example.md` seed here. See that doc for the full story.
+> **The memory logs live here now.** `run-log.md` and `carry-over.md` were split out of
+> `../references/` (where they were tracked) into this gitignored directory so the daemon can run off
+> `main` without a `git pull` conflicting on an append log. Their protocol/doc is
+> `../references/memory.md`; each has a tracked `*.example.md` seed here. A third, `context-digest.md`,
+> is **retired**: its jobs moved to `open-loops.json` (`../scripts/loops.py`), `standing-safety.json`
+> (`../scripts/standing_safety.py`) and `brief-prestage.json` (`../scripts/brief_prestage.py`), and its
+> seed was removed. A leftover copy on an upgraded install is read only by the one-shot
+> `standing_safety.py import-digest` migration.
 
 | File | Written by | What it holds |
 |------|-----------|---------------|
@@ -16,28 +20,72 @@ carry-over); this directory is the cheap local cache the no-LLM sentinel and the
 | `acks.json` | `reminders_dequeue.py` (chat/slot ack path) | Durable **ack ledger** — `{normalized_reminder_id: "YYYY-MM-DD"}`, the LOCAL date (the owner's timezone) of the most recent ack per ⏰ row. The fire path (`check_reminders`) reads it to **suppress a due nudge already acked today** (see below). Fail-open: absent/broken → empty → never silences a real nudge. |
 | `notion-outbox.sqlite` | `outbox.py` / `outbox_common.py` (enqueue: the ack/med-log paths; drain: the warm/scheduled LLM turn) | Durable **write-behind outbox** for act-low **Notion** writes (WAL sqlite, one `outbox` table). A write's *intent* (reminder ack, med-log row, run-log finalize) is journaled here first, then flushed via the MCP tools — idempotent (`UNIQUE` key), single-consumer FIFO, exponential-backoff retries; a permanent error or an exhausted budget **dead-letters in the same table** (`status = failed` — surfaced by `outbox.py status`, never auto-dropped; no separate dead-letter file). `acks.json`'s fail-**closed** sibling: it answers "landed in Notion yet?", not "acked today?". **Notion-backend only** — filesystem store backends write locally/atomically and never route through it. Dream prunes `done` rows > 14 days. Binary; no seed. Spec: `../docs/notion-write-behind-outbox-spec.md`; flush mapping: `../store/notion/mapping.md` → "Outbox". |
 | `run-log.md` | modes (Dream/Wrap/Reminders/…) | Local mirror of the 🧭 Run Log (the active store is the record). Seed: `run-log.example.md`; protocol: `../references/memory.md`. |
-| `carry-over.md` | modes | The assistant's running open-loops log (held approvals, follow-ups, flags). Seed: `carry-over.example.md`. |
-| `context-digest.md` | Dream (overwrites) | Nightly condensed digest the morning Brief reads first. Regenerable cache. Seed: `context-digest.example.md`. |
+| `carry-over.md` | `../scripts/carryover_region.py` (the `WRAP_SEED` region, written by the Wrap) + `../scripts/loops.py render --write` (the `GENERATED` region) + hand-written head | The assistant's running open-loops log (held approvals, follow-ups, flags). Seed: `carry-over.example.md`. Three parts, top to bottom: the Wrap's nightly `WRAP_SEED` snapshot (replaced whole, never stacked), a free-text hand-written head (measured, never truncated — `carryover_region.py check`), and the register's `GENERATED` projection. Each region's writer touches only its own span. The Brief only reads it. Spec: `../docs/carry-over-region-spec.md`. |
+| `open-loops.json` | **`../scripts/loops.py` alone** (seed `open-loops.example.json`) | The **open-work register** — one record per unfinished work item (`{schema, last_rendered, items: {<loop-id>: {...}}}`). Each item carries `text`, `audience` (`owner`/`assistant`), `status` (`open`/`in_progress`/`held`/`paused`/`observation`/`observation-complete`, terminal `done`/`dropped`/`abandoned`; `dormant` is derived, never stored), `whose_move` (`owner`/`assistant`/`external`/`unknown`/`both`), `next_action`, `terminal_state` (the event that would close it — the membership test), and the **two judgement columns kept apart on purpose**: `kind_assistant`/`priority_assistant` (the assistant's filing) vs `kind_owner`/`priority_owner` (only the owner's own verbs — `owner-kind`/`owner-priority`/`owner-abandon` — write these). Terminal records are **retained**, never deleted. `loops.py render --write` projects it into `carry-over.md`'s GENERATED region. On the Notion backend a status change also forwards to the item's Tasks row through the outbox (inert until the outbox's task-status op exists). Backed up nightly (`state_backup.FILES`). Spec: `../docs/register-notion-projection-spec.md`, `../docs/observation-gate-spec.md`. |
+| `owi-unknowns-cursor.json` + `owi-unknowns-confirmed.json` + `owi-unknowns-ask.json` | `../scripts/owi_unknowns.py` alone | The **unassigned-work ask** bookkeeping: where the 5-at-a-time batch picker is up to (and whether the owner said stop), which items the owner explicitly answered `Unknown` for (an explicit Unknown IS an answer — never re-asked), and the once-per-Brief-cycle "ask on the first real message" window. Without the Telegram picker module the ask degrades to one numbered plain-text message. No seed. |
+| `owi-resurface.jsonl` | `../scripts/owi_resurface.py log` (Dream), append-only | One row per Dream run: the **positive-resurfacing rate** — owner-move items past the re-ask threshold that the assistant raised vs let slide. Report-only. |
+| `standing-safety.json` | `../scripts/standing_safety.py` alone (`add`/`retire`/`import-digest`) | THE one home for the **READ FIRST standing-safety items** (things never to re-raise cold), each with a `source` and a `retire_when` (a date, `when <decision> lands`, or `standing`). Rendered into every orientation as `## READ FIRST — standing safety items`. `import-digest` is a one-shot migration from a leftover `context-digest.md` on an upgraded install. Backed up nightly. Spec: `../docs/read-first-retirement-spec.md`. |
+| `brief-prestage.json` | `../scripts/brief_prestage.py` alone — `write` from Dream, `read`/`status` from the Brief | The Brief's **pre-staged read-only store inputs** (tasks due, active flags, in-progress projects), snapshotted the night before so the Brief only delta-checks live. Stamped; the Brief treats it as a warm base, never the final word. |
+| `jobs/<id>.json` + `jobs/<id>.log` (+ `<id>.analysis.json`) | `../scripts/jobs.py` (`start` / the detached `__run` shim / `reconcile`) | **Durable background jobs** — "I'll tell you when it's done" as a record rather than a promise. One record per job (`schema: seneschal.job/1` — `status` running/retry-pending/done/failed/timed-out/ended-unknown/cancelled, `argv`, `cwd`, `origin` (who/what session asked, `origin.request.by` = `owner`/`assistant`/`unresolved`), `attempts[]` with each failure's transient/terminal classification, `notified_at` + `notify_delivery` (`landed`/`ambiguous`)). Seeds: `job.example.json`, `job-retry.example.json`; an `--analyze` job's ranked leads land beside it (seed `job-leads.example.json`). The daemon's tick (or, until it is wired, `jobs.py reconcile --send`) pushes the outcome exactly once. Pruned by `jobs.py prune --days 14` (Dream). Spec: `../docs/background-jobs-spec.md`. The cockpit reads it read-only (`GET /api/jobs`). |
+| `job-pushes/<id>.json` + `job-pushes.lock` | `../scripts/job_push_ledger.py`, from exactly one place (`jobs.reconcile`'s push block) | **Which (job, outcome) has already been pushed about** — the gate that enforces exactly-once completion pushes, separately from the job record (which has other writers). An ambiguous send is never re-sent. |
+| `job-drafted-prs.json` | `../scripts/job_pr_draft.py` | PRs a still-running job opened, held as **drafts until that job ends**, then resolved (ready / left draft) before the completion push. |
+| `session-mail/<session_id>.jsonl` + `<session_id>.cursor.json` | `../scripts/jobs.py` (`route_analysis` / the `mail` CLI) | The **pull mailbox**: results addressed to a session that the daemon cannot wake are filed here and read at orientation (`jobs.py mail`, which records the read in the cursor; `--peek` doesn't). Unread mail is never pruned; read mail ages out with `jobs.py prune --mail-days`. Spec: `../docs/job-origin-routing-spec.md`. |
+| `current-turn.json` | the daemon's drainer via `jobs.write_turn_pointer` / `close_turn_pointer` | The **open-turn pointer** — which turn (and who wrote its line) is live, so a job started inside it can stamp `origin.request` without guessing. Stale after 6 h; absent → `unresolved`, never inferred. |
+| `pending-checks.jsonl` | a turn, via `../scripts/pending_checks.py record` / `resolve` | **Pending checks** — append-only: a claim paired with the running job whose result could refute it (`claim`, `falsifier`, `job_id` as the evidence, `claim_ref`), then a `resolved` row (`confirmed`/`refuted`/`inconclusive`). An open check is never pruned; `pending_checks.py prune --days 90` drops resolved history. Seed: `pending-checks.example.jsonl`. Spec: `../docs/session-coupling-spec.md` §6. |
 | `reminders-id-cache.md` | Chat/Reminders (on create/retire) / Dream (reconcile) | Live **page-id table** for the ⏰ Reminders DB — lets a chat ack write `Status = Done` by id with no query. Split out of `../references/` (tracked) so runtime edits never jam the daemon's `pull --ff-only`. Seed: `reminders-id-cache.example.md`; protocol: the ack-by-cached-id notes in `../references/databases.md` (⏰ Reminders section). |
 | `control-queue.json` | `request_control.py` / seneschald-update | Flagged daemon control requests (`restart` / `shutdown`), applied once warm sessions are idle. Seed: `control-queue.example.json`. |
-| `setup-state.json` | `../scripts/setup_state.py` (the /setup wizard's `mark` / `infer`) | The install wizard's **resumability ledger** — one record per setup chapter (`persona`, `store`, `env:<id>`, …): `{status, completed_at?, answers_hash?, artifacts?, summary?, step?}`, statuses `pending`/`in-progress`/`done`/`declined`/`blocked`/`awaiting-auth-restart`/`stale` — so a crashed or partial `/setup` resumes instead of restarting. `infer` self-heals from artifact presence (env-file paths read from `../setup/env-manifest.json`); a corrupt file is set aside as `.bak`, never fatal. Also carries the **`doctor_last`** block — the most recent `/doctor` / verify-chapter pass, counts only (`{at, green, yellow, red, skip}`), stamped by those flows via the module API. **Never holds secret values** — statuses, paths, hashes, and counts only. No seed — regenerated by the wizard. |
+| `setup-state.json` | `../scripts/setup_state.py` (the /setup wizard's `mark` / `infer`) | The install wizard's **resumability ledger** — one record per setup chapter (`persona`, `store`, `env:<id>`, …): `{status, completed_at?, answers_hash?, artifacts?, summary?, step?}`, statuses `pending`/`in-progress`/`done`/`declined`/`blocked`/`awaiting-auth-restart`/`stale` — so a crashed or partial `/setup` resumes instead of restarting. `infer` self-heals from artifact presence (env-file paths read from `../setup/env-manifest.json`); a corrupt file is set aside as `.bak`, never fatal. Also carries the **`doctor_last`** block — the most recent `/doctor` / verify-chapter pass, counts only (`{at, green, yellow, red, skip}`), stamped by those flows via the module API. And the **`checkout`** block — preflight's git-worktree verdict (`{worktree, path, main_checkout, accepted, checked_at}`, written by `../scripts/setup_checkout.py`); `accepted` is the owner's explicit "use this worktree", bound to that path, and `render_units.py --apply` refuses an unaccepted worktree. **Never holds secret values** — statuses, paths, hashes, and counts only. No seed — regenerated by the wizard. |
 | `setup/` | `../scripts/render_units.py` (the `/setup daemon` chapter) | **Rendered per-machine daemon assets** — the launcher locals (`run-presence.local.cmd` / `run-presence.local.sh`, absolute paths pinned + the wizard ledger's model dials substituted; tracked templates in `../scripts/` are never modified), the POSIX merge-detector `run-seneschald-update.local.sh`, the one-elevation `register-tasks.ps1` + its read-back `register-tasks.result.json` (Windows), and the staged systemd units / launchd plists before `--install` copies them to the real user paths. Also the env walker's transient `setup-payload.json` (deleted right after each write). Regenerable — re-render via `/setup daemon` or `render_units.py --apply`. |
-| `seneschald-health.json` | `seneschald-control.ps1` (`-Action Update`) | **Deploy-health heartbeat** — stamped on EVERY updater cycle (a catch-all turns even an unexpected crash into a blocked stamp, so it can never freeze silently at `ok`): `{status: ok\|blocked, reason, detail, branch, head, consecutive_blocked, blocked_since, last_ok, last_alert, updated_at}`. `last_ok` is the watch-the-watcher field; `consecutive_blocked` ≥ 3 (~30 min) arms the owner-facing Telegram alert (re-alerting at most every 6 h). No seed — regenerated every cycle. |
+| `seneschald-health.json` | `seneschald-control.ps1` (`-Action Update`) | **Deploy-health heartbeat** — stamped on EVERY updater cycle (a catch-all turns even an unexpected crash into a blocked stamp, so it can never freeze silently at `ok`): `{status: ok\|blocked, reason, detail, branch, head, consecutive_blocked, blocked_since, last_ok, last_alert, credential_state, credential_detail, credential_restart_for, credential_restart_at, credential_stuck_cycles, credential_last_alert, updated_at}` — every timestamp UTC with an explicit `Z`. `last_ok` is the watch-the-watcher field; `consecutive_blocked` ≥ 3 (~30 min) arms the owner-facing Telegram alert (re-alerting at most every 6 h). The `credential_*` fields are the **login-deploys guard** (`../docs/seneschald-revive-spec.md` §9): the outcome of comparing `~/.claude.json`'s account identity against the one the daemon stamped into `presence.lock`, and the one-restart-per-identity loop guard (`credential_restart_for`). No seed — regenerated every cycle. |
 | `pending-restart` | `seneschald-control.ps1` (`-Action Update`) | Empty marker: code was pulled but `uv sync --frozen` failed, so the graceful restart is **held** (never onto a half-updated env) and retried every updater cycle until the sync succeeds. |
+| `presence-health.json` | `seneschald-control.ps1` (`-Action Update`) | **Daemon-alive heartbeat**, independent of the deploy one: `{status: ok\|down, consecutive_down, down_since, last_alive, last_alert, revivals, revival_window_start, revival_gave_up, updated_at}` (UTC, explicit `Z`). A dead daemon is **auto-revived** first (the decision is `../scripts/seneschald_revive.py`'s: 3 revivals per rolling 60 min, a 90 s settle window, then a latched give-up); the Telegram alert fires only when the revive did not take, gave up, or keeps recurring. No consumer outside the script. No seed. |
+| `seneschald-stopped` | `seneschald-control.ps1` (`-Action Stop`) | Empty **deliberate-stop sentinel**: a stop and a crash both remove the lock, so intent is written, not inferred. While it exists the watchdog never auto-revives. Cleared by `-Action Start` (and by the daemon on a healthy start). |
+| `seneschald-crashloop` | `presence.py` (its self crash-loop guard) | Empty **give-up latch**: the daemon booted too many times too fast and stopped relaunching itself. The watchdog treats it like `seneschald-stopped` (no revive). Cleared by `-Action Start` or the daemon's own sustained-healthy self-heal. |
+| `boot-attempts.json` | `presence.py` (every boot, via `write_lock`) | The rolling window of recent boot instants the crash-loop guard counts. `-Action Start` deletes it with the latch (a human starting the daemon is the clean slate). Unreadable reads as "no prior boots". |
+| `cockpit-enabled` | the owner (`/setup cockpit`) | Empty **cockpit deploy opt-in**: while it exists, every updater deploy runs `uv sync --frozen --extra cockpit` instead of a bare `--frozen` (which would UNINSTALL the cockpit's fastapi/uvicorn). Delete it and the next deploy prunes them. |
+| `health-listener-control.json` | `seneschald-control.ps1` (`-Action Update`, every successful pull) | `{action: restart, reason, requested_at}` — the **health listener's own** restart request, deliberately separate from `control-queue.json`. `health_listener.py`'s poll thread shuts the listener down when `requested_at` is newer than its own start; `run-health-listener.cmd`'s loop relaunches it on the pulled code. Never cleared — the instant comparison makes a stale request inert. |
 | `telegram-offset` | `telegram_poll.py` | Last acknowledged Telegram `update_id + 1`. Delete to replay ~24h. |
 | `discord-offset` | `discord_poll.py` | Last-seen Discord message id (snowflake). Delete to re-seed "from now." |
-| `telegram-thread.json` | `presence.py` | Rolling chat history (last ~20 turns) for continuity across warm sessions — spans Telegram **and** Discord (one thread). |
+| `telegram-threads/<key>.json` | `presence.py` (`append_thread` / `amend_thread`) | Rolling chat history (last ~20 turns) for continuity across warm sessions, **one file per private-chat topic** — `<key>` is the topic's `message_thread_id`, or `main` for the main chat (which Discord and the cockpit share). An unreadable file reads as empty, never as another topic's history. A pre-topics `telegram-thread.json` is migrated once at boot into `main.json` (`migrate_legacy_thread`; an existing `main.json` wins and the old file is renamed `.superseded`). |
+| `telegram-album-hold.json` | `presence.py` (`save_album_hold` / `load_album_hold`) | **Durable album hold** — Telegram album members already acked on the wire but held (≤ 15 s) so N photos become ONE turn: `{groups: [{media_group_id, members: [...]}]}`. Deleted when empty; a restart mid-album reads it back, deletes it, and delivers what it held as one turn. |
+| `vitals.json` | `presence.py` (`maybe_write_vitals`, once a minute) | Daemon health snapshot `{tick_at, reminders_fired_today, reminders_failed_today, last_reminder_fired_at, slots_failed_today, outbox_dead, warm_session}` — `failures.watchdog_status`'s read side. In-memory counters, reset at the owner-local day boundary; a snapshot, not a ledger. |
+| `session-starts.jsonl` | `presence.py` (`record_session_start` before each warm spawn, `mark_session_opened` once the CLI reports an id) | **Why each warm session resumed or started cold** — a `decision` row `{at, kind, resumed, class, why, reason?, context_tokens?, turns_served?}` then an `opened` row `{at, kind, session_id}`. Exactly one warm session at a time, so each decision pairs with the next `opened`. Append-only; spec `../docs/session-continuity-spec.md`. |
+| `restart.request` | `../scripts/request_restart.py` (legacy) | Empty sentinel asking for a graceful reload; folded into `control-queue.json` by the daemon and cleared when applied. |
+| `read-first-shim.json` | `presence.py` (`check_read_first_migration`, once per boot) | The READ FIRST migration shim's own bookkeeping `{schema, consecutive_nonempty_boots, disabled, disabled_at}` — once `standing-safety.json` holds items for two consecutive boots the leftover-digest fallback latches off for good. Irrelevant (never grows) on a fresh install. |
+| `slot-logs/<name>.log` | `presence.py` (each scheduled slot / the reminder seed, truncated per launch) | The latest run's stdout+stderr of each heavyweight slot, read on a failed exit to find a `claude` usage-limit reset time (hold until then) before falling back to exponential backoff. One file per slot name; only the latest attempt matters. |
+| `outbox-nudged.json` + `last-outbox-drain` | `presence.py` (`maybe_nudge_outbox_backlog` / `maybe_drain_outbox`) | Notion backend only: the local date the outbox-backlog nudge last went out (at most one per day), and the stamp of the last spawned outbox drain (a wedged queue must not fork a `claude` every tick). |
+| `sent.jsonl` | `presence.py` under `--stub-send` only | The offline harness's would-be sends `{channel, text, topic?}` — no real channel is touched. Tests/smoke runs only. |
 | `presence.lock` | `presence.py` | Single-instance lock for the daemon: `{pid, started_at, heartbeat}`; stale if the heartbeat is old. |
-| `presence-state.json` | `presence.py` | The daemon's own runtime state — chiefly the **action queue** of inbound messages consumed off the wire but not yet answered — saved after every step + on exit, reloaded on startup so a restart (e.g. `reseneschald` after a PR merge) never drops a message. `{pending: [{channel, text}], last_session_id, updated_at}`. |
+| `presence-state.json` | `presence.py` | The daemon's own runtime state — chiefly the **action queue** of inbound messages consumed off the wire but not yet answered — saved after every step + on exit, reloaded on startup so a restart (e.g. `reseneschald` after a PR merge) never drops a message. `{pending: [{channel, text, attempts, topic?}], last_session_id, last_session?: {id, model, context_tokens, turns_served, ended_at, reason}, updated_at}` — `last_session` is what lets the next spawn resume instead of re-grounding (`resume_verdict`). |
 | `sessions/` | `presence.py` (daemon) / `session_heartbeat.py` (desktop) / `session_stamp.py` (machine-wide hook) | The **session registry**: one small JSON entry per live Claude Code session (`{session_id, pid, source, started_at, last_seen, working_on?, cwd?, branch?, phase?}` — seed: `session-entry.example.json`). `daemon`/`desktop` entries **gate** delivery (the daemon defers non-piercing nudges + skips the comms-peek while one is fresh, ≤ 120 s); `build`/`scheduled` entries are awareness-only ("who's live, on what branch" — also the fail-closed `branch_is_claimed` guard). Entries clear on clean exit and self-prune after 24 h. See `../references/reminders-policy.md` → "Live-session defer." |
 | `seneschal-session.json` | — | **Legacy** phase-1 single-file heartbeat — still *read* as a gate fallback for a transition-era writer; nothing writes it anymore (the `sessions/` registry replaced it). |
-| `session-distillations.jsonl` | `mini_dream.py` (spawned by `session_stamp.py` on SessionEnd) | Append-only **cross-instance memory**: one compact distillate per ended session (salience-laddered — tiny sessions skipped, small ones deterministic, big ones a headless cheap-model `claude -p` distill with deterministic fallback). Surfaces read the tail at orientation; Dream ingests into the RAG index and prunes > 30 days (`mini_dream.py --prune-days 30`). |
+| `session-distillations.jsonl` | `mini_dream.py` (spawned by `session_stamp.py` on SessionEnd) | Append-only **cross-instance memory**: one compact distillate per ended session (salience-laddered — tiny sessions skipped, a `SENESCHAL_SESSION_SOURCE=watch` comms peek never distilled (`SKIP_SOURCES`), small ones deterministic, big ones a headless cheap-model `claude -p` distill with deterministic fallback). **`provenance`** names which writer produced `distillate` — `deterministic-fields` or `llm-excerpt` — and Dream copies it verbatim into the ingest record; `../scripts/provenance_guard.py` archives the first into the RAG index and refuses the second. Both still land in this file. A record predating the stamp is refused at the index, not guessed at. Surfaces read the tail at orientation; Dream ingests into the RAG index and prunes > 30 days (`mini_dream.py --prune-days 30`). |
+| `instructions-loaded.jsonl` | `instructions_loaded.py` (the opt-in `InstructionsLoaded` hook — `settings_merge.py --guard instructions-loaded`) | Append-only log of which `CLAUDE.md` / rules files under this repo entered a session's context, one row per load (`{schema, at, file_path, rel_path, load_reason, session_id, cwd}`). Answers which sub-routers never load and whether an `include` (`@path` import) ever appears — `instructions_loaded.py report`. Records loading, not using. Absent until the owner opts the hook in. |
 | `telegram-message-map.json` | `sentinel.py` (`record_sent_message` — the nudge fire path + `presence.deliver_reply` chat replies) | Bounded map `message_id → {kind, text, reminder_id?, sent_at}` of the assistant's outbound Telegram messages (newest 200), so an inbound **reaction** can be tied back to what it reacted to — it's what lets a same-day 👍 on a tracked nudge auto-ack (`presence.ackable_nudge`) and lets any reaction quote its target. Best-effort context, fail-open. |
 | `telegram-reactions.json` | hand-edited (seed `telegram-reactions.example.json`) | The owner's **reaction → intent vocabulary** (`{"reactions": {emoji: intent}}`). Absent → the code defaults (`presence.DEFAULT_REACTION_INTENTS`) apply; read per poll batch, no restart needed. Variation selectors ignored (❤ = ❤️). See `../scripts/TELEGRAM_SETUP.md` → "Reactions" + `../docs/telegram-inbound-spec.md` §3. |
 | `custom-emoji-cache.json` | `telegram_poll.py` (`resolve_custom_emojis`) | Regenerable **Telegram Premium custom-emoji cache** (`{custom_emoji_id: base_emoji}`) so a repeat Premium reaction resolves without a `getCustomEmojiStickers` round-trip. Pure network cache — no seed, safe to delete. |
 | `inbox/` | `telegram_poll.py --download-dir` (via the daemon's poll) | Landing pad for **inbound Telegram attachments** (`<utc-stamp>-<safe-name>`; filenames sanitized, ≤ ~20 MB per the Bot API). A landing pad, not an archive — Dream prunes files > 30 days (`telegram_poll.py --prune-days 30`). |
-| `cockpit-pipe-token` | `cockpit_pipe.py` (`ensure_pipe_token`, first run) | Auto-generated auth token for the localhost **cockpit pipe** (the daemon's sixth supervised task). Plain text; delete to rotate. |
+| `telegram-poll-trace.jsonl` | `telegram_poll.py` (`record_poll_trace`, every real poll cycle; beside `--offset-file` unless `--poll-trace-file`) | **One line per poll cycle**, written even on the "ok, nothing new" cycle and when `getUpdates` itself raised — `{ts, ok, offset_in, offset_out, update_count, update_ids, committed, error?}`. **Update ids and counts only, never message text.** The answer to "was the daemon polling during that gap?", which every arrival-conditioned trace cannot give. Rotated by `log_rotation.roll_closed` (same size trigger + generation cap as the other rotating logs). No seed. |
+| `telegram-format-fallback.jsonl` | `telegram_send.py` (`log_format_fallback`) | **Every HTML send attempt that did not survive** (`TELEGRAM_FORMAT=markdown`) — one line per affected chunk, `{at, chunk, chunks, delivery, resent, delivered_chunks, error, chars, text}`. `resent: true` is the plain-text fallback working as designed; **`resent: false` is a send that STOPPED** because the failure was ambiguous (Telegram may already have delivered it) — `grep '"resent": false'` is the query. Error strings are token-redacted (`telegram_http.redact`). Append-only, no seed. |
+| `telegram-topics.json` | `telegram_topics.py` (`create_topic` writes, `forget` drops a stale id, `topics_enabled` stamps the detect, `add`/`retire` mint and retire runtime purposes) | **Which private-chat TOPIC each purpose lives in** — `{schema: "seneschal.telegram.topics/1", detect: {enabled, checked_at}, topics: {<purpose>: {message_thread_id, name, created_at, retired?}}}`. The Bot API has **no `getForumTopics`**, so this file is the only record of which topics exist — losing it orphans them (the next send creates a duplicate). Never pruned; the purpose → title table itself is `../references/telegram-topics.json` (else the `.example.json`). No seed. |
+| `telegram-questions.json` | `telegram_ask.py` (`ask`/`ask_grid` write, `resolve` answers, every access prunes) | **Pending question pickers** — `{schema, questions: {<8-hex id>: {question, body, options, multi, recommended, chat_id, message_id, asked_at, selected, answered_at, origin, …}}, expired: [...]}`, plus the grid-picker record shape on the same store. A tap resolves by question id; a question expires after 7 days. A corrupt store is recorded as a failure row and read as empty. No seed. |
+| `tomorrow.json` | `tomorrow_marker.py` (`mark`/`close`/`roll`/`drop`/`prune`; the wrap and lead grids via `telegram_ask`) | **Items marked for tomorrow** — `{schema, items: [{id, text, for_date, status, order, …}]}` keyed by the owner's local day (`owner.dayBoundaryHour`). The Brief reads the day's active items; the wrap grid closes, rolls or drops them. See `../docs/tomorrow-marker-spec.md`. No seed. |
+| `assertions.jsonl` | every send site the assistant speaks through, via `../scripts/mouth.py` `record_assertion` | **The Mouth's said-log** (`../docs/mouth-spec.md`) — append-only record of **what the assistant actually said to the owner**, in the wording it went out in, across every surface and producer. Pruned by `mouth.py prune` (retention in the module). No seed. |
+| `outbound.jsonl` | every producer of *unsolicited* speech, via `../scripts/mouth.py` `enqueue`; drained by the daemon | **The Mouth's dispatch queue** — one `seneschal.outbound/1` object per line; the terminal state is a **second row for the same id**, never a rewrite (many writers, so the file is append-only and the last word for an id wins). `observed_at` is when the fact became true, not when the message was built, so a stale item is sent with its age stated. No seed. |
+| `turns.jsonl` | the daemon's inbound and reply paths, via `../scripts/turns.py` `record_turn` | **Chat-turn capture** — append-only record of what was actually said, **both sides** (`owner` / `assistant`), verbatim; the Mouth's mirror. `!private` turns are tombstoned, not stored. `turns.py prune` exists but retention defaults to keep-everything. No seed. |
+| `promises.jsonl` | `../scripts/promises.py` (`record`/`resolve`) | **The promises ledger** (`../docs/promises-ledger-spec.md`) — append-only record of what the assistant said it would do, folded by id (a resolve is a second row). `list-open` is the unkept-promise query. No seed. |
+| `suppressed-turns.jsonl` | `../scripts/turn_suppression.py` (`record`; `tail`/`count` read) | **Every chat turn the daemon decided not to spend** because a reaction ack's writes had already landed (`../docs/substance-or-silence-spec.md`) — `{schema, at, channel, reminder_id, withheld, redacted, verdict?}`, **the withheld line verbatim** (a tombstone for `!private`). A suppression nobody can count is how a silent-drop defect ships, so it is append-only with no prune. No seed. |
+| `channel-declare-log.jsonl` | `../scripts/channel_declare.py` (`record_outcome`, once per Telegram reply) | **Observe-only log of `[[channel:…]]` routing** (`../docs/message-routing-spec.md`) — `{at, schema, turn_id, channel, inbound_purpose, declared_purpose, resolved_purpose, retries_used, outcome}`. Decides nothing; it is the evidence the enforce decision reads. No seed. |
+| `cockpit-pipe-token` | `cockpit_pipe.py` (`ensure_pipe_token`, first run) | Auto-generated auth token for the localhost **cockpit pipe** (the daemon's `cockpit_task`). Plain text; delete to rotate. |
 | `warm-transcript.jsonl` | `presence.py` (the chat-event tee) via `cockpit_pipe.py` | Capped **ring buffer** of digestible warm-session `chat.event`s (turn_started / assistant_output / tool_use / turn_done, correlated by `turn_id`) so a (re)connecting cockpit client can backfill. Regenerable; trimmed in place (~2000 events). |
+| `transcripts/YYYY-MM-DD.jsonl` | `../scripts/transcript_archive.py` (`archive_event`, called from `cockpit_pipe.append_transcript_event`; `backfill_from_ring` at daemon boot) | **Durable dated transcript archive** — byte-identical copies of the `warm-transcript.jsonl` rows, one file per owner-local date, never rewritten; keep everything (nothing calls `prune`). Each row's `ts` stays authoritative. |
+| `transcript-size-alert.json` | `../scripts/transcript_size_watch.py check` | One-shot **archive-size marker** `{schema, fired_at, threshold_bytes, bytes, bytes_per_day, days, message}`, written only after the notice send lands; re-arms when the threshold changes or the file is deleted. The sensor never deletes transcripts. |
+| `plan-usage.jsonl` | `../scripts/usage_probe.py` only (the daemon's usage tick, or `usage_probe.py read --state-dir` by hand) | **Plan-meter telemetry** — one `seneschal.plan-usage/1` row per reading attempt, append-only, keep everything. Every attempt writes a row; a non-ok/partial row carries no meter fields; nothing is carried forward; `shape_fingerprint` + `parser_version` + `cli_version` detect wording drift; an account block on every outcome. The writer never speaks — `../scripts/usage_health.py` speaks only about instrument failure. Field contract: `../docs/usage-telemetry-spec.md`. |
+| `last-usage-reading` | the daemon's usage tick (`presence.py` `maybe_usage_reading` / `maybe_usage_notice`) | `{at, outcome, week_window_id?, boundaries?, notice?}` — the reading cadence stamp. The `notice` block is the only persisted announcement flag, keyed by the failure episode's derived `started_at` and written only after a send lands; the failure count is never stored. |
+| `accounts.json` | hand-edited (seed `accounts.example.json`) | `{"schema": "seneschal.accounts/1", "accounts": {"<account uuid>": {"label", "email", "note"}}}` — friendly labels for the plan-meter's account block. Only `label` is read (`usage_probe.account_label`); a convenience, never a dependency. |
+| `cockpit-site.pid.json` | `../scripts/cockpit_site.py` (the daemon-supervised cockpit, wired with the daemon tasks) | `{pid, rev, port}` of the supervised cockpit backend; `rev` drives the post-deploy bounce. |
+| `archon-sites.pids.json` | `../scripts/archon_sites.py` (daemon-supervised archon web UIs) | `{archon_id: pid}` a reloaded daemon adopts; bookkeeping only — health is an HTTP probe. |
+| `logs/cockpit.log` | `../scripts/cockpit_site.py` | The supervised cockpit backend's stdout/stderr. |
 | `cockpit-inbox.jsonl` + `cockpit-inbox-seen.json` | cockpit backend (append) / `presence.py` (drain, each scheduler tick) | **Fallback chat inbox** for when the cockpit pipe is down: appended `{id, text, ts, force_fable?}` lines drain into the same action queue Telegram uses (deduped via the seen ledger) — degraded to ~tick latency, never lossy. |
 | `cockpit-audit.jsonl` | cockpit backend (`cockpit/server/control.py`) | Append-only **audit log of every mutating cockpit call** (`{ts, action, detail}`): restart enqueues (REST + WS), model-config and governor-config PUTs. One line per call, win or no-op. Seed: `cockpit-audit.example.jsonl`. |
 | `cockpit-session-secret` | cockpit backend (`cockpit/server/session.py`, first use) | Auto-generated **session-cookie signing secret** (random 32 bytes) for the cockpit's real-auth (`oidc`) mode. Never an env var, never logged; delete to rotate (worst case: everyone gets logged out). |
@@ -45,16 +93,32 @@ carry-over); this directory is the cheap local cache the no-LLM sentinel and the
 | `breakglass-audit.jsonl` | `cockpit/breakglass/supervisor.py` (`append_audit`) | Append-only **break-glass audit log** (`{ts, action, detail}`) — every rung of every attempt, success or failure (start rejected/accepted, phrase wrong/verified, action done/failed). Each line is also pushed to Telegram, so an attempt the owner didn't initiate is visible out-of-band. |
 | `meals.json` | Dream (staged snapshot) | The **meal-plan/meal-idea snapshot** the cockpit's Meals panel reads (`GET /api/meals`) — `{"staged_at", "plans": [{"title","url","summary","tags"}]}`. Optional: written when Dream stages meal plans from the active store; absent → the panel shows an honest empty state. |
 | `model-config.json` | cockpit / `model_config.py` CLI (seed `model-config.example.json`) | The two **model dials**: `warm_model` (wins over `--model` at every warm-session spawn — `presence.resolve_warm_model`) and `max_routable_model` (the live ceiling on Fable delegation; gates the router's fable arm + `fable_delegate.py`). |
-| `governor-config.json` + `governor-ledger.jsonl` + `governor-alert-state.json` + `governor-inflight.json` | `governor.py` (Oikonomos; config hand-edited, seeds `governor-*.example.*`) | The **budget governor**: per-model token budgets/quotas (config), the append-only spend ledger (each warm turn's usage is metered in by `presence._governor_meter_turn_usage`), the per-knob alert dedupe state, and delegation-concurrency inflight marks. Fail-open — a governor hiccup never breaks a turn. |
-| `pending-approvals.json` | brain | Held drafts awaiting approval (local mirror of the carry-over record). |
+| `governor-config.json` + `governor-ledger.jsonl` + `governor-alert-state.json` + `governor-inflight.json` | `governor.py` (Oikonomos; config hand-edited, seeds `governor-*.example.*`) | The **budget governor**: per-model token budgets/quotas (config), the append-only spend ledger (each warm turn's usage is metered in by `presence._governor_meter_turn_usage`; newer rows carry `billable_tokens` + the raw `components`, the `basis` they were decided on, `metered`, and the `turn_id` / `levers` join keys `../scripts/spend_levers.py` reports over), the per-knob alert dedupe state, and delegation-concurrency inflight marks. Fail-open — a governor hiccup never breaks a turn. |
+| `pending-approvals.json` | `../scripts/pending_approvals.py` (`add` / `list` / `resolve` — the ONE writer; email and Slack triage both call it, and `send_gate.py` writes only through it: `grant`/`revoke` mint/flip rows via `add`+`resolve`, and the gate's spend is a `resolve` that stamps `gate_consumed_at`) | Held drafts awaiting approval (local mirror of the carry-over record) **and THE approval store every outbound send is gated on** — one store, never a second. Schema below. |
+| `send-recipients.jsonl` | `../scripts/send_recipients.py` (`record`), called from every outbound call site — `proton_send.py`, `gmail_api.py send`/`send-draft`, `gcal_api.py create-event`/`delete-event`, `push_sms.py`, `push_call.py`, `discord_send.py` | Append-only **non-content send ledger** — one line per real send attempt, `{at, channel, recipient_class[, gate]}` where `recipient_class` is `owner` / `third_party` / `unknown`, **never the address, number, handle, subject or body**. Answers "who did an outbound send actually reach", which no transcript does; `send_gate.py blast-radius` reads it back. `record()` never raises. Schema below. No seed (an empty file is the healthy fresh state); retention not yet built. |
+| `merge-approvals/` | `../scripts/merge_guard.py` (`record_approval` — its one caller is the daemon's Approve-tap handler; the hook spends it) | **Single-use merge approvals** — one file per `(repo, pr)` (`<owner>__<name>--<pr>.json`) bound to the exact head SHA the owner approved, with a TTL. A new push, another repository or a spent record never authorizes a merge. `../scripts/MERGE_GUARD_SETUP.md`. No seed. |
+| `merge-ask-log.jsonl` + `merge-approval-events.jsonl` | `../scripts/merge_guard.py` (`record_ask` / the approval and refusal paths) | Append-only: every approval picker sent (`(repo, pr, head_sha, question_id)` — the dedupe that keeps one question per head) and every approval recorded, spent or refused. No seed. |
+| `pr-red-notify-log.jsonl` | `../scripts/pr_red_notify.py` (called by `pr_sweep.sweep`) | One row per red-CI notice sent to the owner, bound to `(repo, pr, head_sha)` so a red head is announced once, never re-nagged. A plain notice, never a picker. No seed. |
+| `pr-repair-log.jsonl` + `pr-auto-repair-off` | `../scripts/pr_repair.py` | The rebase/conflict-repair ledger (`detected` / `repair_launched` / `repair_refused` / … rows, which also bound the repair ceiling), and an empty **off switch**: while `pr-auto-repair-off` exists, no repair or rebase runs. `../docs/concurrent-pr-collisions-spec.md`. No seed. |
+| `query-shape.jsonl` | `../scripts/query_shape_hook.py` (a PostToolUse hook; **Notion backend only**) | Report-only fire log: one row per Notion query the hook annotated (a `LIMIT` with no `ORDER BY`). Never written on other backends. `../scripts/QUERY_SHAPE_SETUP.md`. No seed. |
 | `last-peek` | `presence.py` / `sentinel.py` | Timestamp of the last comms-peek (gates the peek cadence). |
 | `slots.json` | `presence.py` | Per-slot last-fired **local** date (`{name: "YYYY-MM-DD"}`) for the daemon's internal Brief/Wrap/Dream/Journal scheduler — including the once-per-day exact-time reminder **seed** under the `reminders-seed` name (`maybe_seed_day`'s date-rollover guard; stamped only on the seed run's clean exit). Fire-once-per-day guard. |
 | `rolls.json` | `presence.py` (`reminders_roll.py`) | Last-refill **local** date (`{"refilled": "YYYY-MM-DD"}`) for standing every-N-hours reminder **rolls** — the daemon regenerates each roll's day of nudges once per local day (future-only, idempotent). See "standing rolls" below + `../references/reminders-policy.md`. |
 | `quiet.json` | Chat mode (`quiet_set.py`) | Active **do-not-disturb window** (`{until, set_at, set_by, reason}`, UTC). While `now < until` the daemon **drops** every due nudge that doesn't pierce (⭐ High and below); `Call Me` + `🚨`/`🛑` Critical-and-above still fire. Absent = not quiet. `quiet_set.py --clear` lifts it. See `../references/reminders-policy.md` → "Quiet window." |
-| `nudge-stagger.json` | `sentinel.py` (`check_reminders`) | Instant of the last **non-piercing** nudge fired (`{"last_nonpiercing_fire": ISO-UTC}`) — the **catch-up stagger** clock. A released backlog fires ≤ 1 non-piercing nudge per pass, ≥ 15 min apart, so it drips instead of walling; piercing items (`Call Me`/Critical/meds) skip it. Absent/broken → fire immediately (fail-open). See `../references/reminders-policy.md` → "Catch-up stagger." |
+| `nudge-stagger.json` | `sentinel.py` (`check_reminders`) owns `last_nonpiercing_fire`; `reminders_dequeue.py` (every ack, via `reminders_acks.record_ack_instant`) owns `last_ack_at` — both merge through `reminders_acks.save_stagger_state` | `{"last_nonpiercing_fire": ISO-UTC, "last_ack_at": ISO-UTC}` — the **catch-up stagger** clock plus the **ack-advance** stamp. A released backlog fires ≤ 1 non-piercing nudge per pass, ≥ 15 min apart, so it drips instead of walling; piercing items (`Call Me`/Critical) skip it. An ack newer than the last fire, once ≥ 2 min old, releases the hold early. Absent/broken fire clock → fire immediately (fail-open); absent/broken `last_ack_at` → no advance (fail-safe). See `../references/reminders-policy.md` → "Catch-up stagger." |
+| `reminder-suppressions.jsonl` | `../scripts/reminder_suppressions.py` (`record()`, called by `sentinel.check_reminders` at the staleness-suppression site) | Append-only **staleness-suppression ledger** — one row per nudge the staleness cutoff consumed without delivering (`{at, id, reminder_id, text, due_at, late_sec, presence_held_sec, stagger_held_sec}`). `record()` never raises. The EOD Wrap folds `count_today` into Slipped. No seed. |
+| `seed-log.jsonl` | `../scripts/reminders_seed.py` (`_note_seeded`, via `memory_write.append_text`) | One line per ⏰ row seeded per day (`{day, reminder_id, slug, added, at}`, plus `no_ladder`/`importance` for a High-and-above row seeded without `Nag Until Done` and `premise_review_due`/`premise_review_question` when due). `reminders_seed.py --audit-day` compares today against each row's own history to report a silently skipped row. Fail-open. No seed. |
+| `reminder-premise-reviews.json` | `../scripts/reminder_premise_track.py` (`mark_reviewed`, via `stateio`) | `{"schema", "reviewed": {reminder_id: consecutive_misses}}` — the miss count each row was last asked "still a thing?" about, so the same streak doesn't ask again until it climbs another threshold. Missing/corrupt → reads as never asked (one redundant question, never silence). See `../docs/reminder-premise-spec.md`. |
+| `watch-gate.jsonl` | `../scripts/reminders_acks.py` (`log_watch_gate`, called by the outbound Telegram path) | Append-only **Watch-send verdict log** — every Watch escalation, blocked AND allowed, with the gate that decided (ack-today, runtime ack, dedupe, reconcile) and its fact key. Read back by the dedupe (`watch_duplicate_blocked`), `watch_ack.py` and `watch_reconcile.py`. Never raises. No seed. |
+| `watch-acks.json` | `../scripts/watch_ack.py` (`ack` / `unack`, via `stateio`) | The owner's runtime **"that's handled"** acks for arbitrary Watch topics, keyed by fact key; each expires (7 days by default). The outbound gate consults it so an acked fact stops escalating. No seed. |
 | `last-signal.json` | `sentinel.py` | Verdict of the last sentinel one-shot (debug / observability). |
+| `failures.jsonl` | `../scripts/failures.py` (`record()`, called from inside an already-degraded `except` branch) | Append-only **failure breadcrumbs** — `{at, site, kind, detail}` (detail ≤ 500 chars) for a failure that would otherwise be swallowed by a fail-open handler. `record()` never raises. Read with `failures.tail()` / `count_since()`. No seed. |
+| `dream-steps.json` | `../scripts/dream_steps.py` (`record`, called by the worker that did the step: `rag_index.py` → `2b`, `state_backup.py` → `2g`, `observation_gate.py scan` → `2i`, `salience_rollup.py` → `rollup`) | Dream's **step ledger**: per step `{last_ok, last_skip?, consecutive_skips, note?, created}` plus `_created` (the ledger's birthday) and `_nudged` (the last local day a stale-steps nudge went out). `dream_steps.py status` shows every step's age; `check` exits 1 when an owned step is overdue. A skip is recorded explicitly (`record <step> --skip --reason …`), never left to prose. Tolerant of a corrupt file (reads empty). No seed. |
+| `<stem>.backup-YYYYMMDD-HHMM<ext>` | `../scripts/state_backup.py` (Dream step 2g) | **Rotating byte-copies** of the irreplaceable, wholesale-rewritten files (`state_backup.FILES`: carry-over, run-log, the open-work register, the standing-safety store, reminders, acks, id cache, a leftover retired digest, and a few hand-edited configs) — 7 per file by default; an unchanged file is not re-copied. The prune only ever touches this exact name shape. Restore by copying one back over the live file. |
+| `notes/YYYY-MM-DD.md` | `../scripts/notes.py add` | **Ad-hoc, witness-only notes** — one file per owner-local activity day (cut at `owner.dayBoundaryHour`), appended via `memory_write.append_text`, never rebuilt. For asides with no closing event that don't belong in `carry-over.md`. `notes.py list` reads the last N days; `notes.py prune --days 90` deletes old dated files. |
 | `metrics.jsonl` | modes (Trace/Observability advisor) | Append-only per-turn metrics the **Observability advisor** emits (one JSON object per line). Feeds Dream's weekly graduation rollup. Seed: `metrics.example.jsonl`; schema below; see `../references/advisor-chain.md`. |
-| `router-log.jsonl` | `presence.py` (Router advisor, shadow + fable arm) | Append-only per-inbound-message verdicts from the front-door **Router advisor**, TWO arms sharing this one log (distinguished by `arm`): the **triage arm** (`arm: "triage"`) running in **shadow mode** — trivial vs escalate, log-only, zero behavior change, gathering accuracy evidence before a phase-2 local-handling flip — and the **fable arm** (`arm: "fable"`, v3) — standard vs Fable-level, gated on the live `max_routable_model` ceiling admitting Fable (never even calls Ollama otherwise), whose "fable" verdict rides into the warm session's prompt as a hint LINE (not purely observational, unlike the triage arm). Both use `scripts/router.py`, model `qwen3.5:4b`. Seed: `router-log.example.jsonl`; schema below; setup: `../scripts/ROUTER_SETUP.md`. |
+| `router-log.jsonl` | `presence.py` (Router advisor, shadow + fable arm) | Append-only per-inbound-message verdicts from the front-door **Router advisor**, TWO arms sharing this one log (distinguished by `arm`): the **triage arm** (`arm: "triage"`) running in **shadow mode** — trivial vs escalate, log-only, zero behavior change, gathering accuracy evidence before a phase-2 local-handling flip — and the **fable arm** (`arm: "fable"`, v3) — standard vs Fable-level, gated on the live `max_routable_model` ceiling admitting Fable (never even calls Ollama otherwise), whose "fable" verdict rides into the warm session's prompt as a hint LINE (not purely observational, unlike the triage arm). Both use `scripts/router.py`, model `qwen3.5:4b`. Seed: `router-log.example.jsonl`; schema below; setup: `../scripts/ROUTER_SETUP.md`. Health check: `python ../scripts/router.py check-fallback-rate --log router-log.jsonl --filter-field arm --filter-value triage` (exit 1 when the trailing window is mostly 0.0-confidence fallbacks). |
+| `interleave-log.jsonl` | `presence.py` (the mid-turn gate), via `../scripts/interleave.py` `record_arrival` / `record_resolved` / `record_mcp_possibly_landed` | **Mid-turn interleave log** — append-only: one `interleave.arrival` row per message that arrived while a turn was already in flight (the relevance gate's `layer`/`verdict`/`confidence`/`reason`, `typed`, `fold_depth`, `verdict_latency_sec`, `turn_still_live`), a second `interleave.resolved` row (joined by `arrival_id`) when that turn ends (`turn_remaining_sec` — negative when the verdict landed late — and `arrived_offset_frac`), and an `interleave.mcp_possibly_landed` row per live-mode fold that cut an MCP call. Never rewritten; `interleave.py prune` exists but nothing calls it. Read with `interleave.py stats` / `diagnose`. No seed. Spec: `../docs/mid-turn-interleave-spec.md` §4.3. |
 | `forgetting-events.jsonl` | Chat / Brief / Dream (the reasoning loop) | Append-only **forgetting-event log** (salience Phase 2): one line each time the assistant failed to recall/surface something *and there was a reaction* — the emotional-weight axis of `salience = frequency × weight`. Written organically, **never fished for**. Seed: `forgetting-events.example.jsonl`; schema below; policy: `../references/salience.md`. |
 | `ablation-judgments.jsonl` | Chat (via `scripts/ablation_log.py`) | Append-only **memory-ablation A/B verdicts** (salience Phase 4c) — the human-judged **oracle** the cheap salience proxies calibrate against: the assistant answered a sampled recall turn twice (memory *with* vs *withheld*, blind where practical), the owner picked the better answer **and said why**. Seed: `ablation-judgments.example.jsonl`; schema below; protocol: `../references/salience.md`. |
 | `rag-index.sqlite` | `scripts/rag_index.py` (Dream refresh) / `rag_query.py` (access counters) | Local **semantic RAG index** (Retrieval advisor, phase B): embedded chunks of the assistant's prose corpus (journal/notes/run-log) for semantic recall. Regenerable cache — rebuild with `rag_index.py --rebuild --local`. Also carries the **salience-learning** data (observe-only "what's safe to forget" experiment): `disposable`/`salience_cat`/`predicted_at` tags on chunks + the `salience_access` ledger — which is **measurement, not cache** (deliberately preserved across `--rebuild`; counters key on deterministic chunk ids). Schema below. Binary; no seed. Setup: `scripts/RAG_SETUP.md` + `scripts/SALIENCE_SETUP.md`. |
@@ -63,8 +127,8 @@ carry-over); this directory is the cheap local cache the no-LLM sentinel and the
 | `projects-map.md` | `scripts/rag_projects.py` (overwrites) | Human-readable **where-everything-lives map**: local projects (path, branch, last commit, about) + GitHub-only repos. The cheap orientation read for "where is project X?"; do not hand-edit. |
 | `health.db` | `scripts/health_import.py` | Local **Samsung Health cache**: sleep sessions + stages, heart rate, stress, SpO₂, skin temperature, steps, meds, weight, parsed out of the export zip. Timestamps are naive-UTC + `tz_offset_min` (Samsung stores UTC, **not** wall clock — reading them as local shifts everything by the local UTC offset; see `../scripts/HEALTH_SETUP.md`). Regenerable cache; the export is cumulative, so delete and re-import any time. Binary; no seed. |
 | `health-dashboard.html` | `scripts/health_dashboard.py` | Rendered **sleep & health dashboard** — self-contained HTML (inline CSS + generated SVG, no CDN), openable straight from disk. Centrepiece is the actigram: one row per night, every sleep session drawn where it actually happened. Regenerable from `health.db`. |
-| `presence.db` | `scripts/presence_import.py` (via the listener's `/presence-ingest`) | Local **presence event store** (Phase 1): geofence enter/exit, activity transitions, sleep/wake — the *edge* log, consumed once-per-transition by the rules layer against a watermark. **Coordinates never land here** — the wire carries only place name + transition. Naive-UTC + `tz_offset_min`. Regenerable cache; binary, no seed. **Pruned to ~30 days nightly in Dream** (`presence_import.py --prune-days 30`). See `../scripts/presence_common.py`. |
-| `presence-context.json` | `scripts/presence_import.py` (recomputed each ingest) | The derived **level** snapshot — `{at_place, activity, asleep, since, updated_at}` — answering "where / what / asleep is the owner *now*" so the daemon's suppression gate reads it cheaply. Regenerated from `presence.db` on every event; no seed. |
+| `presence.db` | `scripts/presence_import.py` (via the listener's `/presence-ingest`) | Local **presence event store** (Phase 1): geofence enter/exit, activity transitions, sleep/wake — the *edge* log, consumed once-per-transition by the rules layer against a watermark. **Coordinates never land here** — the wire carries only place name + transition. Each row records its observing device (`source`, default `phone`; added to older stores by an idempotent migration). Naive-UTC + `tz_offset_min`. Regenerable cache; binary, no seed. **Pruned to ~30 days nightly in Dream** (`presence_import.py --prune-days 30`). See `../scripts/presence_common.py`. |
+| `presence-context.json` | `scripts/presence_import.py` (recomputed each ingest) | The derived **level** snapshot — `{at_place, activity, asleep, activity_source, sleep_source, since, updated_at}` (the `*_source` fields name the observing device, `phone`/`watch` — provenance only) — answering "where / what / asleep is the owner *now*" so the daemon's suppression gate reads it cheaply. Regenerated from `presence.db` on every event; no seed. |
 | `presence-feed.ndjson` | `scripts/health_listener.py` (`/presence-ingest`) | Verbatim archive of every presence batch the phone POSTs (sibling of `health-feed.ndjson`). Append-only; replayable into `presence.db`. |
 | `presence-automations.json` | hand-edited (seed `presence-automations.example.json`) | **Phase 5** config — the owner's context-edge → Home Assistant automations for `scripts/presence_actions.py`. Each has an `on` trigger + a `call`; `approved:true` fires act-low, else draft-and-hold; `failsafe:true` stays ask-high always. **Inert until HA is stood up** (`ha.env`) and the daemon hook is enabled — see `../scripts/HA_SETUP.md`. |
 | `telegram-inbox.json` | — | **Legacy/unused.** Old sentinel inbox-stash; the presence daemon consumes Telegram directly now. |
@@ -180,8 +244,10 @@ switch to a REST-drainer). Fail-**closed**: an entry retries until Notion confir
 outbox (
     id               TEXT PRIMARY KEY,     -- enqueue-time uuid4; FIFO tiebreak with created_at
     idempotency_key  TEXT NOT NULL UNIQUE, -- dedup: a repeat enqueue is a no-op; ack:<row>:<date>,
-                                           --   medlog:<intent>, runlog-final:<row>, rstatus:<row>:<date>
+                                           --   medlog:<intent>, runlog-final:<row>, rstatus:<row>:<date>,
+                                           --   task_status:<page>:<status>
     op               TEXT NOT NULL,        -- ack_reminder | med_log | run_log_finalize | reminder_status
+                                           --   | task_status
     target_kind      TEXT NOT NULL,        -- 'page' (update a row) | 'db' (create a row in a collection)
     target_id        TEXT NOT NULL,        -- ⏰/Run-Log page id, or the collection id to create in
     payload          TEXT NOT NULL,        -- JSON: the logical fields for this op (not raw API JSON)
@@ -191,15 +257,26 @@ outbox (
     created_at       TEXT NOT NULL,        -- ISO-UTC
     last_attempt_at  TEXT,
     last_error       TEXT,                 -- trimmed message from the most recent failure
-    notion_page_id   TEXT                  -- written back on success (esp. for creates)
+    notion_page_id   TEXT,                 -- written back on success (esp. for creates)
+    resolution       TEXT,                 -- NULL = landed normally | superseded | retracted (no write)
+    revived_from     TEXT,                 -- the pre-revival created_at, kept when a revival resets it
+    dead_letter_kind TEXT                  -- caller_error_suspected | permanent | retries_exhausted |
+                                           --   unclassified (NULL on rows dead-lettered before it existed)
 )
 ```
+
+The last three columns are added by an idempotent, additive migration in `connect()`, so an older
+store upgrades in place without touching any row.
 
 **Lifecycle:** `pending` → (drain claims → `inflight`, attempts++) → `done` on Notion-confirm, or back to
 `pending` with a future `not_before` on a transient failure, or `failed` (dead-letter) after
 `MAX_ATTEMPTS` (8) or a permanent 4xx. A crashed drainer's stale `inflight` claim is reclaimed to
-`pending` after 5 min. Dead-letters persist until a human resolves them; Dream prunes `done` older than
-14 days (`outbox.py prune`). Idempotency: updates (acks/status/finalize) converge to the same target
+`pending` after 5 min. Two write-free resolutions also rest in `done`: `superseded` (a newer ack for the
+same ⏰ row is already the truth — swept by `outbox.py pull`/`resolve`) and `retracted` (cancelled on
+purpose — `outbox.py retract`, reason required). Neither counts as landed. Re-enqueueing a `failed` or
+`retracted` key **revives** it as a fresh intent (`created_at` reset, old value in `revived_from`).
+Dead-letters persist until a human resolves them; Dream prunes `done` older than 14 days
+(`outbox.py prune`). Idempotency: updates (acks/status/finalize) converge to the same target
 state, so replay is safe; creates (med rows) use a per-dose intent key + same-txn `notion_page_id`
 write-back to shrink the crash-after-create window. Inspect with `python ../scripts/outbox.py status`.
 
@@ -362,11 +439,11 @@ The companion columns on `chunks` — `disposable` (`0` normal · `1` predicted-
 retrievable · `2` approved-forgotten, the gated soft prune), `salience_cat`, `predicted_at` — are
 migrated in place by `rag_common.connect()` (idempotent). Nothing writes `2` automatically.
 
-## `telegram-thread.json` schema
+## `telegram-threads/<key>.json` schema
 
 Rolling chat history the presence daemon keeps for continuity *across* warm sessions (within a session,
-the live `claude` process is the context). Capped to the last ~20 turns; seeded into the grounding of a
-freshly-spawned session.
+the live `claude` process is the context), one file per topic (`main.json` for the main chat). Capped to
+the last ~20 turns; seeded into the grounding of a freshly-spawned session for that topic only.
 
 ```json
 [
@@ -377,26 +454,99 @@ freshly-spawned session.
 
 ## `pending-approvals.json` schema
 
-Local mirror of the held drafts in the carry-over record (the system of record). The brain writes these
-when it drafts something ask-high; the owner approves/rejects via chat, Telegram, or a Notion comment, and
-the brain flips `status` and executes. See `../references/memory.md` for the full loop.
+Local mirror of the held drafts in the carry-over record (the system of record). Email and Slack triage
+draft something ask-high and call `../scripts/pending_approvals.py add` to hold it — **the one writer
+this file has** (never hand-append, never compute the `a<N>` id by reading the file yourself). The owner
+approves/rejects via chat, Telegram, or a store comment, and the same script's `resolve` verb flips
+`status` before the assistant executes. See `../references/memory.md` for the full loop.
 
-**Base fields (every kind):**
+**Top-level shape — versioned:**
 
 ```json
-[
-  {
-    "id": "a3",                       // short, stable — so a one-word reply ("send a3") is unambiguous.
-                                      //   ONE id space across email/slack/calendar (a<N>).
-    "kind": "email",                  // email | slack | calendar_response | notion_write | archon
-    "channelRef": "<thread/event id>",
-    "summary": "Reply to Alex re: design feedback",
-    "bodyPreview": "Hi Alex — thanks for the…",
-    "created_at": "2026-06-29T18:20:00Z",
-    "status": "pending"                // pending | sent | rejected | failed | approved
-  }
-]
+{
+  "schema": "seneschal.pending-approvals/1",
+  "approvals": [
+    { "...": "one entry per the base/kind-specific shape below" }
+  ]
+}
 ```
+
+- **Why versioned:** the send gate (`../scripts/send_gate.py`) reads this file from every outbound
+  chokepoint, so its shape is a contract between several writers and a reader — a version field is what
+  lets a future shape change be detected instead of silently misread.
+- **Migration — a bare array (no `schema` field) is the older shape.** `pending_approvals.py`'s reader
+  tolerates it unconditionally; its writer always stamps the current `schema` on every save. **One round
+  trip through the module — the very next `add`/`resolve` — upgrades an old file in place.**
+- **A file that fails to parse, or parses to neither shape, is refused (`CorruptStore`) rather than read
+  as empty** — treating corruption as "no drafts held" would let the next write atomically replace
+  real-but-malformed content with a list holding only the new entry.
+
+**Base fields (every kind, inside `approvals[]`):**
+
+```json
+{
+  "id": "a3",                       // short, stable — so a one-word reply ("send a3") is unambiguous.
+                                    //   ONE id space across email/slack/calendar (a<N>), stamped by
+                                    //   pending_approvals.add() — never set by the caller.
+  "kind": "email",                  // email | slack | calendar | calendar_response | sms | call | discord
+                                    //   | notion_write | archon
+  "channelRef": "<thread/event id>",
+  "summary": "Reply to Alex re: design feedback",
+  "bodyPreview": "Hi Alex — thanks for the…",
+  "created_at": "2026-06-29T18:20:00Z",   // stamped by add() — never set by the caller
+  "status": "pending"                // pending | sent | rejected | failed | approved | revoked — stamped
+                                      //   "pending" by add(); every later transition is resolve()
+}
+```
+
+**What the send gate reads and writes (`../scripts/send_gate.py`; host steps `../scripts/SEND_GATE_SETUP.md`):**
+
+- **Only a row with `status: "approved"` is an approval.** On the owner's `send a<N>` the triage skills
+  run `resolve a<N> --status approved` BEFORE the send; the gate matches an `approved` row of the same
+  `kind` whose recipient tokens (`to`/`cc`/`bcc`/`recipient`/`recipients`, `draftId`, `eventId`, or the
+  channel part of a `slack:<channel>[:<ts>]` `channelRef`, all lowercased) COVER every non-owner
+  recipient of the send. `pending` is not an approval.
+- **Single-use rows are spent on the way through:** the gate stamps `gate_consumed_at` (UTC) and
+  `gate_channel` (which chokepoint spent it — `proton_email`, `gmail_send`, `hook:<tool>`, …) via
+  `resolve` and never matches that row again; `status` stays `approved` until the caller resolves
+  `sent`/`failed` after the network call.
+- **Standing rows** — `{kind, to, status: "approved", standing: true, reason, granted_by,
+  granted_at[, expires_at]}`, minted only by `send_gate.py grant --standing` — cover their recipient on
+  every send and are never spent; `expires_at` (UTC, `YYYY-MM-DDTHH:MM:SSZ`) lapses them; `revoke` flips
+  `status` to `revoked` with `revoked_at`/`revoked_reason`. A single-use `grant` (no `--standing`) is the
+  same row without the flag — a one-off the owner directed in chat with no held draft. A pre-cleared
+  recipient's address lives here, in gitignored state, never in a tracked file.
+- **Purpose-scoped standing rows** — a standing row with `purpose: "<slug>"` and `to: "*"`, minted only by
+  `send_gate.py grant --kind K --purpose <slug> --standing`. It covers ANY recipient of that kind, but
+  only a send the caller LABELS with that purpose — and the hook takes the label only from a detector
+  that proves the act (none ship with the framework). The recipient match skips every row carrying
+  `purpose`, so such a row can never widen an unlabelled send.
+- **`kind`** for the gate's channels: `email` covers Proton and Gmail alike; `calendar` an event's
+  attendees (create) or its event id (delete); `slack` rows match the hook on `channelRef`'s channel id;
+  `sms` / `call` / `discord` match an explicit `--to` / `--channel-id` override.
+
+**Email drafts add these fields** (`kind: "email"`; base fields unchanged):
+
+```json
+{
+  "id": "a9",
+  "kind": "email",
+  "channelRef": "proton:<message-or-thread-id>",   // or the Gmail message/thread id
+  "to": "dana@example.com",
+  "draftId": "r-0000000000000000000",               // Gmail drafts only — what the gate matches send-draft on
+  "summary": "Reply to Dana re: contract renewal",
+  "bodyPreview": "Hi — I'm <assistant>, <owner>'s assistant; they asked me to…",
+  "body": "<full verbatim send text — the assistant always signs (send a9)>",
+  "sources": ["thread"],
+  "created_at": "2026-09-13T22:40:00Z",
+  "status": "pending"
+}
+```
+
+- **Proton is why this entry is not optional:** `proton_send.py --dry-run` builds and prints the
+  message but persists nothing — without this ledger entry a held Proton draft would exist only in the
+  chat transcript and vanish with the session. Gmail's `create_draft` also lands in the owner's own
+  drafts folder; Proton has no such fallback.
 
 - **`status: "approved"`** (additive) = approved-but-not-yet-sent — a session understood the approval but
   lacked hands to execute (the Slack-hands gap); the next capable turn drains it. See
@@ -433,6 +583,41 @@ the brain flips `status` and executes. See `../references/memory.md` for the ful
 > **Daemon Slack access** for executing a Telegram `send a7` lives in `../scripts/slack-mcp.json`
 > (git-ignored; seed `slack-mcp.json.example`), auto-detected by `presence.py` (Q9). Setup:
 > `../scripts/SLACK_MCP_SETUP.md`.
+
+## `send-recipients.jsonl` schema
+
+Append-only **JSON Lines**, one object per send attempt — the non-content record of who an outbound
+send actually reached. Writer: `../scripts/send_recipients.py` (`record`, on `stateio.append_jsonl`).
+
+```json
+{"at": "2026-09-09T22:40:00Z", "channel": "proton_email", "recipient_class": "owner", "gate": {"allowed": true, "reason": "owner", "approval_id": null}}
+{"at": "2026-09-16T12:00:00Z", "channel": "proton_email", "recipient_class": "third_party", "gate": {"allowed": false, "reason": "no-approval", "approval_id": null}}
+```
+
+- **`channel`** names the call site: `proton_email`, `gmail_send`, `gmail_send_draft`,
+  `gcal_create_event`, `gcal_delete_event`, `push_sms`, `push_call`, `discord_send`.
+- **`recipient_class`** is exactly one of `owner`, `third_party` or `unknown` (could not be decided from
+  what the call site has) — **never collapsed into either firm class**; `record()` coerces anything else
+  to `unknown`.
+  - **Email sends** (`proton_email`, `gmail_send`) — `send_recipients.classify_emails` against the
+    owner's own addresses (`owner.email` + `owner.emails` in `../../persona/identity.json`, plus the
+    assistant's own `assistant.email`): `owner` only when every `--to`/`--cc`/`--bcc` address is one of
+    them, `third_party` the moment one is not, `unknown` when no address could be read.
+  - **`gmail_send_draft`** / **`gcal_delete_event`** always write `unknown` — the recipient lives on
+    Google's side (the draft body, the event's attendees) and is not fetched per send.
+  - **`gcal_create_event`** — `owner` when the event carries no `attendees`; otherwise
+    `classify_emails` over the attendee addresses.
+  - **`push_sms` / `push_call` / `discord_send`** — `send_recipients.classify_single_recipient`: `owner`
+    with no explicit override (the owner's own phone / the assistant's private channel); `unknown` for an
+    explicit override that cannot be verified locally. Never `third_party`.
+- **`gate`** — what `send_gate.require_approval` decided: `allowed`, `reason` (`owner` / `purpose` /
+  `standing` / `approved` when allowed; `no-approval` / `no-recipient` / `store-corrupt` / `gate-error`
+  when refused) and the `approval_id` it spent or leaned on. **A refused send still writes a row.** The
+  verdict's own `recipients` list is deliberately not copied in.
+- **The privacy invariant: no address, phone number, handle, subject line or body ever reaches this
+  file** — `record()`'s signature has no field to carry one, and `test_send_recipients.py` asserts it.
+- **`record()` NEVER RAISES, and a call site never lets classification raise into the send** — each
+  classifies inside a `try` that falls back to `"unknown"`. Instrumentation, not the gate.
 
 ## `archive-people.json` schema + `archives/<person>/` layout
 

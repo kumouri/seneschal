@@ -126,11 +126,14 @@ approval surface; can't-fix → **flag-and-hold** with the issue named, never an
   mutable copy with no reliable cleanup on reject (orphaned drafts). The held entry's stored text is the
   **single copy**; on approve it sends **verbatim**. (`slack_send_message_draft` stays available only for
   an explicit *"leave it in my Slack drafts instead"* ask.)
-- **Append to `../../seneschal/state/pending-approvals.json`** with the next stable id from the **single
-  id space** (`a<N>` — one sequence across email/slack/calendar), `kind: "slack"`, `channelRef`
+- **Append via `python ../../seneschal/scripts/pending_approvals.py add`** (fields as JSON on stdin) —
+  **the one writer** `../../seneschal/state/pending-approvals.json` has, shared with Email Triage (never
+  hand-append or compute the id yourself). Give it `kind: "slack"`, `channelRef`
   (`slack:<channel_id>[:<thread_ts>]`), `body` (the verbatim send text), `sources`, `critique_note`,
-  `thread_seen_ts`, `status: "pending"` — schema in `../../seneschal/state/README.md` — and **mirror to
-  the store carry-over** (system of record).
+  `thread_seen_ts` — it stamps `id` (the next stable id from the **single id space**, `a<N>` — one
+  sequence across email/slack/calendar), `created_at`, and `status: "pending"` itself; print its output
+  to read back the new id. Schema in `../../seneschal/state/README.md`. **Mirror to the store
+  carry-over** (system of record).
 - **Surface it:** the triage summary lists every draft in full (step 5); if the owner isn't live, one
   Telegram push per the vital-few rule — *"Drafted a reply to Alex in #team — `send a7` or `drop a7`."*
 - **SSOT staleness note:** if `slack-ssot.md` `Last reviewed:` is > 30 days old, add a one-line
@@ -153,19 +156,29 @@ before approving. Do **not** send.
    after the draft was written (someone answered, the ask changed), **do not send** — re-surface: *"the
    thread moved since I drafted a7 — Alex said X. Still send, revise, or drop?"* A stale reply to a third
    party is worse than a beat of delay.
-2. **Send the stored `body` verbatim** via `slack_send_message` (channel + thread ts from `channelRef`).
-   No re-generation at send time — what the owner approved is exactly what posts.
-3. On success → `status: "sent"`, remove from open carry-over, Run Log trace, Observability `correction`
-   recorded (`approved_as_is` / `edited_before_approve`).
+2. **Record the owner's approval FIRST** — `python ../../seneschal/scripts/pending_approvals.py resolve
+   a7 --status approved`. **This is the row the send gate spends** (`../../seneschal/scripts/send_gate.py`):
+   the `PreToolUse` hook in front of `slack_send_message` (`send_gate_hook.py`, host-registered per
+   `../../seneschal/scripts/SEND_GATE_SETUP.md`) looks for an `approved` row of kind `slack` whose
+   `channelRef` names this channel and refuses the tool call otherwise — a `pending` row is not an
+   approval, and there is no other door.
+3. **Send the stored `body` verbatim** via `slack_send_message` (channel + thread ts from `channelRef`).
+   No re-generation at send time — what the owner approved is exactly what posts. The hook stamps
+   `gate_consumed_at` on a7 as the call goes through (single-use: a second send needs a fresh approval).
+4. On success → `python ../../seneschal/scripts/pending_approvals.py resolve a7 --status sent`, remove
+   from open carry-over, Run Log trace, Observability `correction` recorded (`approved_as_is` /
+   `edited_before_approve`).
 
-**Reject** (`drop a7`) → `status: "rejected"`, remove from carry-over, trace. Nothing was written to
-Slack, so there's nothing to clean up.
+**Reject** (`drop a7`) → `python ../../seneschal/scripts/pending_approvals.py resolve a7 --status
+rejected`, remove from carry-over, trace. Nothing was written to Slack, so there's nothing to clean up.
 
 **Edit before approve (Q7)** — *"change a7 to say …"* / `edit a7: <text>` → revise the body, re-run
-Critique, **re-hold under the same id** with a fresh preview; when the owner then approves, metrics
+Critique, **re-hold under the same id** (`pending_approvals.py resolve a7 --status pending --fields
+'{"body": "...", "critique_note": "..."}'`) with a fresh preview; when the owner then approves, metrics
 record `edited_before_approve`. An edit is never a send.
 
-**Send failure** → `status: "failed"`, **kept in carry-over**, surfaced with the error verbatim. **No
+**Send failure** → `python ../../seneschal/scripts/pending_approvals.py resolve a7 --status failed
+--fields '{"error": "<verbatim error>"}'`, **kept in carry-over**, surfaced with the error verbatim. **No
 automatic retry, ever** — a blind retry risks a double-post. The assistant first **re-reads the channel**
 to check whether the message actually landed, reports what it found, and a fresh `send <id>` re-attempts.
 
@@ -175,8 +188,8 @@ auto-`rejected` with a note at **72 h** (Slack conversations go stale fast).
 ### The Slack-hands gap (daemon)
 
 The daemon's warm Telegram session may **understand** `send a7` but not have Slack tools to execute it.
-When that happens it records `status: "approved"` (approved-but-unsent, kept in carry-over) and says so
-plainly — *"approved — I don't have Slack hands in this session; it'll go out from the next Slack-capable
+When that happens it records `pending_approvals.py resolve a7 --status approved` (approved-but-unsent,
+kept in carry-over) and says so plainly — *"approved — I don't have Slack hands in this session; it'll go out from the next Slack-capable
 run, or open /assistant and say `send a7` there."* Any Slack-capable turn (interactive chat, the next
 Triage pass) drains `approved` entries **first thing**, running the same freshness re-check before
 posting. Wiring the daemon's own Slack MCP (`slack-mcp.json`, auto-detected — Q9) closes the gap so a

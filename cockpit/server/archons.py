@@ -49,16 +49,34 @@ def load_registry() -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def _close_quietly(resp) -> None:
+    """Close a urllib response, best-effort and silent — `_probe`'s contract is that it never raises.
+    (Duplicated rather than imported from `seneschal/scripts/archon_sites.py`'s twin: the cockpit is its
+    own dependency world and doesn't import the daemon's modules — cockpit-spec.md ruling 3.)"""
+    try:
+        resp.close()
+    except Exception:  # noqa: BLE001 — closing is advisory; a probe must never raise
+        pass
+
+
 def _probe(port: int) -> bool:
     """Best-effort reachability check — ANY response (even an error status) counts as reachable; only
-    a connection failure/timeout means "not reachable". Never raises."""
+    a connection failure/timeout means "not reachable". Never raises.
+
+    Both arms close the response, and only AFTER the verdict is decided (so a broken close can't flip a
+    reachable archon to unreachable). This matters on the error arm: an `HTTPError` IS the response (it
+    inherits `urllib.response.addinfourl`), so leaving it unclosed holds its connection until the cycle
+    collector happens to reach it — and because an error status still reads as reachable, every
+    `GET /api/archons` poll would retain one more for an archon answering 4xx/5xx."""
     try:
-        urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=PROBE_TIMEOUT_SECONDS)
-        return True
-    except urllib.error.HTTPError:
+        resp = urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=PROBE_TIMEOUT_SECONDS)
+    except urllib.error.HTTPError as e:
+        _close_quietly(e)
         return True
     except Exception:  # noqa: BLE001 — a probe is advisory; any other failure just reads "unreachable"
         return False
+    _close_quietly(resp)
+    return True
 
 
 def _serving_port(entry: dict):

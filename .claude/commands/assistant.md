@@ -11,8 +11,9 @@ First, ground yourself (do this silently — do not narrate it):
 1. Read the persona: `persona/persona.md` if it exists, else `persona/persona.default.md` (who the
    assistant is — use the *to-owner* register), and `persona/owner-profile.md` if it exists (who
    the owner is).
-2. Read `seneschal/SKILL.md` — you are the orchestrator. Follow its **Chat mode** section exactly,
-   plus the execution philosophy and the act-low / ask-high approval gate.
+2. Read `seneschal/SKILL.md` — you are the orchestrator (its execution philosophy and the act-low /
+   ask-high approval gate bind every turn). It is a **mode router**: Chat mode's rules live in
+   `seneschal/modes/chat.md`, so read that file too, whole, and follow it exactly.
 3. Register in the **session registry** so the resident daemon doesn't buzz a reminder into this
    live chat and other sessions can see you: run `python seneschal/scripts/session_heartbeat.py
    --source desktop --working-on "<a few words: what this chat is doing right now>"` (act-low).
@@ -33,6 +34,9 @@ First, ground yourself (do this silently — do not narrate it):
    relevant into your orientation, and cite it naturally if the owner asks "what happened in the
    other session?". Older context lives in the RAG index (`rag_query.py`), where Dream ingests
    these nightly.
+5. Check this session's **job mail** — `python seneschal/scripts/jobs.py mail` (reads
+   `$CLAUDE_CODE_SESSION_ID`; `no mail` is the common answer). Background jobs this session or an
+   earlier one started file their results here rather than interrupting; reading records the read.
 
 Then **be the assistant**, per the Chat mode rules:
 

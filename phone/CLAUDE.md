@@ -17,9 +17,16 @@ Inbound call → Worker `POST /voice` runs the cheapest-first cascade (`src/scre
    silent timeout — the `<Gather>` uses `actionOnEmptyResult`) is recorded (`recordGateFail`, never
    counting allowlisted contacts). A **silent timeout blocklists on the first strike** (humans mash
    keys; robots say nothing); a **wrong key** gets two strikes of grace.
-4. gate-pass → `<Connect><ConversationRelay>` → the `RelaySession` Durable Object runs the Claude
+4. gate-pass → `<Connect><ConversationRelay>` → the `RelaySession` Durable Object (screener mode) runs the Claude
    conversation as the assistant persona, then transfers / takes a message / marks spam (via Twilio
-   REST), logs to D1, and SMSes the owner.
+   REST), logs to D1, and notifies the owner — **Telegram when configured, SMS only as the fallback**
+   (`src/notify/owner.ts`).
+
+A **live transfer** (a stage-1 allowlisted dial, a `ring_through` post-gate, or a stage-4 connect)
+rings the owner **three times** (12 s each, `/after-bridge?attempt=N`) before voicemail —
+`LIVE_TRANSFER_ATTEMPTS` / `LIVE_TRANSFER_RING_SEC` in `src/twilio/transfer.ts`. Keep the ring time
+**below the owner's cell no-answer-forward timer**, or a missed bridge forwards back into the screener.
+The reminder escalation's cap is a different constant.
 
 **Critical:** the DO uses the **non-hibernating** WebSocket API (`server.accept()`), not
 `state.acceptWebSocket()` — hibernation resets `callSid`/`history` every turn and breaks everything. Don't
@@ -34,8 +41,41 @@ Inbound call → Worker `POST /voice` runs the cheapest-first cascade (`src/scre
   platform default voice. The env overrides it (`ASSISTANT_NAME` / `ASSISTANT_VOICE_ID` /
   `ASSISTANT_TTS_PROVIDER` → `personaFromEnv` in `src/config.ts`); the canonical persona lives in
   `persona/persona.md` at the repo root, and the setup wizard emits these env values.
-- `src/relay/session.ts` — the `RelaySession` Durable Object. `src/twilio/calls.ts` — live-call transfer.
+- `src/persona.ts` also carries **`ownerDemeanor`** — the owner-facing register (crisp, warm chief of
+  staff), used only by talk-mode calls; `demeanor` stays the outsider-facing screener register.
+- `src/relay/session.ts` — the `RelaySession` Durable Object. Holds `mode: "screener" | "owner"`
+  (default `"screener"`; a `POST` seed before the WebSocket upgrade — see talk mode below — switches it
+  to `"owner"`), branching the system prompt/tools/turn-engine on it; screener calls are unchanged.
+  **The seed is persisted to `state.storage`, not just instance fields**: the phone rings for several
+  seconds between the seed POST and the ConversationRelay handshake, long enough for an idle DO to be
+  evicted and a fresh instance to fall back to the screener default mid-call — the constructor reloads
+  it via `blockConcurrencyWhile` before any `fetch()` runs. Belt and braces: the talk TwiML also carries
+  a `mode=owner` `<Parameter>`, and `resolveSessionMode` (pure, unit-tested) requires the persisted
+  seed AND that parameter to agree before entering owner mode; either alone falls back to screener,
+  logged loudly. `src/relay/owner-prompt.ts` (owner-mode system prompt, greeting, and its lone
+  `end_call` tool) and `src/relay/owner-conversation.ts` (`runOwnerTurn`, capped at
+  `MAX_OWNER_TURNS`) are the owner-mode siblings of `src/screener/prompt.ts` + `conversation.ts`.
+- `src/twilio/calls.ts` — live-call transfer; `src/twilio/transfer.ts` — the three-attempt loop +
+  `liveTransferTwiml`.
+- **Talk mode.** `POST /push-call` with `{"mode": "talk", "context"?: "..."}` (checked before the
+  scripted-line `text` shape) dials `env.USER_CELL_E164` **only** — `notify/call.ts::placeTalkCall`
+  takes no `to` parameter at all, so there is no way to redirect it — and connects the call to
+  `RelaySession` in owner mode, seeded via a plain `fetch` POST to the Durable Object BEFORE the call
+  is placed (same pattern as `CallEscalation`'s `/start`). `context` is an optional plain-text snapshot
+  of the owner's day (calendar, pending reminders) the caller assembles. Shares the `DAILY_BUDGET_USD`
+  cap with inbound screening (`data/db.ts::sumSpendToday` + `budget.ts::overBudget`, checked before
+  dialing → `402` when over; the call's estimated cost is recorded back on hangup with
+  `outcome_stage`/`verdict` = `"talk"`).
+- `src/notify/owner.ts` — the one door for owner notifications (Telegram else SMS; a failed Telegram
+  send still tries SMS); `telegram.ts` talks to the Bot API directly (the Worker can't reach the
+  daemon) and uploads voicemail audio.
 - `src/notify/call.ts` — outbound reminder calls: `placeCall` (single ring) + `placeEscalationCall`.
+  **Both speak in the persona's voice** when one is configured — `<Say voice="<Provider>.<id>">`,
+  derived from `personaFromEnv` via `twiml.ts::sayVoiceOf` (never a second hardcoded id). Twilio's
+  default voice is a **runtime fallback only**: a create Twilio refuses with the voice is re-placed
+  once with a bare `<Say>`, and an in-call invalid voice is Twilio warning 13511, which speaks the
+  default voice rather than dropping the call (`wrangler tail` / the Twilio debugger show the 13511s).
+  No persona voice set = one plain-`<Say>` request.
 - `src/escalation/escalation.ts` — the **`CallEscalation`** Durable Object: `POST /push-call {escalate:true}`
   re-calls (default every 2 min, ≤15 tries) via a **storage alarm** until the owner presses a digit
   (`POST /push-call/ack`) or the cap is hit. Pure `nextEscalationStep` for the retry decision.
@@ -49,7 +89,9 @@ Inbound call → Worker `POST /voice` runs the cheapest-first cascade (`src/scre
   `DAILY_BUDGET_USD`.
 - **Secrets** (`wrangler secret put`): `ANTHROPIC_API_KEY`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`,
   `TWILIO_NUMBER_E164`, `USER_CELL_E164`, `OWNER_PROFILE`, `CONTACTS_SYNC_SECRET`, `OWNER_PASSWORD` (optional
-  easter-egg). Local copies live in `.dev.vars` (gitignored; see `.dev.vars.example`).
+  easter-egg), `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` (owner notifications; both or neither) +
+  `TELEGRAM_THREAD_ID` (optional topic). Local copies live in `.dev.vars` (gitignored; see
+  `.dev.vars.example`).
 
 ## Workflow
 - **Test:** `npm run typecheck` && `npm test` (vitest; pure logic only — no Workers runtime needed).

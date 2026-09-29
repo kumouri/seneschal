@@ -55,7 +55,7 @@ def now_iso() -> str:
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
-    event_id      TEXT PRIMARY KEY,   -- explicit uuid, else derived kind:label:transition:ts_ms
+    event_id      TEXT PRIMARY KEY,   -- explicit uuid, else derived source:kind:label:transition:ts_ms
     kind          TEXT NOT NULL,      -- geofence | activity | sleep
     label         TEXT NOT NULL,      -- place name | activity name | sleep state (asleep|awake)
     transition    TEXT NOT NULL,      -- enter | exit
@@ -63,11 +63,20 @@ CREATE TABLE IF NOT EXISTS events (
     ts_ms         INTEGER NOT NULL,   -- raw epoch ms (ordering + rule watermark)
     tz_offset_min INTEGER NOT NULL,
     confidence    INTEGER,            -- 0..100 where the phone provides it, else NULL
-    ingested_at   TEXT NOT NULL
+    ingested_at   TEXT NOT NULL,
+    source        TEXT NOT NULL DEFAULT 'phone'  -- the observing device: 'phone' | 'watch'
 );
 CREATE INDEX IF NOT EXISTS ix_events_ts      ON events(ts_ms);
 CREATE INDEX IF NOT EXISTS ix_events_kind_ts ON events(kind, ts_ms);
 """
+
+#: The devices an event may name as its observer (``"source"`` on the wire; default ``phone``). This is
+#: **provenance only**: the rollup below still takes the newest reading of each kind whatever device it
+#: came from. Recording it is what lets a consumer say "your watch says you're walking" rather than
+#: asserting it flatly, and it is the evidence any future source-aware rule would need.
+SOURCE_PHONE = "phone"
+SOURCE_WATCH = "watch"
+SOURCES = (SOURCE_PHONE, SOURCE_WATCH)
 
 
 def connect(db_path: str = DEFAULT_DB) -> sqlite3.Connection:
@@ -76,7 +85,21 @@ def connect(db_path: str = DEFAULT_DB) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    _migrate(conn)
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Additive, idempotent column migrations.
+
+    ``CREATE TABLE IF NOT EXISTS`` does nothing to a table that already exists, so a new column has to be
+    added explicitly — and a live ``presence.db`` can hold thousands of real events, so recreating it is
+    not an option. Existing rows correctly default to ``'phone'``: everything logged before the column
+    existed came from the phone."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(events)")}
+    if "source" not in cols:
+        conn.execute(f"ALTER TABLE events ADD COLUMN source TEXT NOT NULL DEFAULT '{SOURCE_PHONE}'")
+        conn.commit()
 
 
 def context_path(state_dir: str = DEFAULT_STATE_DIR) -> str:
@@ -92,12 +115,15 @@ def recompute_context(conn: sqlite3.Connection) -> dict:
                       2026-07-13: the reminder gate (``presence_rules``) no longer reads it — the
                       phone-only Sleep API flags an idle phone as a sleeping owner.
 
+    * ``activity_source`` / ``sleep_source`` — which device the reading above came from (``phone`` /
+                      ``watch``; None when there is no reading). Provenance, not precedence.
+
     "Most recent" is by ``ts_ms`` (event time), not arrival order — a batch that delivers an enter and a
     later exit together still resolves correctly.
     """
     def latest(kind: str, extra: str = "") -> sqlite3.Row | None:
         return conn.execute(
-            f"SELECT label, transition, ts_utc, ts_ms FROM events WHERE kind=? {extra} "
+            f"SELECT label, transition, ts_utc, ts_ms, source FROM events WHERE kind=? {extra} "
             "ORDER BY ts_ms DESC LIMIT 1", (kind,)).fetchone()
 
     g = latest("geofence")
@@ -107,6 +133,8 @@ def recompute_context(conn: sqlite3.Connection) -> dict:
         "at_place": g["label"] if g and g["transition"] == "enter" else None,
         "activity": a["label"] if a else None,
         "asleep": bool(s and s["label"] == "asleep"),
+        "activity_source": a["source"] if a else None,
+        "sleep_source": s["source"] if s else None,
         "since": {
             "place": g["ts_utc"] if g else None,
             "activity": a["ts_utc"] if a else None,

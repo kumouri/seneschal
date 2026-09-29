@@ -35,7 +35,11 @@ answers without showing the owner what would change.
 - **Every question is skippable.** Skipping everything yields the default-Claude persona
   (persona.md becomes a copy of the default with any known identity values filled). Say so up
   front: "skip anything — the default is good."
-- **One question at a time**, with a concrete default shown. This is a conversation, not a form.
+- **One question per turn**, with a concrete default shown, asked through the host's picker
+  tool (Claude Code: `AskUserQuestion`) with a Skip option — free-form answers go through its
+  "Other". A turn that asks ends on the question: no file write or tool output after it.
+  This is a conversation, not a form (the `/setup` SKILL's ground rules, restated for
+  standalone `/setup-persona` runs).
 - **Show before writing.** Assemble the full persona.md draft, show it, get one confirmation,
   then write both files together.
 - **Re-runs are edits.** If `persona/identity.json` or `persona/persona.md` exists, read them
@@ -88,7 +92,13 @@ framework policy; the wizard records assent, it doesn't renegotiate them.
 
 **7 — Owner basics** (only for fields absent from identity.json): name (+ phonetic if needed),
 pronouns, IANA timezone (offer the machine's current zone as the default). These seed `owner.*`
-minimally; the store onboarding enriches them later.
+minimally; the owner-interview chapter enriches them later. **Prefills follow
+owner-interview §0 exactly:** any value you already hold without having asked — the owner's
+name or email from their global `~/.claude/CLAUDE.md` or the Claude account this session is
+signed into, a name from `owner-profile.md`, the timezone from the machine clock — is shown
+**with its source** ("from your global CLAUDE.md", "from your Claude account", "from this
+machine's clock") as a picker option to confirm, plus "Other" to edit and a reject/Skip
+option. Never silently accept an inferred fact; one field per turn.
 
 ## Generate
 

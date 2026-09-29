@@ -11,6 +11,11 @@ scheduled task down — a bare exit would be relaunched).
 Usage:
   python request_control.py --action restart [--reason "..."] [--now] [STATE_DIR]
   python request_control.py --action shutdown [--reason "..."]
+
+seneschald-control.ps1 calls through here for every graceful restart it asks for: a merge landing on
+the deploy branch, a deferred restart once a failed dep sync recovers, and the login-deploys credential
+check (`Invoke-CredentialCheck`), which enqueues the SAME restart a merge does — capped by its own
+`credential_restart_for` loop guard at one restart per account identity.
 """
 from __future__ import annotations
 

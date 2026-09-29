@@ -17,27 +17,67 @@ when actually invoked with a write subcommand.
   python gcal_api.py delete-event   --account work --id <eventId> --env-file google.env
 
 All output is one JSON object. Exit 0 on success, non-zero on failure.
+
+THIS IS A LIVE CALENDAR DOOR, not a fallback nobody reaches. Calendar is TWO DOORS and the order is
+the rule: a Calendar MCP if the session has one, ELSE this script, and "no calendar" only when BOTH
+failed — naming which. On a host with no Calendar MCP this is door 1 in practice. And
+`{"ok": true, "count": 0}` IS AN EMPTY DAY, not an absent integration — reporting a successful empty
+read as unavailable is the bug that contract exists to prevent.
+
+THE WRITE SURFACE IS NARROWER THAN THE MCP'S: create/delete only, NO RSVP AND NO UPDATE. An approved
+RSVP on this door is handed back to the owner, never reported as done.
+
+A BARE `--start`/`--end YYYY-MM-DD` IS AN OWNER-LOCAL CALENDAR DAY: it is stamped with the owner's
+UTC offset for that date (`tz_common.utc_offset_on` — the configured `owner.timezone`, else the
+machine-local clock; the DATE's own DST, not today's), so `--start 2026-08-19 --end 2026-08-19` means
+the owner's calendar day, never a naive UTC window shifted by the owner's offset. An explicit ISO
+datetime (with or without its own offset) still passes through untouched. `--days N` is still a
+rolling window from now, never a calendar day.
+
+THE SEND GATE: an event with attendees is an outbound send to them (Google mails each an invite), so
+`create-event` classifies the attendee addresses (`send_recipients.classify_emails`; an
+attendee-less event is the owner's own) and `delete-event` — whose cancellation notices go to
+attendees this call never fetches — gates on the event id. Anything not owner-class needs an
+approved row in `state/pending-approvals.json` (`send_gate.py`), or the command prints the refusal
+and exits 3 with nothing written.
+
+A missing or unreadable `--env-file` is a handled `{"ok": false, "error": "..."}` (exit 1) like any
+other configuration failure — `load_env` runs inside `main()`'s try/except, not before it.
+
+Contract, failure table and the calendar include-set: ../references/calendar-mapping.md.
+
+`events` takes only ONE `--calendar` at a time (the calendar include-set is one call each, batched by
+the caller); only `freebusy` accepts a comma-separated list. `google.env` holds live OAuth secrets: it
+is untracked, and is never read back, printed, or committed. Setup: GOOGLE_SETUP.md.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import google_common as gc
+import send_gate
+import send_recipients
+import tz_common
 
 API = "https://www.googleapis.com/calendar/v3"
 
 
 def _window(args) -> tuple[str, str]:
-    """Resolve (timeMin, timeMax) as RFC-3339. --start/--end (date or datetime) override --days."""
+    """Resolve (timeMin, timeMax) as RFC-3339. --start/--end (date or datetime) override --days.
+
+    A bare `YYYY-MM-DD` is an owner-local calendar day, not a naive instant to be stamped UTC — it
+    is given that date's own owner offset (`tz_common.utc_offset_on`) before conversion. A full ISO
+    datetime (its own offset or none) is left exactly as `datetime.fromisoformat` parses it."""
     def parse(s: str, end_of_day: bool) -> datetime:
-        try:
-            return datetime.fromisoformat(s)
-        except ValueError:
+        if len(s) == 10:  # bare date, same convention _build_event_body.when() uses
             d = datetime.strptime(s, "%Y-%m-%d")
-            return d.replace(hour=23, minute=59, second=59) if end_of_day else d
+            if end_of_day:
+                d = d.replace(hour=23, minute=59, second=59)
+            return d.replace(tzinfo=timezone(tz_common.utc_offset_on(d.date())))
+        return datetime.fromisoformat(s)
     if args.start or args.end:
         start = parse(args.start, False) if args.start else gc.now_utc()
         end = parse(args.end, True) if args.end else start + timedelta(days=args.days)
@@ -117,14 +157,46 @@ def _build_event_body(args) -> dict:
     return body
 
 
+def _event_recipient_class(body: dict) -> str:
+    """`owner` when the event body carries no attendees at all (it only ever touches the owner's own
+    calendar, nobody else is notified); otherwise classify the attendee emails, the only way a
+    calendar write reaches anyone beyond the owner. `--json` is the only door attendees can arrive through
+    today (there is no `--attendees` flag), so a summary/start/end-only event is always `owner`."""
+    attendees = body.get("attendees") or []
+    emails = [a.get("email") for a in attendees if isinstance(a, dict) and a.get("email")]
+    if not emails:
+        return "owner"
+    return send_recipients.classify_emails(*emails)
+
+
 def cmd_create_event(c, args) -> dict:
     body = _build_event_body(args)
+    try:
+        cls = _event_recipient_class(body)
+    except Exception:  # noqa: BLE001 — a classification failure logs unknown, never raises into the send
+        cls = "unknown"
+    # The send gate: an attendee-less event is owner-class and passes; attendees need an approved
+    # row (send_gate.py) covering every non-owner address — an invite IS an outbound send to them.
+    attendees = [a.get("email") for a in (body.get("attendees") or []) if isinstance(a, dict) and a.get("email")]
+    verdict = send_gate.require_approval("calendar", attendees, recipient_class=cls, channel="gcal_create_event")
+    send_recipients.record("gcal_create_event", cls, gate=verdict)
+    if not verdict["allowed"]:
+        return send_gate.refusal_payload(verdict, account=args.account)
     res = gc.authorized_request(c, args.account, "POST",
                                 f"{API}/calendars/{args.calendar}/events", body=body, where="events.insert")
     return {"ok": True, "account": args.account, "created": True, "event": _slim_event(res)}
 
 
 def cmd_delete_event(c, args) -> dict:
+    # The event's own attendees are never fetched here (that would be a second API call on every
+    # delete), so who a deleted event's cancellation notice reaches is structurally undecidable from
+    # this call alone — always `unknown`. The send gate keys it on the EVENT ID (`send_gate.py grant
+    # --kind calendar --recipient <eventId>`); a delete is ask-high regardless, so the grant IS the
+    # owner's approval, recorded.
+    verdict = send_gate.require_approval("calendar", args.id, recipient_class="unknown", channel="gcal_delete_event")
+    send_recipients.record("gcal_delete_event", "unknown", gate=verdict)
+    if not verdict["allowed"]:
+        return send_gate.refusal_payload(verdict, account=args.account, eventId=args.id)
     gc.authorized_request(c, args.account, "DELETE",
                           f"{API}/calendars/{args.calendar}/events/{args.id}", where="events.delete")
     return {"ok": True, "account": args.account, "deleted": args.id}
@@ -150,7 +222,6 @@ def main() -> int:
     p.add_argument("--raw", action="store_true", help="emit full API objects instead of slimmed ones")
     args = p.parse_args()
 
-    c = gc.cfg(gc.load_env(args.env_file))
     handlers = {
         "list-calendars": cmd_list_calendars, "events": cmd_events, "freebusy": cmd_freebusy,
         "get-event": cmd_get_event, "create-event": cmd_create_event, "delete-event": cmd_delete_event,
@@ -159,7 +230,11 @@ def main() -> int:
         print(json.dumps({"ok": False, "error": f"{args.command} needs --id"}))
         return 2
     try:
-        print(json.dumps(handlers[args.command](c, args), ensure_ascii=False))
+        c = gc.cfg(gc.load_env(args.env_file))
+        res = handlers[args.command](c, args)
+        print(json.dumps(res, ensure_ascii=False))
+        if res.get("refused") == "send_gate":
+            return send_gate.EXIT_REFUSED  # the send gate refused: nothing left the machine
         return 0
     except Exception as e:  # noqa: BLE001
         print(json.dumps({"ok": False, "account": args.account, "command": args.command, "error": str(e)}))

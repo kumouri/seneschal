@@ -86,6 +86,11 @@ def main() -> int:
     p.add_argument("--pierce-quiet", action="store_true",
                    help="fire this nudge even during a do-not-disturb window (quiet.json). Set it for "
                         "Critical-and-above items (🚨/🛑); a Call Me/escalating call pierces on its own.")
+    p.add_argument("--importance", default=None,
+                   help="the ⏰ row's importance, if known — a canonical key (super-critical / critical / "
+                        "high / notable / low) or the active backend's label for one (e.g. Notion's "
+                        "'⭐ High'). Read only to break a same-`due_at` tie in the catch-up stagger's "
+                        "drain order (sentinel._due_sort_key); omitting it is a no-op.")
     p.add_argument("--escalate", action="store_true",
                    help="(call channel) keep calling back until the owner presses a digit; the daemon passes "
                         "--escalate to push_call.py so the Worker runs the retry-until-ack loop.")
@@ -122,6 +127,8 @@ def main() -> int:
         entry["ack_gate"] = False
     if args.pierce_quiet:
         entry["pierce_quiet"] = True
+    if args.importance:
+        entry["importance"] = args.importance
     if args.require_place:
         entry["require_place"] = args.require_place
     if args.escalate:

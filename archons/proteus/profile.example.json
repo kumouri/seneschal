@@ -23,6 +23,8 @@
     "ai agent": 8
   },
   "dealbreakers": ["security clearance"],
+  "_comment_onsite_cap_exempt": "Optional. Title words (matched as whole words in the job TITLE only) for which max_onsite_days_per_week stops screening an in-commute-range role; such roles are surfaced with their stated days/week instead, never ranked up and never represented as acceptable. Robotic-Process-Automation / Robot Framework postings are always vetoed. List singular and plural forms explicitly. Empty = no exemption.",
+  "onsite_cap_exempt_title_words": [],
   "culture_flags": [
     "Things to check in company research — not keyword-matched; the archon weighs these when researching the employer."
   ],

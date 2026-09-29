@@ -54,6 +54,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import memory_write as mw
 import rag_common as rc
 import rag_index as ri
 
@@ -495,11 +496,10 @@ def main(argv=None):
 
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     out = Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    with out.open("w", encoding="utf-8") as f:
-        for rec in records:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    Path(args.map).write_text(render_map(summaries, gh, now), encoding="utf-8")
+    # Atomic, both of them: a rescan takes minutes and these are the only copies. `projects.jsonl`
+    # is also the RAG ingest's input, so a torn file is a silently-truncated index, not a crash.
+    mw.write_text(str(out), "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records))
+    mw.write_text(str(args.map), render_map(summaries, gh, now))
     print(f"scanned {len(summaries)} local projects, {len(gh)} GitHub repos "
           f"→ {len(records)} records")
     print(f"wrote {out} + {args.map}")

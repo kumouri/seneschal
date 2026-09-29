@@ -13,6 +13,7 @@ Run:  python -m unittest seneschal.scripts.test_presence_cockpit   (or)   python
 """
 import argparse
 import asyncio
+import json
 import os
 import sys
 import tempfile
@@ -67,11 +68,22 @@ class _BrokenHub:
 
 
 class StatusSnapshot(unittest.TestCase):
+    # Exact-equality on purpose: the snapshot is a wire contract (the pipe ships it verbatim and
+    # /api/status passes it straight through), so an accidentally-added field should fail here.
     def test_idle_snapshot(self):
         state = pr.DaemonState()
         args = _args(tempfile.mkdtemp(), model="opus")
         self.assertEqual(pr._status_snapshot(state, args),
-                         {"session_up": False, "turn_in_flight": False, "model": "opus", "queue_depth": 0})
+                         {"session_up": False, "turn_in_flight": False, "model": "opus", "queue_depth": 0,
+                          "session_age_sec": None, "turns_served": None, "context_tokens": None,
+                          "context_pct": None, "context_window_tokens": pr.CONTEXT_WINDOW_TOKENS,
+                          "context_estimated": True, "session_cost_usd": None,
+                          "last_respawn_reason": None, "spawn_fallback_used": None,
+                          "jobs_active": 0,
+                          # Un-landed Notion writes (2026-08-07). Cache-fed like `jobs_active`, and on
+                          # the frame for the same reason `!status` exists at all: this backlog grew to
+                          # 23.4 h because it was visible from no surface whatsoever.
+                          "outbox_pending": 0, "outbox_dead": 0, "outbox_oldest_sec": None})
 
     def test_busy_snapshot_prefers_session_model(self):
         state = pr.DaemonState()
@@ -82,7 +94,15 @@ class StatusSnapshot(unittest.TestCase):
         args = _args(tempfile.mkdtemp(), model="opus")   # the args default — session's own model wins
         snap = pr._status_snapshot(state, args)
         self.assertEqual(snap, {"session_up": True, "turn_in_flight": True, "model": "sonnet",
-                               "queue_depth": 2})
+                                "queue_depth": 2, "session_age_sec": None, "turns_served": 0,
+                                "context_tokens": None, "context_pct": None,
+                                "context_window_tokens": pr.CONTEXT_WINDOW_TOKENS,
+                                "context_estimated": True, "session_cost_usd": None,
+                                "last_respawn_reason": None, "spawn_fallback_used": False,
+                                # Background jobs outlive the warm session, so the frame carries the
+                                # count even when there's no session — tick-cached, never read here.
+                                "jobs_active": 0,
+                                "outbox_pending": 0, "outbox_dead": 0, "outbox_oldest_sec": None})
 
     def test_falls_back_to_args_model_when_session_has_none(self):
         state = pr.DaemonState()
@@ -191,6 +211,86 @@ class MakeStreamTee(unittest.TestCase):
         self.assertEqual(recs[0]["model"], "claude-opus-4-8")
         self.assertEqual(recs[0]["tokens"], 150)
 
+    def test_the_ledger_row_and_the_metrics_row_carry_THE_SAME_turn_id(self):
+        """docs/spend-levers-spec.md phase 0 — and the point is the CALLER, not the field.
+
+        `append_spend` gaining a `turn_id=` parameter proves nothing on its own: the whole finding of
+        §2.2 is that these two rows are written 423 ms apart by this very function, and one of them
+        already had `turn_id` in hand while the other never received it. So this drives the real tee
+        and asserts the two files can now actually be joined."""
+        d = tempfile.mkdtemp()
+        state = pr.DaemonState()
+        state.session = pr.StubWarmSession()
+        state.session.model = "claude-opus-5"
+        args = _args(d)
+        on_event = pr._make_stream_tee(state, args, lambda *_: None, "telegram", "turn-join-me")
+        on_event({"type": "result", "is_error": False, "result": "ok",
+                  "usage": {"input_tokens": 100, "output_tokens": 50}})
+
+        ledger = [r for r in gv._read_ledger(d) if r.get("kind") == "tokens"]
+        self.assertEqual(len(ledger), 1)
+        self.assertEqual(ledger[0]["turn_id"], "turn-join-me")
+
+        with open(os.path.join(d, "metrics.jsonl"), encoding="utf-8") as fh:
+            metrics = [json.loads(ln) for ln in fh if ln.strip()]
+        self.assertEqual(len(metrics), 1)
+        self.assertEqual(metrics[0]["turn_id"], "turn-join-me")
+        # The join this unlocks, expressed as the query it exists for.
+        self.assertEqual(ledger[0]["turn_id"], metrics[0]["turn_id"])
+
+    def test_the_tee_counts_the_LEVERS_off_events_the_cockpit_conversion_throws_away(self):
+        """docs/spend-levers-spec.md phase 1 — and, exactly as in phase 0, the load-bearing test is
+        the CALLER's, not the field's.
+
+        `TurnLevers` passing its own unit tests proves nothing here: the finding of §4 is that the
+        counting site is a function we already run, on data we already parse — and specifically that
+        `cockpit_pipe.build_chat_event_from_stream` returns None for `user` events, which is where
+        tool RESULTS live. So this drives the real tee with the raw stream and asserts the bytes
+        landed on the ledger row. Revert the `levers.observe(ev)` line and this is the test that
+        fails, while every unit test in test_spend_levers.py stays green."""
+        d = tempfile.mkdtemp()
+        state = pr.DaemonState()
+        state.session = pr.StubWarmSession()
+        state.session.model = "claude-opus-5"
+        args = _args(d)
+        on_event = pr._make_stream_tee(state, args, lambda *_: None, "telegram", "turn-levers")
+        on_event({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {"file_path": "big.log"}}]}})
+        on_event({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "toolu_1", "content": "x" * 38112}]}})
+        on_event({"type": "result", "is_error": False, "result": "ok",
+                  "usage": {"input_tokens": 100, "output_tokens": 50}})
+
+        ledger = [r for r in gv._read_ledger(d) if r.get("kind") == "tokens"]
+        self.assertEqual(len(ledger), 1)
+        self.assertEqual(ledger[0]["levers"],
+                         {"tool_calls": 1, "tool_result_bytes": 38112, "tool_result_images": 0})
+        # The whole point, restated: the row now says WHICH lever, not just how big the total was.
+        self.assertEqual(ledger[0]["turn_id"], "turn-levers")
+
+    def test_a_second_metered_turn_does_not_inherit_the_first_turns_reads(self):
+        """The fallback ladder (WarmSession.send) re-sends on a failed resume and each attempt ends in
+        its own `result` event, so one tee can meter twice. Without the flush-and-reset the second row
+        would charge the first attempt's reads again — a lever that over-reports is worse than one
+        that is absent, because it sends the next investigation the wrong way."""
+        d = tempfile.mkdtemp()
+        state = pr.DaemonState()
+        state.session = pr.StubWarmSession()
+        state.session.model = "claude-opus-5"
+        args = _args(d)
+        on_event = pr._make_stream_tee(state, args, lambda *_: None, "telegram", "turn-twice")
+        on_event({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "t", "content": "y" * 1000}]}})
+        on_event({"type": "result", "is_error": True, "result": "resume failed",
+                  "usage": {"input_tokens": 10, "output_tokens": 1}})
+        on_event({"type": "result", "is_error": False, "result": "ok",
+                  "usage": {"input_tokens": 100, "output_tokens": 50}})
+
+        rows = [r for r in gv._read_ledger(d) if r.get("kind") == "tokens"]
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["levers"]["tool_result_bytes"], 1000)
+        self.assertEqual(rows[1]["levers"]["tool_result_bytes"], 0)
+
     def test_result_event_without_usage_meters_nothing(self):
         d = tempfile.mkdtemp()
         state = pr.DaemonState()
@@ -215,7 +315,10 @@ class MakeStreamTee(unittest.TestCase):
 class GovernorMeterTurnUsage(unittest.TestCase):
     """Oikonomos (v3.5): the per-turn metering + self-push alert hook `_make_stream_tee` calls on every
     `turn_done` event. Exercised directly (not just through `_make_stream_tee`) for the alert-push path,
-    which needs `pr.send_telegram` monkeypatched (same pattern as DeliverReplyCockpitBranch below)."""
+    which needs `pr.send_telegram` monkeypatched (same pattern as DeliverReplyCockpitBranch below).
+
+    Both halves are live in seneschal: the ledger accrues every turn and an alert-at-% crossing pushes
+    at most one line per knob per re-alert window."""
 
     def setUp(self):
         self.dir = tempfile.mkdtemp()
@@ -248,6 +351,38 @@ class GovernorMeterTurnUsage(unittest.TestCase):
         pr._governor_meter_turn_usage(args, lambda *_: None, "opus", usage)
         recs = gv._read_ledger(self.dir)
         self.assertEqual(recs[0]["tokens"], 20)
+
+    def test_hands_the_whole_usage_block_to_the_governor_not_a_flat_scalar(self):
+        """The billable-basis fix, proved at the CALLER. `governor.billable_tokens` being right is worth
+        nothing if presence.py still pre-flattens the usage block before handing it over — the row would
+        come out legacy-shaped and the rail would keep reading cache reads at full weight."""
+        args = _args(self.dir)
+        usage = {"input_tokens": 10, "output_tokens": 100, "cache_read_input_tokens": 100_000,
+                 "cache_creation_input_tokens": 1_000,
+                 "cache_creation": {"ephemeral_1h_input_tokens": 1_000,
+                                    "ephemeral_5m_input_tokens": 0}}
+        pr._governor_meter_turn_usage(args, lambda *_: None, "opus", usage)
+        rec = gv._read_ledger(self.dir)[0]
+        self.assertEqual(rec["tokens"], 101_110)              # raw sum keeps its old meaning
+        self.assertEqual(rec["billable_tokens"], 12_110)      # 10 + 100 + 10_000 + 2_000
+        self.assertEqual(rec["basis"], gv.BILLABLE_BASIS)
+        self.assertEqual(rec["components"]["cache_read"], 100_000)
+
+    def test_a_cache_heavy_turn_no_longer_trips_an_alert_it_never_should_have(self):
+        # The false alarm in miniature: 100k of cache reads against a 50k/day budget. The old flat sum
+        # read 200% and pushed the owner a Telegram line; the billable basis reads 20%.
+        gv.save(self.dir, {"daily_token_budget_by_model": {"opus": 50_000}})
+        args = _args(self.dir)
+        pr._governor_meter_turn_usage(args, lambda *_: None, "opus",
+                                      {"cache_read_input_tokens": 100_000})
+        self.assertEqual(self.sent, [])
+
+    def test_alert_text_names_its_basis(self):
+        gv.save(self.dir, {"daily_token_budget_by_model": {"opus": 100}})
+        args = _args(self.dir)
+        pr._governor_meter_turn_usage(args, lambda *_: None, "opus", {"input_tokens": 90})
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("billable basis", self.sent[0])
 
     def test_fires_one_alert_when_daily_budget_threshold_crossed(self):
         gv.save(self.dir, {"daily_token_budget_by_model": {"opus": 100}})
@@ -293,6 +428,48 @@ class GovernorMeterTurnUsage(unittest.TestCase):
         self.assertEqual(recs[0]["model"], "unknown")
 
 
+class MeteringAtTheDaemon(unittest.TestCase):
+    """Oikonomos measured at the daemon's own call site: the metering hook may not raise, may not go
+    quiet about spend, and may not disturb the resume gate's threshold read."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.sent = []
+        self._orig_send_telegram = pr.send_telegram
+
+        def fake_send(text, telegram_env):
+            self.sent.append(text)
+            return {"ok": True}
+
+        pr.send_telegram = fake_send
+
+    def tearDown(self):
+        pr.send_telegram = self._orig_send_telegram
+
+    def test_but_the_turn_is_still_metered(self):
+        gv.save(self.dir, {"daily_token_budget_by_model": {"opus": 100}})
+        pr._governor_meter_turn_usage(_args(self.dir), lambda *_: None, "opus",
+                                      {"input_tokens": 90, "cache_read_input_tokens": 1_000})
+        recs = gv._read_ledger(self.dir)
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0]["model"], "opus")
+        self.assertEqual(recs[0]["billable_tokens"], 190)  # 90 + 1_000*0.1
+
+    def test_the_metering_hook_logs_nothing_and_raises_nothing(self):
+        """`_governor_meter_turn_usage` catches broadly and logs — so an empty log on an under-budget
+        turn is the assertion that the path is clean rather than a swallowed exception."""
+        logged = []
+        pr._governor_meter_turn_usage(_args(self.dir), lambda msg: logged.append(msg), "opus",
+                                      {"input_tokens": 5})
+        self.assertEqual(logged, [])
+
+    def test_the_resume_gate_still_reads_its_threshold(self):
+        """`context_fill_winddown_pct` lives in Oikonomos's SCHEMA but is session continuity, not a
+        budget (docs/session-continuity-spec.md); the governor's config must keep serving it."""
+        gv.save(self.dir, {"context_fill_winddown_pct": 30})
+        self.assertEqual(gv.load(self.dir).get("context_fill_winddown_pct"), 30)
+
+
 class DeliverReplyCockpitBranch(unittest.TestCase):
     def test_always_succeeds(self):
         args = _args(tempfile.mkdtemp())
@@ -319,7 +496,7 @@ class DrainCockpitInbox(unittest.IsolatedAsyncioTestCase):
         state = pr.DaemonState()
         cp.append_inbox(d, {"id": "x1", "text": "hi via the fallback inbox"})
         await pr._drain_cockpit_inbox(state, args, lambda *_: None)
-        self.assertEqual(state.pending, [("cockpit", "hi via the fallback inbox", 0)])
+        self.assertEqual(state.pending, [("cockpit", "hi via the fallback inbox", 0, None)])
         # nothing new appended — a second drain enqueues nothing further
         await pr._drain_cockpit_inbox(state, args, lambda *_: None)
         self.assertEqual(len(state.pending), 1)
@@ -363,7 +540,7 @@ class DrainCockpitInbox(unittest.IsolatedAsyncioTestCase):
         cp.append_inbox(d, {"id": "z4", "text": "draft the plan", "force_fable": True})
         await pr._drain_cockpit_inbox(state, args, lambda *_: None)
         self.assertEqual(len(state.pending), 1)
-        channel, queued_text, attempts = state.pending[0]
+        channel, queued_text, attempts, _topic = state.pending[0]
         self.assertEqual(channel, "cockpit")
         self.assertIn("force-fable", queued_text)
         self.assertTrue(queued_text.endswith("draft the plan"))
@@ -427,7 +604,7 @@ class CockpitTaskWiring(unittest.IsolatedAsyncioTestCase):
             # not the raw message (see presence.apply_force_route / FORCE_FABLE_DIRECTIVE).
             await hub.on_chat_send("m1", "hello from the browser", {"force_fable": True})
             self.assertEqual(len(state.pending), 1)
-            queued_channel, queued_text, queued_attempts = state.pending[0]
+            queued_channel, queued_text, queued_attempts, _topic = state.pending[0]
             self.assertEqual(queued_channel, "cockpit")
             self.assertEqual(queued_attempts, 0)
             self.assertIn("force-fable", queued_text)
@@ -472,7 +649,9 @@ class CockpitTaskWiring(unittest.IsolatedAsyncioTestCase):
                 while "hub" not in captured:
                     await asyncio.sleep(0.01)
             await captured["hub"].on_chat_send("m2", "hello", {})
-            self.assertEqual(state.pending, [("cockpit", "hello", 0)])  # no force_fable -> untouched
+            # The cockpit has no topics, so the fourth element is None — the main-chat key.
+            self.assertEqual(state.pending,
+                             [("cockpit", "hello", 0, None)])  # no force_fable -> untouched
             state.stop.set()
             await asyncio.wait_for(task, timeout=5.0)
         finally:

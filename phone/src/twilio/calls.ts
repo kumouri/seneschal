@@ -5,7 +5,8 @@
  * (message / spam). `fetch`-based so it runs in the Workers runtime.
  */
 import type { Env } from "../config";
-import { dial, say } from "../twiml";
+import { say } from "../twiml";
+import { liveTransferTwiml } from "./transfer";
 
 /** The Twilio REST resource for a single live call (pure — unit-tested). */
 export function callResourceUrl(accountSid: string, callSid: string): string {
@@ -27,21 +28,16 @@ async function updateCallTwiml(env: Env, callSid: string, twiml: string): Promis
 }
 
 /**
- * Bridge the live call to the owner's cell (ends ConversationRelay). The 18s
- * ring window is deliberately shorter than the cell's no-answer-forward timer
- * (~25s) so a missed bridge times out here instead of looping back through the
- * forward. When the dial ends, Twilio POSTs the result to `${baseUrl}/after-bridge`,
- * which connects-or-voicemails based on whether the owner answered.
+ * Bridge the live call to the owner's cell (ends ConversationRelay). This is
+ * attempt 1 of the live transfer: when the dial ends, Twilio POSTs the result to
+ * `${baseUrl}/after-bridge?attempt=1`, which hangs up if the owner answered,
+ * re-dials up to LIVE_TRANSFER_ATTEMPTS, and only then rolls to voicemail
+ * (`src/twilio/transfer.ts` — also where the ring time lives, kept below the
+ * cell's no-answer-forward timer). `fromE164` rides the action URL so the
+ * voicemail leg knows who called.
  */
-export async function redirectToDial(env: Env, callSid: string, toE164: string, baseUrl: string): Promise<void> {
-  await updateCallTwiml(
-    env,
-    callSid,
-    dial(toE164, env.TWILIO_NUMBER_E164, {
-      timeoutSec: 18,
-      actionUrl: `${baseUrl}/after-bridge`,
-    }),
-  );
+export async function redirectToDial(env: Env, callSid: string, baseUrl: string, fromE164: string): Promise<void> {
+  await updateCallTwiml(env, callSid, liveTransferTwiml(env, baseUrl, 1, fromE164));
 }
 
 /** Speak a closing line and hang up the live call. */

@@ -91,7 +91,7 @@ class DrainerLifecycle(unittest.IsolatedAsyncioTestCase):
         calls = {"n": 0}
         orig = pr.deliver_reply
 
-        def failing_deliver(channel, reply, args, log, retries=1):
+        def failing_deliver(channel, reply, args, log, retries=1, **_kw):
             calls["n"] += 1
             return False
 
@@ -102,7 +102,7 @@ class DrainerLifecycle(unittest.IsolatedAsyncioTestCase):
             pr.deliver_reply = orig
         # Still queued (durably), attempts rolled back to 0 (transient outage ≠ poison), session dropped
         # so the retry re-grounds, and nothing was recorded as sent.
-        self.assertEqual(state.pending, [("telegram", "flaky wire", 0)])
+        self.assertEqual(state.pending, [("telegram", "flaky wire", 0, None)])
         st = pr.load_daemon_state(self.dir)
         self.assertEqual([(i["channel"], i["text"], i["attempts"]) for i in st["pending"]],
                          [("telegram", "flaky wire", 0)])
@@ -189,7 +189,14 @@ class ControlQuiesce(unittest.IsolatedAsyncioTestCase):
 
 class OfflineEndToEnd(unittest.TestCase):
     """The whole daemon, offline: fake inbox → stub brain → stub send. No network, no claude, and —
-    because of --stub-send — no possibility of a real Telegram message escaping a test run."""
+    because of --stub-send — no possibility of a real Telegram message escaping a test run.
+
+    **This is the one test that goes through the real parser, so every default that reaches for the
+    network has to be switched off HERE, in argv, rather than in an args namespace.** `--router-mode
+    off` was always that; `--interleave-mode off` joined it for the same reason and
+    after the same symptom — the second batch arrives while the first turn is in flight, which is
+    exactly what the gate fires on, so this test spent four seconds reaching for an Ollama that
+    happened not to be listening. On a host where one IS listening it would have been a real call."""
 
     def test_fake_inbox_drains_through_stub_brain(self):
         d = tempfile.mkdtemp()
@@ -201,7 +208,7 @@ class OfflineEndToEnd(unittest.TestCase):
         argv = ["presence.py",
                 "--state-dir", d, "--fake-inbox", inbox, "--stub-brain", "--stub-send",
                 "--max-iterations", "8", "--no-peek", "--no-slots", "--no-reminders",
-                "--router-mode", "off", "--idle-min", "0"]
+                "--router-mode", "off", "--interleave-mode", "off", "--idle-min", "0"]
         old_argv = sys.argv
         sys.argv = argv
         try:

@@ -218,6 +218,9 @@ class PosixRender(Base):
         self.assertIn("pull --ff-only", upd)
         self.assertIn("request_control.py", upd)
         self.assertIn("uv sync --frozen", upd)
+        # the cockpit opt-in survives a deploy on POSIX too (parity with the ps1)
+        self.assertIn('[ -f "$STATE_DIR/cockpit-enabled" ]', upd)
+        self.assertIn("uv sync --frozen --extra cockpit", upd)
         self.assertIn("core.fsmonitor=false", upd)
 
 

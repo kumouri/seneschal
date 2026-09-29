@@ -19,6 +19,7 @@ import tempfile
 import types
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest import mock
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
@@ -187,7 +188,7 @@ class FireGateUnit(unittest.TestCase):
         self.dir = tempfile.mkdtemp()
         self._orig = sn.send_telegram
         self.sent = []
-        sn.send_telegram = lambda text, env: (self.sent.append(text) or {"ok": True})
+        sn.send_telegram = lambda text, env, **kw: (self.sent.append(text) or {"ok": True})
 
     def tearDown(self):
         sn.send_telegram = self._orig
@@ -346,6 +347,58 @@ class BranchClaimUnit(unittest.TestCase):
         self._stamp("s1", "main", source="daemon")
         self._stamp("s2", "feature/y", source="build")
         self.assertFalse(sn.branch_is_claimed(self.dir, "feature/x", NOW))
+
+
+class LoadJsonPermissionRaceUnit(unittest.TestCase):
+    """The machine-wide session_stamp.py hook writing a session file at the exact instant the
+    daemon's scheduler tick (session_is_live -> load_sessions -> load_json) opens the same path for
+    read raises PermissionError on Windows — uncaught, it kills the scheduler task, which takes the
+    whole presence daemon down with no auto-recovery and no alert. This covers load_json's
+    retry-and-give-up-quietly fix."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.path = os.path.join(self.dir, "s1.json")
+        with open(self.path, "w", encoding="utf-8") as fh:
+            fh.write('{"ok": true}')
+
+    def test_transient_permission_error_retries_and_succeeds(self):
+        real_open = open
+        calls = {"n": 0}
+
+        def flaky_open(path, *a, **kw):
+            if path == self.path and calls["n"] == 0:
+                calls["n"] += 1
+                raise PermissionError(13, "Permission denied")
+            return real_open(path, *a, **kw)
+
+        with mock.patch("builtins.open", side_effect=flaky_open), mock.patch("time.sleep"):
+            self.assertEqual(sn.load_json(self.path, None), {"ok": True})
+        self.assertEqual(calls["n"], 1)
+
+    def test_sustained_permission_error_returns_default_not_raise(self):
+        def always_denied(path, *a, **kw):
+            raise PermissionError(13, "Permission denied")
+
+        with mock.patch("builtins.open", side_effect=always_denied), mock.patch("time.sleep"):
+            self.assertEqual(sn.load_json(self.path, "fallback"), "fallback")
+
+    def test_a_racing_session_file_never_crashes_load_sessions(self):
+        # The actual failure path: one session file mid-write while list_sessions/load_sessions scans
+        # the whole directory must not blow up the caller — it should just skip that one entry.
+        sn.write_session_heartbeat(self.dir, "daemon", pid=1, now=NOW)
+        sn.write_session_heartbeat(self.dir, "build", pid=2, now=NOW, session_id="racing")
+        racing_path = os.path.join(self.dir, "sessions", "racing.json")
+        real_open = open
+
+        def deny_racing_once(path, *a, **kw):
+            if path == racing_path:
+                raise PermissionError(13, "Access is denied")
+            return real_open(path, *a, **kw)
+
+        with mock.patch("builtins.open", side_effect=deny_racing_once), mock.patch("time.sleep"):
+            sessions = sn.load_sessions(self.dir)  # must not raise
+        self.assertEqual(len(sessions), 1)  # the racing one skipped this pass; the other still read
 
 
 if __name__ == "__main__":

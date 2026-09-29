@@ -6,6 +6,9 @@
  *                 ConversationRelay; anything else => hang up (robodialer).
  *   GET  /ws    — ConversationRelay WebSocket, handed to the RelaySession DO.
  *   GET  /status— liveness + effective settings (expanded into a dashboard in M5).
+ *   plus /blocklist, /sync-contacts, /push-call (+ /push-call/ack — reminder
+ *   calls, and `{mode:"talk"}` live owner conversations), /after-bridge (the
+ *   live-transfer attempt loop), /voicemail — see each handler.
  *
  * The public base URL is taken from PUBLIC_BASE_URL when set, otherwise derived
  * from the incoming request — so it works behind a dev tunnel or a deployed
@@ -15,10 +18,13 @@ import type { Env } from "./config";
 import { configured, personaFromEnv, settingsFromEnv } from "./config";
 import type { CallerInfo } from "./screener/decision";
 import { decideFunnel, decidePostGate } from "./screener/funnel";
-import { listBlocklist, lookupLists, recordGateFail, syncGoogleContacts, type GoogleContact } from "./data/db";
-import { connectRelay, dial, gate, hangupResponse, reject, say, voicemail } from "./twiml";
-import { sendSms } from "./notify/sms";
-import { placeCall } from "./notify/call";
+import { listBlocklist, lookupLists, recordGateFail, sumSpendToday, syncGoogleContacts, type GoogleContact } from "./data/db";
+import { connectRelay, gate, hangupResponse, reject, say, sayVoiceOf, voicemail, wssOf } from "./twiml";
+import { liveTransferTwiml, nextLiveTransferStep, parseAttempt } from "./twilio/transfer";
+import { notifyOwner } from "./notify/owner";
+import { sendVoicemailAudio, telegramConfigured } from "./notify/telegram";
+import { placeCall, placeTalkCall } from "./notify/call";
+import { overBudget } from "./budget";
 
 export { RelaySession } from "./relay/session";
 export { CallEscalation } from "./escalation/escalation";
@@ -57,10 +63,6 @@ function baseUrlOf(request: Request, env: Env): string {
   return p ? p : new URL(request.url).origin;
 }
 
-function wssOf(base: string): string {
-  return base.replace(/^http:/i, "ws:").replace(/^https:/i, "wss:");
-}
-
 async function handleVoice(request: Request, env: Env): Promise<Response> {
   const form = await request.formData();
   const from = field(form, "From");
@@ -73,7 +75,9 @@ async function handleVoice(request: Request, env: Env): Promise<Response> {
 
   switch (decision.stage) {
     case "allow":
-      return xml(dial(settings.userCellE164, env.TWILIO_NUMBER_E164));
+      // Allowlisted: ring the owner straight through — attempt 1 of the live
+      // transfer, so an unanswered call re-rings and then takes a message like any other.
+      return xml(liveTransferTwiml(env, baseUrlOf(request, env), 1, from));
     case "reject":
       return xml(reject());
     default:
@@ -105,7 +109,7 @@ async function handleGate(request: Request, env: Env): Promise<Response> {
 
   const post = decidePostGate(settings);
   if (post.stage === "allow") {
-    return xml(dial(settings.userCellE164, env.TWILIO_NUMBER_E164));
+    return xml(liveTransferTwiml(env, baseUrlOf(request, env), 1, from));
   }
 
   // Hand to Claude. A per-call session id isolates this call's Durable Object
@@ -198,7 +202,9 @@ function parseContacts(body: unknown): GoogleContact[] {
  * Place an outbound reminder call to the owner (bearer-authed). Twilio creds stay
  * in the Worker; the assistant's local push_call.py only holds this URL + secret. Body:
  * { "text": "...", "to"?: E164 }; `to` defaults to USER_CELL_E164. Mirrors the
- * /blocklist + /sync-contacts auth pattern.
+ * /blocklist + /sync-contacts auth pattern. `{ "mode": "talk", "context"?: "..." }`
+ * is the live-conversation sibling (see handlePushCallTalk) — checked first since
+ * it takes no `text` at all.
  */
 async function handlePushCall(request: Request, env: Env): Promise<Response> {
   const secret = env.PUSH_CALL_SECRET;
@@ -211,12 +217,15 @@ async function handlePushCall(request: Request, env: Env): Promise<Response> {
   } catch {
     return new Response("bad json", { status: 400 });
   }
-  const textRaw = typeof body === "object" && body !== null ? (body as { text?: unknown }).text : undefined;
+  const obj = typeof body === "object" && body !== null ? (body as Record<string, unknown>) : {};
+
+  if (obj.mode === "talk") return handlePushCallTalk(obj, request, env);
+
+  const textRaw = obj.text;
   const text = typeof textRaw === "string" ? textRaw.trim() : "";
   if (text === "") {
     return jsonResponse({ ok: false, error: "missing text" }, 400);
   }
-  const obj = typeof body === "object" && body !== null ? (body as Record<string, unknown>) : {};
   const toRaw = obj.to;
   const to = typeof toRaw === "string" && toRaw.startsWith("+") ? toRaw : env.USER_CELL_E164;
 
@@ -248,6 +257,43 @@ async function handlePushCall(request: Request, env: Env): Promise<Response> {
 }
 
 /**
+ * Talk mode: the assistant calls the owner for a live voice conversation, not a scripted line.
+ * Dials `env.USER_CELL_E164` ONLY — `placeTalkCall` takes no `to` parameter at all, so nothing in
+ * this body can redirect the call elsewhere, deliberately (an inbound or other-recipient talk call
+ * is out of scope). `context` is an optional plain-text snapshot of the owner's day (calendar,
+ * pending reminders, open loops) the caller assembles; the model draws on it but never recites it
+ * unasked. Checks the shared `DAILY_BUDGET_USD` cap before dialing, and seeds the `RelaySession`
+ * Durable Object into owner mode BEFORE placing the call, so the ConversationRelay handshake that
+ * follows moments later finds the context already in place.
+ */
+async function handlePushCallTalk(obj: Record<string, unknown>, request: Request, env: Env): Promise<Response> {
+  if (env.USER_CELL_E164 === undefined || env.USER_CELL_E164 === "") {
+    return jsonResponse({ ok: false, error: "USER_CELL_E164 not configured" }, 500);
+  }
+  const settings = settingsFromEnv(env);
+  const todayUtc = new Date().toISOString().slice(0, 10);
+  const spentToday = await sumSpendToday(env.DB);
+  if (overBudget({ dateUtc: todayUtc, spentUsd: spentToday }, todayUtc, settings.dailyBudgetUsd)) {
+    return jsonResponse({ ok: false, error: "daily budget reached" }, 402);
+  }
+  const contextRaw = obj.context;
+  const context = typeof contextRaw === "string" ? contextRaw : "";
+  const base = baseUrlOf(request, env);
+  const sessionId = crypto.randomUUID();
+  try {
+    const stub = env.RELAY_SESSION.get(env.RELAY_SESSION.idFromName(sessionId));
+    await stub.fetch("https://relay/seed", {
+      method: "POST",
+      body: JSON.stringify({ mode: "owner", context }),
+    });
+    const sid = await placeTalkCall(env, base, sessionId);
+    return jsonResponse({ ok: true, sid, mode: "talk" });
+  } catch (e) {
+    return jsonResponse({ ok: false, error: String(e) }, 502);
+  }
+}
+
+/**
  * Twilio `<Gather>` action for an escalating call: the owner pressed a digit. Tell the
  * CallEscalation DO (by the `id` query param) to stop retrying, then thank + hang up.
  * If the gather timed out with no digit, Twilio hangs up without hitting this route,
@@ -257,12 +303,14 @@ async function handlePushCallAck(request: Request, env: Env): Promise<Response> 
   const form = await request.formData();
   const digits = field(form, "Digits");
   const id = new URL(request.url).searchParams.get("id") ?? "";
+  // Same voice the reminder itself spoke in (unset persona voice => Twilio's default).
+  const voice = sayVoiceOf(personaFromEnv(env));
   if (digits !== "" && id !== "") {
     const stub = env.CALL_ESCALATION.get(env.CALL_ESCALATION.idFromName(id));
     await stub.fetch("https://escalation/ack", { method: "POST" });
-    return xml(say("Got it — I'll stop calling. Talk soon.", { hangup: true }));
+    return xml(say("Got it — I'll stop calling. Talk soon.", { hangup: true, voice }));
   }
-  return xml(say("Goodbye.", { hangup: true }));
+  return xml(say("Goodbye.", { hangup: true, voice }));
 }
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -272,11 +320,25 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-/** After a live-transfer dial ends: hang up if it connected, else roll to voicemail. */
+/**
+ * After a live-transfer dial ends: hang up if it connected, ring the owner again
+ * while attempts remain (LIVE_TRANSFER_ATTEMPTS — `src/twilio/transfer.ts`, NOT the
+ * reminder escalation's cap), else roll to voicemail. The attempt number rides
+ * the action URL's query string; so does the caller, because Twilio's `From` on
+ * this callback is the leg's, not always the original caller's.
+ */
 async function handleAfterBridge(request: Request, env: Env): Promise<Response> {
   const form = await request.formData();
-  if (field(form, "DialCallStatus") === "completed") return xml(hangupResponse());
-  const from = field(form, "From");
+  const url = new URL(request.url);
+  const attempt = parseAttempt(url.searchParams.get("attempt"));
+  const fromQuery = url.searchParams.get("from") ?? "";
+  const from = fromQuery !== "" ? fromQuery : field(form, "From");
+  const step = nextLiveTransferStep(field(form, "DialCallStatus"), attempt);
+  if (step.kind === "hangup") return xml(hangupResponse());
+  if (step.kind === "redial") {
+    console.log(`after-bridge: attempt ${attempt} unanswered, redialing (${step.attempt})`);
+    return xml(liveTransferTwiml(env, baseUrlOf(request, env), step.attempt, from));
+  }
   const owner = configured(env.OWNER_NAME_SPOKEN) ?? configured(env.OWNER_NAME);
   return xml(
     voicemail({
@@ -289,7 +351,12 @@ async function handleAfterBridge(request: Request, env: Env): Promise<Response> 
   );
 }
 
-/** Twilio transcription callback for a voicemail: text it to the owner. */
+/**
+ * Twilio transcription callback for a voicemail: the text goes to the owner
+ * first (Telegram, or SMS as the fallback), then — on Telegram only — the
+ * recording itself as a second message. An audio fetch/upload failure is
+ * logged and swallowed: the text already went, the audio is a bonus.
+ */
 async function handleVoicemail(request: Request, env: Env): Promise<Response> {
   const from = new URL(request.url).searchParams.get("from") ?? "";
   const form = await request.formData();
@@ -298,9 +365,16 @@ async function handleVoicemail(request: Request, env: Env): Promise<Response> {
   const who = from !== "" ? from : "Unknown caller";
   const body = `🎙️ Voicemail from ${who}:\n${text !== "" ? text : "(couldn't transcribe — listen via Twilio)"}\n${recordingUrl}`;
   try {
-    await sendSms(env, env.USER_CELL_E164, body);
-  } catch {
-    // best-effort
+    await notifyOwner(env, body);
+  } catch (err) {
+    console.log(`voicemail notify error: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  if (recordingUrl !== "" && telegramConfigured(env)) {
+    try {
+      await sendVoicemailAudio(env, recordingUrl, `🎙️ Voicemail audio from ${who}`);
+    } catch (err) {
+      console.log(`voicemail audio error: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
   return new Response("ok");
 }

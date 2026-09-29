@@ -9,6 +9,15 @@ Bash (a granted tool) instead::
 
     python register_workup.py --json "{\"slug\": \"acme-swe\", \"company\": \"Acme\", ...}"
 
+**``--json-file PATH`` is the reliable door when the entry itself contains a ``$`` or ``$N``.**
+Bash expands an unescaped ``$`` inside a double-quoted ``--json "..."`` argument as a positional
+parameter BEFORE this script ever sees it — a job description quoting a `$150K` salary, or a
+company name with a literal `$`, silently loses it or worse. Writing the entry to a file first
+(the archon already has the Write tool for that) and passing ``--json-file`` sidesteps the shell
+entirely::
+
+    python register_workup.py --json-file /tmp/entry.json
+
 Read-modify-write, de-duped by ``slug`` (else ``jd_url``); an existing entry is updated in place
 rather than duplicated. Preserves the file's ``{ "workups": [...] }`` shape. Stdlib only.
 """
@@ -61,12 +70,25 @@ def register(entry: dict) -> tuple[int, str]:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Register a workup entry in out/workups.json.")
-    ap.add_argument("--json", required=True, help="the workup entry as a JSON object")
+    group = ap.add_mutually_exclusive_group(required=True)
+    group.add_argument("--json", help="the workup entry as a JSON object, inline")
+    group.add_argument("--json-file", help="path to a file holding the workup entry as JSON — "
+                       "use this when the entry contains a $ (Bash expands --json \"...\" as a "
+                       "positional parameter before this script ever sees it)")
     args = ap.parse_args(argv)
+    if args.json_file:
+        try:
+            with open(args.json_file, "r", encoding="utf-8") as fh:
+                raw = fh.read()
+        except OSError as exc:
+            print(f"register_workup: --json-file could not be read: {exc}", file=sys.stderr)
+            return 2
+    else:
+        raw = args.json
     try:
-        entry = json.loads(args.json)
+        entry = json.loads(raw)
     except ValueError as exc:
-        print(f"register_workup: --json is not valid JSON: {exc}", file=sys.stderr)
+        print(f"register_workup: entry is not valid JSON: {exc}", file=sys.stderr)
         return 2
     if not isinstance(entry, dict) or not (entry.get("slug") or entry.get("jd_url")):
         print("register_workup: entry must be a JSON object with at least a slug or jd_url",

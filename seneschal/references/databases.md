@@ -8,6 +8,15 @@
 The Notion databases the assistant's **own** modes (Brief, Wrap, Triage, Ask) read and write directly.
 **Do not fetch these schemas at runtime** — use what's here.
 
+> **This is the Notion backend's registry.** Skills speak the backend-neutral store verbs
+> (`../store/README.md`) and canonical, emoji-free option values; each backend's **domain map** is
+> `../store/<backend>/schema.md` (Notion: `../store/notion/schema.template.md`, rendered to a
+> gitignored `schema.md` by `/setup-store`; filesystem backends: `../store/obsidian/schema.md`,
+> `../store/markdown/schema.md`). The Notion-only mechanics below — `notion-*` tools, emoji option
+> strings, `collection://…` ids, `date:X:start` projections, the outbox — apply **on the Notion backend
+> only**; the verb → tool translation is `../store/notion/mapping.md`. A field added here (e.g.
+> `Tomorrow`) must be added to every backend's schema too.
+
 > **Canonical full map:** every journal database (Achievements, Mood, Goals,
 > Run Log, …) lives in `../../subagents/journal-steward/daily-journal-steward/references/databases.md`.
 > That file is the source of truth for journal-owned databases; this file only restates the handful the
@@ -33,6 +42,14 @@ journal-steward's `notion-mcp-mapping.md`.
 > **≥ 1 entry** under it. The `📌` **carry-over callout** at the very top is **the assistant's own**
 > (written during the Brief) — *not* evidence the owner wrote. Consumed by the journal-presence gate in
 > `reminders-policy.md`.
+>
+> **The `as of …` a `notion-fetch` prints is NOT a read time — it is the last-edited time of the newest
+> block still surviving on the page.** So a rarely-touched page reads *old* on a **cold** fetch (weeks
+> out, on a page nobody has edited), a fresh write shows up within seconds, and **deleting that write
+> moves the stamp backwards** — which a clock cannot do. There is no page cache: every fetch is live.
+> Never subtract it from `now` and call the result staleness; that inverts the journal gate in both
+> directions (`reminders-policy.md` → "Journal-presence gate"). A true monotonic last-edited does
+> exist, on `notion-search`'s per-result `timestamp`.
 
 ## Tasks — `collection://00000000-0000-0000-0000-000000000001`
 - `Task name` **(title)**
@@ -43,6 +60,14 @@ journal-steward's `notion-mcp-mapping.md`.
 - `Last Updated` (last_edited_time) — auto; no manual upkeep.
 - `Tags` (multi: `Mobile`, `Website`, `Improvement`) · `Summary` (text)
 - `Project` (rel → Projects) · `Parent-task`/`Sub-tasks` (rel → self) · `Assignee` (person)
+- `Tomorrow` (checkbox) — canonical field `tomorrow` (`../docs/tomorrow-marker-spec.md`): a checkbox,
+  matching `Nag Until Done`/`Call Me`'s boolean-flag convention on ⏰ Reminders below. A **one-shot
+  input, consumed on reconciliation, exactly like ⏰'s `Ack`**: the next Brief or Wrap gather that reads
+  Tasks also checks `Tomorrow = true`, upserts an entry into `../state/tomorrow.json` keyed on the row's
+  id (`../scripts/tomorrow_marker.py reconcile`), and **unticks the box** the same pass. Ticking it is
+  act-low, silent — it does not itself change `Priority`/`Due`, only what the next morning's Brief
+  leads with and what the Wrap asks about. **If the property is missing or the query on it fails,
+  reconciliation fails OPEN** — it never blocks the Brief or Wrap, it just folds in nothing that pass.
 
 **Briefing reads:** open tasks with a due date on/before today and `Status` not in (`Done`,`Archived`)
 → "due/overdue today".
@@ -112,10 +137,12 @@ unconfirmed todos, deadlines approaching). **Provisioned + seeded at setup** wit
 - `Reminder` **(title)** — e.g. `Water the plants (AM)`, `Eat lunch`, `Ship the quarterly report`
 - `Type` (select: `Recurring Habit`, `Today Todo`, `Deadline Watch`)
 - `Importance` (select: `🛑 Super-Critical`, `🚨 Critical`, `⭐ High`, `✨ Notable`, `📌 Low`) — drives nudge
-  ordering + rib eligibility.
-- `Nag Until Done` (checkbox) — **independent of importance**; forces re-firing until `Done` even for
-  low-stakes items (e.g. water the plants). An item re-fires when `Importance` ∈ (Super-Critical, Critical,
-  High) **OR** `Nag Until Done = true`. See `reminders-policy.md`.
+  ordering, rib eligibility and the quiet-window pierce (Critical-and-above). **Not** the re-fire ladder.
+- `Nag Until Done` (checkbox; canonical `nag_until_done`) — **independent of importance**, literally:
+  this box **alone** decides whether a row re-fires until `Done` (the 90-min ladder), whatever its
+  `Importance` — so a low-stakes item (water the plants) can nag, and a High item need not. It used
+  to be `Importance ≥ ⭐ High` **OR** this box; an install migrating from that rule ticks the box on its
+  active High-and-above rows first so the change is behaviour-preserving. See `reminders-policy.md`.
 - `Call Me` (checkbox) — **independent of importance** (like `Nag Until Done`); opts this reminder into
   **phone-call escalation**. When it's due, the assistant also *rings the owner's phone* with a spoken
   line (the presence daemon routes it `push_call.py` → Worker `/push-call`). For the rare can't-miss
@@ -123,12 +150,29 @@ unconfirmed todos, deadlines approaching). **Provisioned + seeded at setup** wit
 - `Status` (select: `Pending`, `Reminded`, `Done`, `Finished`, `Skipped`, `Snoozed`, `Paused`) — **two
   distinct "acked" values, split by intent, not by `Type`:** **`Done` = done *for today*** (every `Type`,
   habits and one-time items alike) — the item stays an **active** reminder and re-fires on its next due
-  cycle; **`Finished` = retired** — the explicit-only terminal value that drops the row out of the
-  owner's *active*-reminders filter and stops it re-firing. A plain ack (chat, slot, or `Ack` tick)
-  always writes `Done`; `Finished` is written **only** when the owner explicitly says they're *finished*
-  with the item. Both count as "done today" for the Wrap.
-- `Cadence` (select: `Daily`, `Weekdays`, `Every 3 days`, `Every 5 days`, `Weekly`, `Multiple/day`,
-  `One-off`) — interval/Weekly/One-off rows go due by date, not the daily reset (`reminders-policy.md`).
+  cycle; **`Finished` = retired** — the terminal value that drops the row out of the owner's
+  *active*-reminders filter and stops it re-firing. A plain ack (chat, slot, or `Ack` tick) always
+  writes `Done`. Only two things write `Finished`: the owner explicitly saying they're *finished* with
+  the item, and the seed's **One-off auto-retire** — a `Cadence = One-off` row at `Done` whose `Last
+  Acknowledged` is set and `>= Due / Target`, with `Due / Target` already past (`reminders-policy.md`
+  → "Auto-retire a completed One-off"). Both count as "done today" for the Wrap.
+- `Cadence` — **an EXPRESSION, parsed by `../scripts/reminders_cadence.py`; not a closed list.**
+  Seven shapes: `daily`, `weekdays`, `every N days` (**any** positive whole N), `N per D days`
+  (a rate — `2 per week`), `weekly`, `multiple/day`, `one-off`. Interval / rate / `weekly` /
+  `one-off` rows go due by date, not the daily reset; **an interval is ack-relative and a rate is
+  grid-anchored**, fractional days are refused, and an unparseable value fails open (due today,
+  reported). The whole rule, with the reasoning: `reminders-policy.md` → "Cadence — when a row is
+  'due today'". A `One-off` that was acked on/after its due date is **auto-retired to `Finished`**
+  at the seed once that date is past, so a completed one-time task can't resurrect.
+
+  **On Notion the property may still be a `select`, and every stock option (`Daily`, `Weekdays`,
+  `Every 2/3/4/5 days`, `Weekly`, `Multiple/day`, `One-off`) is a valid expression that parses to
+  exactly what it has always meant** — so existing rows need no migration and no flag day. What a
+  select cannot hold is a value nobody added to it: each new interval would otherwise cost a Notion
+  edit plus doc edits to express one integer. **Converting `Cadence` to a `text` property is what makes
+  an arbitrary expression typeable**; it is optional, it changes no behaviour on its own, and it is the
+  owner's to do — runbook and costs in `../docs/reminder-cadence-mechanism-spec.md`. Filesystem
+  backends store the expression as plain text already.
 - `Times` (text) — **the reminder's exact fire time(s):** a comma-list of `HH:MM` owner-local times
   (e.g. `08:00` or `08:00, 20:00`), enqueued for the whole day by the daily **seed**
   (`../scripts/reminders_seed.py`). Empty ⇒ fall back to the `Time Window` default below. *(Additive
@@ -152,12 +196,23 @@ unconfirmed todos, deadlines approaching). **Provisioned + seeded at setup** wit
   Done`, `Last Acknowledged = today`, `Consecutive Misses = 0` — then **unticks it** so a stale tick
   can't auto-complete a later cycle. Agents write the fields directly and never treat an unticked `Ack`
   as "not done"; read `Last Acknowledged`/`Status` instead (`reminders-policy.md`).
+- `Tomorrow` (checkbox; canonical `tomorrow`) — `../docs/tomorrow-marker-spec.md`: the same additive
+  shape and the same one-shot/consumed-and-unticked contract `Ack` above already has. Independent of
+  `Nag Until Done`/`Call Me`/`Importance` — a marked row keeps whatever nudge mechanics it already had;
+  this box only feeds `../state/tomorrow.json` via `../scripts/tomorrow_marker.py reconcile`, never the
+  reminder ladder. A missing/unreadable property fails OPEN, same as on Tasks above.
 - `Related Task` (rel → Tasks) · `Related Goal` (rel → Goals) ·
   `Related Flag` (rel → Important Flags) · `Notes` (text — Weekly rows may name a weekday here)
 
 **Today-Todo / Deadline-Watch never copy content** — they carry a relation + `Due / Target`; the linked
 record's `Status` is the source of truth for "done." **Date projection gotcha applies:** filter/sort on
 `"date:Due / Target:start"` and `"date:Last Reminded:start"`, not the bare names (see the Tasks note above).
+
+**A row has no field for WHY it exists, and that is a named open gap, not an oversight.**
+`../docs/reminder-premise-spec.md` proposes an optional `Premise` (text) + `Premise Last Reviewed At
+Misses` (number) pair — neither is part of the provisioned schema yet; it is deferred to that spec's
+own open questions, the same way the `Cadence`-to-text conversion above is deferred to
+`reminder-cadence-mechanism-spec.md`.
 
 ---
 
@@ -170,7 +225,9 @@ run (see `memory.md`; the local mirror is `../state/run-log.md`).
 
 - `Date` **(title)** — run label, e.g. `2026-06-28 Brief`
 - `Run Date` (date) — project/query as `date:Run Date:start`
-- `Mode` (select: `Brief`, `Wrap`, `Triage`, `Ask`, `Reminders`) — add the `Reminders` option at runtime.
+- `Mode` (select: `Brief`, `Wrap`, `Triage`, `Ask`, `Reminders`, `Dream`, `Chat`, `Forge`, `Archive`) —
+  provision all nine; an older database missing one gets the option added at runtime as that mode
+  first logs.
 - `Status` (select: `Success`, `Partial`, `Failed`)
 - `Items Surfaced` (number) · `Actions Taken` (number) · `Drafts Held` (number)
 - `Actions Summary` (text) · `Carry-Over Context` (text) · `Issues / Uncertainties` (text)

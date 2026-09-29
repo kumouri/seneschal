@@ -1,0 +1,218 @@
+{
+  "_basis": "git-object bytes (LF-normalised). Token figures anywhere are labelled estimates.",
+  "_seeded_from": "measured sizes on the tree that introduced this file",
+  "_note": [
+    "Read by seneschal/scripts/check_context_budget.py (its docstring is the design record).",
+    "Seeded from MEASURED sizes, never aspirational ones. A budget of 'whatever feels right' is red",
+    "on the day it merges, and the first thing anyone learns is that the escape hatch works.",
+    "",
+    "Tier A is always-loaded startup context; tier B is loaded on a common path (a sub-router, a",
+    "subagent, a mode body). Tier C - seneschal/references/** and seneschal/docs/** leaves - is",
+    "deliberately unbudgeted: it is where detail moves when a router is trimmed.",
+    "",
+    "A raise appends to `raises[]`: {\"date\", \"from\", \"to\", \"reason\"}. `to` must equal",
+    "`from` + the headroom the checker itself computes and prints (--enforce-headroom blocks on a",
+    "new entry that does not), and the chain must stay continuous: each `from` is the previous",
+    "`to`, and the last `to` is `max_bytes`."
+  ],
+  "budgets": {
+    "CLAUDE.md": {
+      "tier": "A",
+      "max_bytes": 16491,
+      "raises": [],
+      "note": "The root router, loaded on every session in this repo."
+    },
+    "archons/CLAUDE.md": {
+      "tier": "B",
+      "max_bytes": 2704,
+      "raises": [],
+      "note": "A sub-router, loaded when work reaches its directory."
+    },
+    "cockpit/CLAUDE.md": {
+      "tier": "B",
+      "max_bytes": 7253,
+      "raises": [],
+      "note": "A sub-router, loaded when work reaches its directory."
+    },
+    "persona/README.md": {
+      "tier": "B",
+      "max_bytes": 2390,
+      "raises": [],
+      "note": "How the persona directory works. Budgeted because persona/*.md is grounding-shaped; a reader's page, not startup context."
+    },
+    "persona/persona.default.md": {
+      "tier": "A",
+      "max_bytes": 3890,
+      "raises": [],
+      "note": "The shipped default persona, read whenever persona/persona.md is absent."
+    },
+    "persona/persona.template.md": {
+      "tier": "B",
+      "max_bytes": 2404,
+      "raises": [],
+      "note": "The persona wizard's template. Budgeted because persona/*.md is grounding-shaped; read by the wizard, not at every startup."
+    },
+    "phone/CLAUDE.md": {
+      "tier": "B",
+      "max_bytes": 8470,
+      "raises": [],
+      "note": "A sub-router, loaded when work reaches its directory."
+    },
+    "seneschal/SKILL.md": {
+      "tier": "A",
+      "max_bytes": 26713,
+      "raises": [],
+      "note": "The orchestrator: modes, execution rules, the reference index. Loaded on every run."
+    },
+    "seneschal/docs/CLAUDE.md": {
+      "tier": "B",
+      "max_bytes": 13071,
+      "raises": [],
+      "note": "A sub-router, loaded when work reaches its directory."
+    },
+    "seneschal/modes/ask.md": {
+      "tier": "B",
+      "max_bytes": 932,
+      "raises": [],
+      "note": "A mode body, read by an imperative dispatch from seneschal/SKILL.md."
+    },
+    "seneschal/modes/brief.md": {
+      "tier": "B",
+      "max_bytes": 6767,
+      "raises": [],
+      "note": "A mode body, read by an imperative dispatch from seneschal/SKILL.md."
+    },
+    "seneschal/modes/chat.md": {
+      "tier": "B",
+      "max_bytes": 27657,
+      "raises": [],
+      "note": "A mode body, read by an imperative dispatch from seneschal/SKILL.md."
+    },
+    "seneschal/modes/dream.md": {
+      "tier": "B",
+      "max_bytes": 26320,
+      "raises": [],
+      "note": "A mode body, read by an imperative dispatch from seneschal/SKILL.md."
+    },
+    "seneschal/modes/forge.md": {
+      "tier": "B",
+      "max_bytes": 2093,
+      "raises": [],
+      "note": "A mode body, read by an imperative dispatch from seneschal/SKILL.md."
+    },
+    "seneschal/modes/reminders.md": {
+      "tier": "B",
+      "max_bytes": 2205,
+      "raises": [],
+      "note": "A mode body, read by an imperative dispatch from seneschal/SKILL.md."
+    },
+    "seneschal/modes/triage.md": {
+      "tier": "B",
+      "max_bytes": 2097,
+      "raises": [],
+      "note": "A mode body, read by an imperative dispatch from seneschal/SKILL.md."
+    },
+    "seneschal/modes/watch.md": {
+      "tier": "B",
+      "max_bytes": 7265,
+      "raises": [],
+      "note": "A mode body, read by an imperative dispatch from seneschal/SKILL.md."
+    },
+    "seneschal/modes/wrap.md": {
+      "tier": "B",
+      "max_bytes": 3140,
+      "raises": [],
+      "note": "A mode body, read by an imperative dispatch from seneschal/SKILL.md."
+    },
+    "seneschal/references/CLAUDE.md": {
+      "tier": "B",
+      "max_bytes": 4231,
+      "raises": [],
+      "note": "A sub-router, loaded when work reaches its directory."
+    },
+    "subagents/archon-forge/SKILL.md": {
+      "tier": "B",
+      "max_bytes": 8998,
+      "raises": [],
+      "note": "A subagent's skill body, loaded whenever the orchestrator delegates to it."
+    },
+    "subagents/calendar-steward/SKILL.md": {
+      "tier": "B",
+      "max_bytes": 6655,
+      "raises": [],
+      "note": "A subagent's skill body, loaded whenever the orchestrator delegates to it."
+    },
+    "subagents/email-triage/SKILL.md": {
+      "tier": "B",
+      "max_bytes": 10454,
+      "raises": [],
+      "note": "A subagent's skill body, loaded whenever the orchestrator delegates to it."
+    },
+    "subagents/eod-wrap/SKILL.md": {
+      "tier": "B",
+      "max_bytes": 10897,
+      "raises": [],
+      "note": "A subagent's skill body, loaded whenever the orchestrator delegates to it."
+    },
+    "subagents/journal-steward/daily-journal-steward/SKILL.md": {
+      "tier": "B",
+      "max_bytes": 10192,
+      "raises": [],
+      "note": "A subagent's skill body, loaded whenever the orchestrator delegates to it."
+    },
+    "subagents/message-archivist/SKILL.md": {
+      "tier": "B",
+      "max_bytes": 7086,
+      "raises": [],
+      "note": "A subagent's skill body, loaded whenever the orchestrator delegates to it."
+    },
+    "subagents/morning-briefing/SKILL.md": {
+      "tier": "B",
+      "max_bytes": 12486,
+      "raises": [],
+      "note": "A subagent's skill body, loaded whenever the orchestrator delegates to it."
+    },
+    "subagents/persona-wizard/SKILL.md": {
+      "tier": "B",
+      "max_bytes": 8347,
+      "raises": [],
+      "note": "A subagent's skill body, loaded whenever the orchestrator delegates to it."
+    },
+    "subagents/reminders/SKILL.md": {
+      "tier": "B",
+      "max_bytes": 18740,
+      "raises": [],
+      "note": "A subagent's skill body, loaded whenever the orchestrator delegates to it."
+    },
+    "subagents/setup/SKILL.md": {
+      "tier": "B",
+      "max_bytes": 11450,
+      "raises": [],
+      "note": "A subagent's skill body, loaded whenever the orchestrator delegates to it."
+    },
+    "subagents/slack-triage/SKILL.md": {
+      "tier": "B",
+      "max_bytes": 14583,
+      "raises": [],
+      "note": "A subagent's skill body, loaded whenever the orchestrator delegates to it."
+    },
+    "subagents/store-qa/SKILL.md": {
+      "tier": "B",
+      "max_bytes": 5160,
+      "raises": [],
+      "note": "A subagent's skill body, loaded whenever the orchestrator delegates to it."
+    },
+    "subagents/store-setup/SKILL.md": {
+      "tier": "B",
+      "max_bytes": 7229,
+      "raises": [],
+      "note": "A subagent's skill body, loaded whenever the orchestrator delegates to it."
+    },
+    "seneschal/scripts/presence.py::GROUNDING_TEMPLATE": {
+      "tier": "A",
+      "max_bytes": 5919,
+      "raises": [],
+      "note": "The warm session's grounding, rendered from identity.json at startup: startup context that lives in a .py."
+    }
+  }
+}

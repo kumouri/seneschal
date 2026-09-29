@@ -20,6 +20,9 @@
     "nameSpoken": null,
     "pronouns": null,
     "email": null,
-    "timezone": null
+    "emails": [],
+    "timezone": null,
+    "dayBoundaryHour": 5,
+    "nightCurfew": {"start": "01:00", "end": "07:00"}
   }
 }

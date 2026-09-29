@@ -118,5 +118,61 @@ class AccessorTest(unittest.TestCase):
         self.assertIsNone(ic.get_str([], "owner", "name"))
 
 
+class DayBoundaryHourTest(unittest.TestCase):
+    """``owner.dayBoundaryHour`` — the after-midnight cut clock/activity_day read."""
+
+    def test_default_is_five(self):
+        self.assertEqual(ic.DEFAULTS["owner"]["dayBoundaryHour"], 5)
+        self.assertEqual(ic.day_boundary_hour(ic.DEFAULTS), 5)
+        self.assertEqual(ic.day_boundary_hour({}), 5)
+        self.assertEqual(ic.day_boundary_hour([]), 5)
+
+    def test_configured_values_in_range(self):
+        for hour in (0, 3, 5, 12):
+            self.assertEqual(ic.day_boundary_hour({"owner": {"dayBoundaryHour": hour}}), hour)
+
+    def test_a_quoted_whole_number_is_accepted(self):
+        self.assertEqual(ic.day_boundary_hour({"owner": {"dayBoundaryHour": " 4 "}}), 4)
+
+    def test_unusable_values_fall_back(self):
+        for bad in (None, -1, 13, 24, True, False, 4.0, "four", "", [4]):
+            self.assertEqual(ic.day_boundary_hour({"owner": {"dayBoundaryHour": bad}}), 5, bad)
+
+    def test_the_example_file_matches_the_defaults(self):
+        path = os.path.join(ic.REPO_ROOT, "persona", "identity.example.json")
+        with open(path, encoding="utf-8") as fh:
+            example = json.load(fh)
+        self.assertEqual(example["owner"]["dayBoundaryHour"], ic.DEFAULTS["owner"]["dayBoundaryHour"])
+
+
+class OwnerEmailsTest(unittest.TestCase):
+    """``owner.email`` + ``owner.emails`` — the set the outbound send gate treats as the owner."""
+
+    def test_defaults_are_empty(self):
+        self.assertEqual(ic.DEFAULTS["owner"]["emails"], [])
+        self.assertEqual(ic.owner_emails(ic.DEFAULTS), frozenset())
+        self.assertEqual(ic.owner_emails({}), frozenset())
+
+    def test_single_plus_list_lowercased_and_deduplicated(self):
+        identity = {"owner": {"email": "Owner@Example.com",
+                              "emails": ["owner@example.com", " Other@Example.org ", ""]}}
+        self.assertEqual(ic.owner_emails(identity), {"owner@example.com", "other@example.org"})
+
+    def test_a_bare_string_where_the_list_belongs_is_one_item(self):
+        self.assertEqual(ic.owner_emails({"owner": {"emails": "a@example.com"}}), {"a@example.com"})
+
+    def test_wrong_shapes_are_skipped_never_raised(self):
+        for bad in (None, 42, {"x": "a@example.com"}, [None, 7, "not-an-address"]):
+            self.assertEqual(ic.owner_emails({"owner": {"emails": bad}}), frozenset(), bad)
+        self.assertEqual(ic.owner_emails({"owner": "nope"}), frozenset())
+        self.assertEqual(ic.owner_emails([]), frozenset())
+
+    def test_the_example_file_carries_the_list(self):
+        path = os.path.join(ic.REPO_ROOT, "persona", "identity.example.json")
+        with open(path, encoding="utf-8") as fh:
+            example = json.load(fh)
+        self.assertEqual(example["owner"]["emails"], ic.DEFAULTS["owner"]["emails"])
+
+
 if __name__ == "__main__":
     unittest.main()

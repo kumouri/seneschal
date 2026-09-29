@@ -1,0 +1,80 @@
+{
+  "_note": [
+    "Declares source -> projection -> consumer for every fact stored more than once.",
+    "Read by seneschal/scripts/check_context_stores.py (its docstring is the design record).",
+    "",
+    "This file declares ONLY pairs that ALREADY EXIST in the tree. It does not propose a store, migrate",
+    "one, or reserve an id for a future one: a pair nobody decided on is how a report-only checker",
+    "starts lying.",
+    "",
+    "`model-config` and `governor` are the cockpit's hand-duplicated copies of two daemon-side tables.",
+    "The cockpit is its own dependency world and deliberately never imports the daemon's modules, so",
+    "each copy is a projection maintained by hand. Neither is GENERATED, so neither can be",
+    "regenerate-and-diffed: both are `declared-only`, and `cockpit/server/test_parity.py` is the",
+    "value-level tripwire that actually holds them together in CI.",
+    "",
+    "`run-log`'s source is the local file; its projection is the active store's Run Log domain",
+    "(`store:` addresses a backend-neutral store domain, which this checker counts but never opens).",
+    "The store row is WRITTEN BY THE SAME RUN that appends the local file, not generated from it, so",
+    "there is nothing to regenerate-and-diff. `seneschal/state/` is gitignored, so CI cannot read the",
+    "source either way: this pair's venue is `dream`.",
+    "",
+    "`writer: \"modes\"` means AN LLM TURN WRITING PROSE, not a script — exactly why that pair is",
+    "declared-only. `venue` is `ci` for tracked pairs and `dream` for runtime pairs. CI runs",
+    "`--venue ci`; nothing runs `--venue dream` yet, and the checker prints that split on every run",
+    "rather than implying full coverage."
+  ],
+  "stores": [
+    {
+      "id": "model-config",
+      "source": "seneschal/scripts/model_config.py",
+      "writer": "human",
+      "venue": "ci",
+      "projections": [
+        {
+          "path": "cockpit/server/model_config.py",
+          "verify": "declared-only",
+          "reason": "A hand-maintained duplicate of the rank/alias table (the cockpit never imports daemon code). Not generated, so there is nothing to regenerate-and-diff; cockpit/server/test_parity.py compares the two tables value-for-value in the cockpit-server CI job instead.",
+          "readers": [
+            "cockpit/server/app.py"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "governor",
+      "source": "seneschal/scripts/governor.py",
+      "writer": "human",
+      "venue": "ci",
+      "projections": [
+        {
+          "path": "cockpit/server/governor.py",
+          "verify": "declared-only",
+          "reason": "A hand-maintained duplicate of the governor SCHEMA and rollup (the cockpit never imports daemon code). Not generated, so there is nothing to regenerate-and-diff; cockpit/server/test_parity.py compares the two value-for-value in the cockpit-server CI job instead.",
+          "readers": [
+            "cockpit/server/app.py"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "run-log",
+      "source": "seneschal/state/run-log.md",
+      "writer": "modes",
+      "venue": "dream",
+      "projections": [
+        {
+          "path": "store:run-log",
+          "verify": "declared-only",
+          "reason": "The store's Run Log row is written by the run that also appends the local file (seneschal/references/memory.md, the run-log protocol), not generated from it, so there is no renderer to re-run and nothing to regenerate-and-diff. seneschal/state/ is gitignored, so CI cannot read the local source either way. Declared-only until a renderer exists.",
+          "readers": [
+            "seneschal/references/memory.md",
+            "seneschal/references/advisor-chain.md",
+            "seneschal/SKILL.md",
+            "seneschal/modes/dream.md"
+          ]
+        }
+      ]
+    }
+  ]
+}

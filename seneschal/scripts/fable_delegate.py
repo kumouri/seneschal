@@ -25,10 +25,19 @@ governor trouble:** an absent config reads as default quotas (never a refusal by
 ledger reads as zero spend, and any unexpected exception from the governor call itself is treated as an
 allow — a governor bug must never cost a legitimate delegation.
 
-Seeds a budget-bounded tail of `state/telegram-thread.json` (the same rolling continuity the daemon
-seeds a fresh warm session with) so the one-shot has enough context to be useful without re-sending the
-whole conversation. Runs `claude -p --model <fable id> <prompt>` as a subprocess, subscription-billed —
-the SAME `ANTHROPIC_API_KEY`-scrubbing rule `presence.py` applies, so a stray key can never
+**It meters what it spends.** The one-shot asks the CLI for `--output-format json` and records the
+`usage` block it gets back on the `fable_oneshot` ledger row, so Fable — the tightest budget on the board
+and the only token budget that hard-blocks — rolls up its real cost (`governor.rollups()` accrues tokens
+from any row that carries them, not only `kind: "tokens"` rows). When usage genuinely can't be read, the
+row is marked `metered: "unavailable"` (`governor.METERED_UNAVAILABLE`) and carries NO count — a 0 would
+be indistinguishable from a free call, and the gate believes what it reads.
+
+Seeds a budget-bounded tail of the daemon's main-chat conversation cache —
+`state/telegram-threads/main.json`, with the legacy single-file `state/telegram-thread.json` as a second
+rung (the same rolling continuity the daemon seeds a fresh warm session with) — so the one-shot has
+enough context to be useful without re-sending the whole conversation. Runs
+`claude -p --model <fable id> --output-format json <prompt>` as a subprocess, subscription-billed — the
+SAME `ANTHROPIC_API_KEY`-scrubbing rule `presence.py`/`mini_dream.py` apply, so a stray key can never
 switch this call to metered API billing. Best-effort appends a `chat.event` to the cockpit transcript
 ring buffer (`cockpit_pipe.append_transcript_event`, `model: "claude-fable-5"`) so the cockpit's per-turn
 model badge shows the seam — fail-open, a tee failure never turns a good delegate answer into a failure.
@@ -43,6 +52,7 @@ Exit codes: 0 = success (the delegate's answer is on stdout); 2 = refused or fai
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -60,6 +70,12 @@ DEFAULT_MODEL = "claude-fable-5"
 DEFAULT_TIMEOUT_SEC = 600
 THREAD_TAIL_TURNS = 6        # matches presence.py's grounding tail length
 THREAD_TAIL_CHAR_BUDGET = 4000  # "budget-bounded" — never let a long thread blow out the one-shot prompt
+# The daemon's conversation cache, spelled here rather than imported — this module's standalone rule
+# (see `thread_seed`). Both rungs must stay in step with the daemon's per-topic thread cache
+# (`THREAD_DIR` / `LEGACY_THREAD_FILE` in presence.py); drifting apart fails SILENTLY — an empty seed,
+# no exception, no log line.
+THREAD_DIR = "telegram-threads"
+LEGACY_THREAD_FILE = "telegram-thread.json"
 
 # Windows: hidden console for the claude -p child, same reasoning as presence.py (a
 # console child of a console-less parent otherwise steals focus with a fresh visible window). 0 off Windows.
@@ -75,7 +91,6 @@ def child_env() -> dict:
 
 
 def _load_json(path: str, default):
-    import json
     try:
         with open(path, "r", encoding="utf-8") as fh:
             return json.load(fh)
@@ -85,12 +100,29 @@ def _load_json(path: str, default):
 
 def thread_seed(state_dir: str, max_turns: int = THREAD_TAIL_TURNS,
                char_budget: int = THREAD_TAIL_CHAR_BUDGET) -> str:
-    """Recent conversation tail from state/telegram-thread.json — budget-bounded by BOTH a turn count
-    and a character cap, so a long-running thread never blows out the one-shot's own prompt.
+    """Recent conversation tail from the daemon's MAIN-CHAT continuity cache — budget-bounded by BOTH
+    a turn count and a character cap, so a long-running thread never blows out the one-shot's own
+    prompt.
 
     Deliberately duplicated (not imported from presence.py) so this stays a standalone, dependency-light
-    script anyone can read top to bottom. Newest-last (chronological), matching presence.thread_tail's shape."""
-    thread = _load_json(os.path.join(state_dir, "telegram-thread.json"), [])
+    script anyone can read top to bottom — the same own-parsing precedent mini_dream.py sets rather than
+    importing the daemon module. Newest-last (chronological), matching presence.thread_tail's shape.
+
+    **It follows the cache's per-topic layout.** Duplicating the path is what makes this module
+    standalone, and it is also what would make it a silent orphan: once the daemon migrates the single
+    `telegram-thread.json` into `telegram-threads/main.json`, a reader still naming the old path
+    returns "" forever with nothing raising and nothing logging — a delegation quietly losing all of its
+    context. The legacy path stays as a SECOND rung because a checkout can run this before the daemon
+    has migrated, and the two are never both present after a migration.
+
+    **It seeds the main chat only — a named residual, not an oversight.** A delegation is invoked as a
+    CLI from inside a turn that may belong to a private-chat topic, and nothing on that invocation
+    carries the topic; plumbing one would mean putting a thread id in the warm session's prompt for it
+    to copy, i.e. a fact it can get wrong. So a delegation raised inside a topic is seeded with the
+    main chat's tail — honest context, just not topic-scoped."""
+    thread = _load_json(os.path.join(state_dir, THREAD_DIR, "main.json"), None)
+    if thread is None:
+        thread = _load_json(os.path.join(state_dir, LEGACY_THREAD_FILE), [])
     if not isinstance(thread, list) or not thread:
         return ""
     lines: list[str] = []
@@ -123,23 +155,58 @@ def default_conversation_id(state_dir: str) -> str | None:
     return sid if isinstance(sid, str) and sid.strip() else None
 
 
-def run_claude(prompt: str, model: str, claude_bin: str, timeout: int, runner=subprocess.run) -> tuple[bool, str]:
-    """One `claude -p --model <model> <prompt>` one-shot. `runner` is swappable (tests pass a fake with
-    subprocess.run's signature) so this is testable with NO real `claude` spawn and NO network. Returns
-    (ok, text) — `text` is stdout on success, a short error message on failure. Never raises past here."""
+def parse_result_json(stdout: str) -> tuple[str | None, dict | None]:
+    """Pull (answer_text, usage) out of `claude -p --output-format json`'s single result object.
+
+    Returns `(None, None)` for anything that isn't a well-formed success result — a plain-text reply
+    from an older CLI, a truncated line, an `is_error` result. The caller then falls back to treating
+    stdout as the answer and records the spend as explicitly UNMETERED rather than as zero."""
+    try:
+        data = json.loads(stdout)
+    except (ValueError, TypeError):
+        return None, None
+    if not isinstance(data, dict) or data.get("is_error"):
+        return None, None
+    text = data.get("result")
+    if not isinstance(text, str):
+        return None, None
+    usage = data.get("usage")
+    return text, usage if isinstance(usage, dict) else None
+
+
+def run_claude(prompt: str, model: str, claude_bin: str, timeout: int,
+               runner=subprocess.run) -> tuple[bool, str, dict | None]:
+    """One `claude -p --model <model> --output-format json <prompt>` one-shot. `runner` is swappable
+    (tests pass a fake with subprocess.run's signature) so this is testable with NO real `claude` spawn
+    and NO network. Returns (ok, text, usage) — `text` is the delegate's answer on success, a short error
+    message on failure. Never raises past here.
+
+    **`--output-format json` is what makes this meterable.** The CLI's default `text` mode returns the
+    answer and nothing else, which would leave `delegate` no usage to record — and Fable is the one token
+    budget that hard-blocks, so it is the single worst place in the system to meter nothing. The json
+    mode carries the same `usage` block the daemon's stream-json mode already parses; `usage` is None
+    only if that ever stops being true."""
     try:
         proc = runner(
-            [claude_bin, "-p", "--model", model, prompt],
+            [claude_bin, "-p", "--model", model, "--output-format", "json", prompt],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=timeout, env=child_env(), creationflags=_NO_WINDOW,
         )
     except (OSError, subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
-        return False, f"fable delegate failed to run: {e}"
+        return False, f"fable delegate failed to run: {e}", None
     out = (proc.stdout or "").strip()
     if proc.returncode != 0 or not out:
         err = (proc.stderr or "").strip()[:400]
-        return False, f"fable delegate exited {proc.returncode}: {err or 'no output'}"
-    return True, out
+        return False, f"fable delegate exited {proc.returncode}: {err or 'no output'}", None
+    text, usage = parse_result_json(out)
+    if text is None:
+        # Not a parseable success result. Hand back the raw stdout (it may well be the answer, from a
+        # CLI without json mode) and let the caller mark the spend unmetered — honest, not zero.
+        return True, out, None
+    text = text.strip()
+    if not text:
+        return False, "fable delegate returned an empty result", None
+    return True, text, usage
 
 
 def append_transcript_badge(state_dir: str, text: str, source: str = "cockpit") -> None:
@@ -168,7 +235,18 @@ def delegate(task: str, state_dir: str = DEFAULT_STATE_DIR, model: str = DEFAULT
     """
     cfg = model_config.load(state_dir)
     ceiling = cfg.get("max_routable_model")
-    if not model_config.admits_fable(ceiling):
+    backend = cfg.get("backend") or model_config.DEFAULT_BACKEND
+    if backend != "claude-cli":
+        # Fable is a Claude-family mechanism with no defined meaning on another backend — refuse
+        # cleanly rather than let admits_fable's unconditional False on this backend read as an
+        # ordinary ceiling-too-low refusal.
+        return False, (
+            f"Fable delegation refused: the live warm backend is {backend!r}, not claude-cli. Fable "
+            "delegation is a Claude-family mechanism and has no meaning on another backend — switch "
+            "the cockpit's backend dial back to claude-cli before any delegation can run, or handle "
+            "this turn yourself."
+        )
+    if not model_config.admits_fable(ceiling, backend=backend):
         return False, (
             f"Fable delegation refused: state/model-config.json's max_routable_model ({ceiling!r}) "
             "doesn't admit Fable-tier. Raise the ceiling in the cockpit's Model dials panel (or "
@@ -187,12 +265,20 @@ def delegate(task: str, state_dir: str = DEFAULT_STATE_DIR, model: str = DEFAULT
     full_prompt = f"{seed}{task}".strip()
     governor.begin_fable_call(state_dir)
     try:
-        ok, out = run_claude(full_prompt, canon, claude_bin, timeout, runner=runner)
+        ok, out, usage = run_claude(full_prompt, canon, claude_bin, timeout, runner=runner)
     finally:
         governor.end_fable_call(state_dir)
     if ok:
         try:
-            governor.append_spend(state_dir, "fable_oneshot", model=canon, conversation_id=conv_id)
+            # The one-shot's REAL usage, or an explicit unmetered marker — never a silent zero. The
+            # fable_oneshot gate trusts this number, so "unknown" has to look different from "free".
+            if usage is not None:
+                governor.append_spend(state_dir, "fable_oneshot", model=canon,
+                                      conversation_id=conv_id, usage=usage)
+            else:
+                governor.append_spend(state_dir, "fable_oneshot", model=canon,
+                                      conversation_id=conv_id,
+                                      metered=governor.METERED_UNAVAILABLE)
         except Exception:  # noqa: BLE001 -- a ledger-append failure must never turn a good answer into one
             pass
         append_transcript_badge(state_dir, out)
@@ -207,7 +293,7 @@ def _main(argv: list[str]) -> int:
     p.add_argument("--claude-bin", default="claude")
     p.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SEC)
     p.add_argument("--no-thread", action="store_true",
-                   help="skip seeding the telegram-thread.json tail (a self-contained task)")
+                   help="skip seeding the conversation-cache tail (a self-contained task)")
     p.add_argument("--conversation-id", default=None,
                    help="override Oikonomos's per-conversation Fable-quota key (default: the daemon's "
                         "current warm-session id from state/presence-state.json, if any)")

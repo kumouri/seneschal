@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "schema": "seneschal.watch-suppressions/1",
+  "_doc": "TOPICS THE OWNER HAS SAID THEY NEVER WANT THE WATCH COMMS PEEK TO RAISE — the list `scripts/watch_suppress.py` checks a Watch send against before it leaves. This tracked file is the EXAMPLE: copy it to `watch-suppressions.json` beside it (gitignored — its entries name the owner's own domains, vendors and accounts) and add patterns there. With no live file, this example is read instead, and it ships with no patterns, so a fresh install suppresses nothing. IT ANSWERS ONE QUESTION — 'has the owner said they never want this topic?' — and it is NOT the ack gate, which answers 'has the owner already acked the thing this peek is chasing?'. Both run, either can block, and neither replaces the other. WHAT THIS MUST NEVER BECOME: a mute switch for the peek, a rule engine, or a place to park a topic that is merely noisy this week. Every entry is a thing the owner has SAID they do not want, with the reason recorded in place, and a pattern nobody can name a reason for should be deleted rather than kept.",
+  "_matching": "A pattern matches when it appears as a CONTIGUOUS, CASE-INSENSITIVE SUBSTRING of the message text. That is the whole rule: no regex, no globs, no token logic, no anchors — a pattern is read as literal text and a regex metacharacter in one is just that character. Patterns shorter than 4 characters are IGNORED, because a two-letter pattern matches nearly every message and the failure mode of this file is suppressing something the owner needed. WHERE A PATTERN IS AMBIGUOUS, UNDER-MATCH: prefer the specific string (a domain, an account name) over the general one (a vendor's name), and accept that a rewording gets through. A message that slips past costs one nudge; a pattern that over-matches costs a message the owner never learns was withheld.",
+  "_never": "🚨 Critical, 🛑 Super-Critical and Call Me items are NEVER suppressible, by any pattern, on any path. They fire from `sentinel.check_reminders`, a different door that does not consult this file at all — and `watch_suppress.py` refuses them a second time anyway, so a future caller cannot widen the door by accident. Do not add a pattern that tries to reach them.",
+  "_example_entry": {
+    "pattern": "old-shop.example",
+    "added": "YYYY-MM-DD",
+    "reason": "The owner is deliberately letting this domain expire; the registrar will keep escalating until deletion. The pattern is the DOMAIN rather than the registrar's name or 'expired', deliberately: a real alert about a domain the owner is keeping must still reach them."
+  },
+  "patterns": []
+}

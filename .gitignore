@@ -5,19 +5,9 @@ __pycache__/
 .venv/
 
 # Secrets (email/OAuth/SMTP/SMS/Telegram/calls/Discord/Signal/Google) — never commit
-**/gmail_oauth.env
-**/google.env
-**/proton.env
-**/push-sms.env
-**/push-call.env
-**/telegram.env
-**/discord.env
-**/signal.env
-**/rag.env
-**/router.env
-**/sentiment.env
-**/ha.env
-**/cockpit.env
+# Every *.env file is ignored globally, so a new secret env file is ignored by default rather than
+# by remembering to add a per-name line. Only the tracked *.env.example templates ship.
+*.env
 **/notion-mcp.json
 **/slack-mcp.json
 **/*.secret
@@ -54,6 +44,17 @@ seneschal/store/config.json
 seneschal/store/notion/schema.md
 seneschal/store/notion/mcp.json
 
+# References — per-install owner data kept beside its tracked *.example.json (the entries name the
+# owner's own topics, vendors, accounts and reminder vocabulary). See seneschal/references/CLAUDE.md.
+seneschal/references/watch-suppressions.json
+seneschal/references/reminder-aliases.json
+# The Telegram topic routing table (purpose -> topic title); telegram_topics.py falls back to the
+# tracked telegram-topics.example.json when it is absent. Runtime thread ids live in state/.
+seneschal/references/telegram-topics.json
+# Which repositories the PR guards act on + their base branch (repo_config.py; falls back to the
+# tracked pr-guard.example.json, then to git).
+seneschal/references/pr-guard.json
+
 # Archons (Forge mode) — generated scaffolds, run outputs, runtime state, and
 # per-archon private inputs (profile, watchlist, voice profile) stay local; only
 # *.example.*, state/README.md, and tools are tracked. Each archon also carries its
@@ -62,7 +63,11 @@ seneschal/store/notion/mcp.json
 archons/scaffolds/
 archons/need/
 archons/stable/
-archons/*/out/
+# `out/*` rather than `out/`: git never descends into an excluded *directory*, so a re-include of a
+# tracked README inside one would be silently ignored. Only an out/README.md is ever tracked —
+# deliverables carry the owner's data.
+archons/*/out/*
+!archons/*/out/README.md
 archons/*/state/*
 !archons/*/state/README.md
 !archons/*/state/*.example.json
@@ -74,11 +79,19 @@ archons/*/voice-profile.md
 
 # Runtime state — local-first, regenerated; track only docs + examples.
 # The runtime memory logs (state/run-log.md, state/carry-over.md,
-# state/context-digest.md) live here so the daemon can run off main without pull
+# state/standing-safety.json, state/brief-prestage.json, state/open-loops.json) live here so the daemon can run off main without pull
 # conflicts on files the assistant rewrites at runtime; the active store is the
-# system of record. See seneschal/state/README.md.
+# system of record. So do the background-job records and their bookkeeping (state/jobs/,
+# state/job-pushes/, state/session-mail/, state/current-turn.json, state/pending-checks.jsonl,
+# state/owi-*). A job's --worktree checkout lives OUTSIDE the repo (a sibling
+# `seneschal-worktrees/` dir, or $SENESCHAL_WORKTREE_ROOT), so it never needs a rule here.
+# See seneschal/state/README.md.
 seneschal/state/*
 !seneschal/state/README.md
 !seneschal/state/*.example.json
 !seneschal/state/*.example.jsonl
 !seneschal/state/*.example.md
+
+# Claude Code's per-session worktrees (and the job worktrees' marker path) — disposable checkouts,
+# never part of the tree. Docs name this path, so it must resolve as ignored runtime, not a dangling pointer.
+.claude/worktrees/

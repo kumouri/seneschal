@@ -1,0 +1,35 @@
+{
+  "//": "The allowlist of check_wall_clock.py (the CI gate for a wall-clock read with no explicit zone, inside checkers/tests/CI). `reason` is required and is checked at load time: debt is allowed here, unexplained debt is not. Matched on path + symbol + kind rather than a line number, so an edit above the call site does not silently un-allow it. Every row below is a test whose SUBJECT is the machine-local clock, so reading it is the property under test rather than a leak. Design record: seneschal/scripts/check_wall_clock.py's docstring.",
+  "allow": [
+    {
+      "path": "seneschal/scripts/test_proteus_tools.py",
+      "symbol": "_posted",
+      "kind": "naive-now",
+      "reason": "Deliberately host-local, mirroring `score_jobs.job_age_days`'s own host-local arithmetic (`time.mktime(time.strptime(...))` against `time.time()`, both PROCESS-local by that function's design). `_posted(days_ago)` builds a `YYYY-MM-DD` string from `datetime.now()` for `job_age_days` to parse back via `time.mktime`, which interprets it as LOCAL midnight — so both sides read the SAME host's local clock, in the SAME process, milliseconds apart. Switching to `datetime.now(timezone.utc)` would CREATE a host-dependent mismatch rather than remove one: on a host behind UTC the UTC calendar date is already tomorrow's for several hours each evening, shifting every fixture's intended age by up to a day."
+    },
+    {
+      "path": "seneschal/scripts/test_outbox_cli.py",
+      "symbol": "test_fallback_without_tz_common_is_machine_local",
+      "kind": "naive-now",
+      "reason": "Asserts the documented fallback: with `tz_common` unavailable, the default ack date is the MACHINE's local date. Reading the machine-local clock is the expectation itself, and the before/after pair already tolerates a midnight straddle."
+    },
+    {
+      "path": "seneschal/scripts/test_tz_common.py",
+      "symbol": "test_machine_local_and_silent",
+      "kind": "naive-now",
+      "reason": "Asserts tz_common's documented last-rung fallback (no owner timezone configured -> the machine-local zone). The machine's own offset is the expected value; only the UTC offset is compared, never a date, so no midnight straddle can flip it."
+    },
+    {
+      "path": "seneschal/scripts/test_tz_common.py",
+      "symbol": "test_offset_minutes_matches_machine",
+      "kind": "naive-now",
+      "reason": "Same fallback rung as test_machine_local_and_silent: with no owner zone, offset_minutes() must equal the machine's own UTC offset, which is read from the machine-local clock by design. Offsets only, never a date."
+    },
+    {
+      "path": "seneschal/scripts/test_tz_common.py",
+      "symbol": "test_falls_back_and_warns_once",
+      "kind": "naive-now",
+      "reason": "An unresolvable configured zone must fall back to the machine-local zone; the assertion compares UTC offsets against the machine's own, which is the fallback's definition. Offsets only, never a date."
+    }
+  ]
+}

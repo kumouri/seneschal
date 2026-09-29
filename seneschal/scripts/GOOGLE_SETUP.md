@@ -15,7 +15,15 @@ Scripts:
 
 Reading calendar + reading/drafting/labeling mail is **act-low** (the assistant just does it). **Sending
 mail** and **writing calendar events** are **act-high / outbound** — the assistant draft-and-holds and only
-fires the `send` / `send-draft` / `create-event` subcommands on the owner's approval.
+fires the `send` / `send-draft` / `create-event` / `delete-event` subcommands on the owner's approval
+— and the send gate enforces that in code (`SEND_GATE_SETUP.md`): a send or an invite reaching anyone
+but the owner exits 3 with nothing sent unless an approved row covers it.
+
+> **`gcal_api.py` is a live calendar door, not a fallback nobody uses.** On a host with no Calendar MCP
+> it is the door. The order every mode follows — Calendar MCP if the session has one, otherwise this
+> bridge, "no calendar" only when *both* fail — and the rule that **a zero-event read is an empty day
+> rather than a missing integration**, live in `../references/calendar-mapping.md`. Read that before
+> wiring a mode to the calendar.
 
 ---
 
@@ -98,11 +106,23 @@ Google error message.
 ## Notes
 
 - **Time windows.** `--days` / `--start` / `--end` bound the calendar window; bounds are sent to Google in
-  UTC (RFC-3339). Event *results* carry their own timezone from Google. For a precise local day, pass
-  explicit `--start`/`--end`.
+  UTC (RFC-3339). Event *results* carry their own timezone from Google. **A bare `--start 2026-08-19`
+  (or `--end`) is the owner-local calendar day** — stamped with the owner's UTC offset for that date
+  (`owner.timezone` via `tz_common`, else the machine's clock), so `--start D --end D` is exactly day D.
+  An explicit ISO datetime passes through as written. `--days N` is a rolling window from *now*, not a
+  calendar day.
+- **`--env-file` on every call.** A missing or unreadable env file is a handled `{"ok": false,
+  "error": ...}` with exit 1 — the same shape as any other configuration failure, so a caller that
+  matches on the JSON reads it correctly. The failure table is in `../references/calendar-mapping.md`.
+- **What the calendar bridge can't do.** No `update-event`, no `suggest_time`, **no RSVP** — the
+  Calendar MCP has those and this doesn't. An approved RSVP goes back to the owner to do in Google
+  Calendar; it is never reported as done. `events` reads one `--calendar` at a time; only `freebusy`
+  takes a comma-separated list.
 - **Sending is gated.** `gmail_api.py send` / `send-draft` and `gcal_api.py create-event` / `delete-event`
   are the only mutating/outbound subcommands. Everything else is read-only. Keep to the act-low/ask-high
-  policy: draft with `draft`, hold for approval, then `send-draft`.
+  policy: draft with `draft`, hold for approval, then `send-draft`. `send-draft` and `delete-event`
+  cannot see their recipients locally, so the send gate keys them on the draft id / event id — a held
+  draft that recorded `draftId`, or `send_gate.py grant --kind email|calendar --recipient <id>`.
 - **Secrets.** `google.env` and `seneschal/state/google_tokens.json` are gitignored; only
   `google.env.example` and `google_tokens.example.json` are tracked. Never commit a real refresh token.
 - **Revoke / re-auth.** To reset an account, revoke the app at <https://myaccount.google.com/permissions>

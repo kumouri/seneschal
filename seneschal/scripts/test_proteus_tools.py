@@ -1120,7 +1120,7 @@ class MisleadingRemote(unittest.TestCase):
     def test_contradiction_detected_from_workplace_type(self):
         note = score_jobs.remote_contradiction(self._job(workplace_type="Hybrid", remote=False))
         self.assertIn("misleading:", note)
-        self.assertIn("workplace_type=hybrid", note)
+        self.assertIn("workplace type hybrid", note)
         self.assertIn("remote=false", note)
 
     def test_contradiction_from_workplace_type_alone(self):

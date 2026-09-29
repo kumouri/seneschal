@@ -13,6 +13,7 @@ import os
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
@@ -425,6 +426,119 @@ class PipeHubBroadcast(unittest.IsolatedAsyncioTestCase):
         hub = cp.PipeHub(token="t", on_chat_send=_noop3, on_control_restart=_noop0,
                          on_status_get=lambda: {})
         hub.broadcast_threadsafe({"type": "chat.event"}, None)  # no loop at all — must not raise
+
+
+class SessionAwareRetention(unittest.TestCase):
+    """The ring retains WHOLE SESSIONS, bounded by the row cap.
+
+    A pure row cap evicts mid-session, so an old session is *present but truncated* — which reads as
+    "not much happened" rather than "we dropped most of it", and that is the worse failure. It also
+    lets one busy day evict a quiet week.
+    """
+
+    def _lines(self, spec):
+        out = []
+        for sid, n in spec:
+            for i in range(n):
+                out.append(json.dumps({"kind": "assistant_output", "session_id": sid, "i": i}) + "\n")
+        return out
+
+    def test_keeps_whole_sessions_newest_first(self):
+        lines = self._lines([(f"s{i}", 10) for i in range(40)])
+        kept = cp._session_aware_tail(lines)
+        sids = [json.loads(l)["session_id"] for l in kept]
+        self.assertEqual(len(set(sids)), cp.TRANSCRIPT_SESSION_CAP)
+        self.assertIn("s39", sids, "the newest session must survive")
+        self.assertNotIn("s0", sids)
+
+    def test_a_kept_session_is_never_half_present(self):
+        lines = self._lines([("old", 10), ("new", 10)])
+        kept = cp._session_aware_tail(lines)
+        counts = {}
+        for l in kept:
+            r = json.loads(l)
+            counts[r["session_id"]] = counts.get(r["session_id"], 0) + 1
+        for sid, n in counts.items():
+            self.assertEqual(n, 10, f"{sid} was kept partially — the whole point is that it isn't")
+
+    def test_the_row_cap_is_still_a_hard_ceiling(self):
+        # One session larger than the entire cap: kept, but TRUNCATED. A backstop that can be
+        # exceeded is not a backstop — this is the case the pre-existing cap test caught.
+        lines = self._lines([("huge", cp.TRANSCRIPT_CAP + 500)])
+        kept = cp._session_aware_tail(lines)
+        self.assertEqual(len(kept), cp.TRANSCRIPT_CAP)
+        self.assertEqual(json.loads(kept[-1])["i"], cp.TRANSCRIPT_CAP + 499, "keep the NEWEST rows")
+
+    def test_legacy_rows_without_a_session_id_group_together(self):
+        # Rows written before events carried a session_id aren't attributable to any session;
+        # they age out as one bucket.
+        lines = [json.dumps({"kind": "turn_done", "i": i}) + "\n" for i in range(5)]
+        lines += self._lines([("s1", 5)])
+        kept = cp._session_aware_tail(lines)
+        self.assertEqual(len(kept), 10)
+
+    def test_a_corrupt_line_rides_with_its_neighbours(self):
+        lines = self._lines([("s1", 3)])
+        lines.insert(1, "{ not json\n")
+        kept = cp._session_aware_tail(lines)
+        self.assertEqual(len(kept), 4, "a bad line must not split a session in two")
+
+
+class ResultPreviewStripsChannelDeclaration(unittest.TestCase):
+    """`turn_done`'s reply_preview runs the result through `channel_declare` when that module is
+    present, and passes it through untouched when it is not (an optional dependency)."""
+
+    class _StubDeclare:
+        @staticmethod
+        def extract_channel_declaration(text):
+            prefix = "[[channel:telegram]]\n"
+            return ("telegram", text[len(prefix):]) if text.startswith(prefix) else (None, text)
+
+    def _turn_done(self, result):
+        return cp.build_chat_event_from_stream({"type": "result", "result": result}, source="test")
+
+    def test_declaration_is_stripped_before_the_preview(self):
+        with unittest.mock.patch.object(cp, "channel_declare", self._StubDeclare):
+            ev = self._turn_done("[[channel:telegram]]\nhello there")
+        self.assertEqual(ev["reply_preview"], "hello there")
+
+    def test_a_bare_marker_leaves_no_preview(self):
+        with unittest.mock.patch.object(cp, "channel_declare", self._StubDeclare):
+            ev = self._turn_done("[[channel:telegram]]\n")
+        self.assertNotIn("reply_preview", ev)
+
+    def test_without_the_module_the_reply_passes_through(self):
+        with unittest.mock.patch.object(cp, "channel_declare", None):
+            ev = self._turn_done("plain reply")
+        self.assertEqual(ev["reply_preview"], "plain reply")
+
+
+class TranscriptArchiveTee(unittest.TestCase):
+    """Every ring append is also handed to the durable archive — structurally, inside
+    `append_transcript_event` — and a missing archive module degrades to a plain ring."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+
+    def test_append_tees_the_same_event_to_the_archive(self):
+        seen = []
+
+        class _Stub:
+            @staticmethod
+            def archive_event(state_dir, event):
+                seen.append((state_dir, event))
+                return True
+
+        ev = cp.chat_event("turn_started", source="test")
+        with unittest.mock.patch.object(cp, "transcript_archive", _Stub):
+            cp.append_transcript_event(self.dir, ev)
+        self.assertEqual(seen, [(self.dir, ev)])
+        self.assertEqual(len(cp.read_transcript_tail(self.dir)), 1)
+
+    def test_without_the_archive_module_the_ring_still_works(self):
+        with unittest.mock.patch.object(cp, "transcript_archive", None):
+            cp.append_transcript_event(self.dir, cp.chat_event("turn_started", source="test"))
+        self.assertEqual(len(cp.read_transcript_tail(self.dir)), 1)
 
 
 if __name__ == "__main__":

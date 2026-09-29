@@ -83,6 +83,14 @@
           "validate": "^(|MarkdownV2|HTML)$"
         },
         {
+          "name": "TELEGRAM_FORMAT",
+          "required": false,
+          "secret": false,
+          "default": "",
+          "prompt": "Outbound formatting: 'markdown' converts the assistant's Markdown to Telegram HTML (a rejected render is re-sent once as plain text); '' or 'plain' sends it verbatim",
+          "validate": "^(|plain|markdown)$"
+        },
+        {
           "name": "TELEGRAM_API_BASE",
           "required": false,
           "secret": false,
@@ -367,6 +375,29 @@
           "default": "0.7",
           "prompt": "Minimum confidence to accept a 'trivial' verdict (below = escalate)",
           "validate": "^(0(\\.\\d+)?|1(\\.0+)?)$"
+        },
+        {
+          "name": "ROUTER_STEER_MODEL",
+          "required": false,
+          "secret": false,
+          "default": "",
+          "prompt": "A smaller/faster model for the mid-turn steer arm only ('' = use ROUTER_MODEL)"
+        },
+        {
+          "name": "ROUTER_STEER_TIMEOUT",
+          "required": false,
+          "secret": false,
+          "default": "20",
+          "prompt": "Per-call timeout for the steer arm, in seconds",
+          "validate": "^[1-9]\\d*$"
+        },
+        {
+          "name": "ROUTER_KEEP_ALIVE",
+          "required": false,
+          "secret": false,
+          "default": "30m",
+          "prompt": "How long Ollama keeps the router model resident after a call (Ollama's keep_alive, e.g. 30m, 1h; its own default is 5m)",
+          "validate": "^(-1|\\d+(\\.\\d+)?(ms|s|m|h)?)$"
         }
       ],
       "verify": {
@@ -393,7 +424,7 @@
       "ollama_models": ["nomic-embed-text"],
       "notes": [
         "All vars have safe defaults baked into rag_common.py — rag.env is optional; write it only to override.",
-        "Verify succeeds (exit 0) only once the index has content — run the post steps first; an empty index prints [] and exits non-zero by design (the fallback signal)."
+        "Verify succeeds (exit 0) only once the index has content — run the post steps first; an empty index prints [] and exits non-zero by design (the fallback signal). On day one that's expected, not a failure: verify.pending_data matches it (exit 3 + 'rag index is empty' on stderr) and the chapter closes done, not blocked. An unreachable embedder also exits 3 but with a different stderr line — that one is a real failure."
       ],
       "vars": [
         {
@@ -434,7 +465,12 @@
       ],
       "verify": {
         "cmd": "python seneschal/scripts/rag_query.py \"setup smoke test\" --k 1 --no-record",
-        "expect": "["
+        "expect": "[",
+        "pending_data": {
+          "exit": 3,
+          "stderr": "rag index is empty",
+          "summary": "configured; index builds after first runs"
+        }
       }
     },
     {
@@ -563,6 +599,13 @@
           "secret": false,
           "prompt": "Recipient E.164 (omit to use the Worker's USER_CELL_E164 default)",
           "validate": "^\\+\\d{7,15}$"
+        },
+        {
+          "name": "PUSH_CALL_CALENDAR_ACCOUNT",
+          "required": false,
+          "secret": false,
+          "prompt": "Google account label whose calendar a --talk call's context snapshot reads (omit to use the only connected account)",
+          "validate": "^\\S+$"
         }
       ],
       "verify": {

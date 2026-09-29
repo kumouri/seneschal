@@ -1,0 +1,19 @@
+{
+  "_comment": "Copy to company-intel.json. Proteus's durable company memory: employer facts its work-ups learned (layoffs, benefits, RTO reversals, culture). score_jobs.py matches each key against a job's COMPANY field (word boundaries, case-insensitive) and adds `adjust` (clamped to +/-20); a negative entry also raises a flag. Proteus never writes this file itself: it appends proposals to state/company-intel-pending.jsonl via tools/record_intel.py, and tools/promote_intel.py (Dream step 2e) merges them here (locally by default; `--via-pr` opens a PR, for private forks only). company-intel.json itself is gitignored owner data. An entry whose `source` mentions 'owner' (or that carries \"by_owner\": true) is the owner's decision — a promotion may strengthen it but never weaken it (move toward zero, flip sign, drop tags, or replace the note).",
+  "companies": {
+    "Example Corp": {
+      "adjust": -8,
+      "tags": ["layoffs"],
+      "note": "Two reductions in force in the last year; verify team stability before investing.",
+      "source": "Proteus work-up examplecorp-swe",
+      "updated": "2026-01-15"
+    },
+    "Acme": {
+      "adjust": 0,
+      "tags": ["policy"],
+      "note": "A reading rule rather than a tilt: confirm the role is not a contract-to-hire before drafting.",
+      "source": "owner: seeded by hand",
+      "updated": "2026-01-15"
+    }
+  }
+}
