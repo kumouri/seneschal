@@ -17,6 +17,22 @@ Router: run the mechanism, log the evidence, let the owner gate any action on it
 - Counting happens inside `rag_query.py` on every semantic recall. No Ollama beyond what RAG already
   uses; if the semantic layer is down, there's simply nothing to count.
 
+### The sentiment cross-check (`sentiment.py`) — phase 2, and it *does* have config
+
+`INTEGRATIONS.md` routes here for it, so: `sentiment.py` is a **separate** local-Ollama classifier that
+scores the *emotional weight* of a forgetting-event's `reaction_text`. Dream runs it **offline**, never in
+a live turn. It shares the Router's `qwen3.5:4b` model (`ollama pull qwen3.5:4b` covers both) and reads
+`sentiment.env` — `cp sentiment.env.example sentiment.env`, keys `OLLAMA_URL` + `SENTIMENT_MODEL`,
+gitignored.
+
+**Its failure mode is the quietest one in this directory.** `classify_sentiment` **never raises**: an
+unreachable Ollama, a wrong port, bad JSON, a non-numeric or out-of-range weight all return the
+**neutral abstain** — `weight 0.0, confidence 0.0`, with the cause in a `reason` field. That is correct
+behaviour for a cross-check, but it means *a misconfigured sentiment layer looks exactly like a corpus
+with no emotional content in it.* Read `reason` before concluding anything from a run of zeroes. **If your
+Ollama listens anywhere but the default `http://localhost:11434`** (see `RAG_SETUP.md`), `OLLAMA_URL` must
+be set in `sentiment.env` or every score abstains.
+
 ## The knobs
 
 | Knob | Default | Meaning |
@@ -40,7 +56,7 @@ Router: run the mechanism, log the evidence, let the owner gate any action on it
 
 ```sh
 python rag_index.py --stats            # includes a salience line once anything is tagged/touched
-python salience_rollup.py              # the weekly report (Dream runs this): per-category buckets
+python salience_rollup.py              # the weekly report (Dream runs this; stamps dream_steps "rollup"): per-category buckets
 python salience_rollup.py --json       # machine shape; --propose adds gated draft text
 ```
 

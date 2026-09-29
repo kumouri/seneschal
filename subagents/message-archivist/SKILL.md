@@ -111,8 +111,7 @@ per `../../seneschal/references/memory.md`.
 
 ## Not a minted Archon (yet)
 
-This is a **subagent skill**, not a minted Archon (Forge mode). An Archon is for outward-facing,
-eval-gated, autonomous staff that act on the outside world; this is deterministic local ETL with zero
-outbound action, so a subagent is the right first form. It's promotable later — if it grows autonomy
-(scheduled continuous archiving, enrichment with its own budget/evals), mint the Archon then and reuse
-these same stdlib scripts as its least-privilege tools.
+This is a **subagent skill**, not a minted Archon (Forge mode) — deterministic local ETL with zero
+outbound action. Why that is the line, and what would make it promotable:
+`../../seneschal/references/archons.md` → "When something is a subagent skill rather than a minted
+Archon".

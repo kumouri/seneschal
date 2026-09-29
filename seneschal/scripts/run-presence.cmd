@@ -39,6 +39,9 @@ REM    To point elsewhere:  --notion-mcp "C:\path\to\notion-mcp.json" ^   ·  to
 REM    (stdio internal-integration variant only: also  set "NOTION_TOKEN=ntn_your_token"  above.)
 REM  * Discord two-way channel (DISCORD_SETUP.md): AUTO-DETECTED — just create scripts\discord.env
 REM    (gateway push when the venv is live, REST fallback otherwise). To force OFF:  --no-discord ^
+REM  * Archon-site supervision (seneschal/references/archons.md): AUTO-DETECTED — on whenever any
+REM    archons\*\site.json exists (an archon's own local web app). To force OFF:
+REM    --no-archon-sites ^   ·  to scan a different root (mainly for tests):  --archons-dir "<path>" ^
 REM  * Phone-call reminders (Call Me):  --call-env "%~dp0push-call.env" ^
 REM  * Internal scheduled runs (brief/wrap/dream/journal + the once-per-day exact-time reminder SEED)
 REM    are ON by default; add  --no-slots  to disable them all,  --no-seed-day  to disable only the

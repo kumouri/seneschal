@@ -26,37 +26,47 @@ persona/           who the assistant is + who it works for (see persona/README.m
                    persona.default.md / persona.template.md / identity.example.json; the real
                    persona.md / identity.json / owner-profile.md are gitignored per-install
 seneschal/
-  SKILL.md         the orchestrator — modes (Chat/Brief/Wrap/Triage/Ask/Watch/Dream/Journal/
-                   Reminders/Forge/Archive), execution rules, the Advisor Chain, reference index
+  SKILL.md         the orchestrator — a thin mode router (Chat/Brief/Wrap/Triage/Ask/Reminders/
+                   Watch/Dream/Forge → modes/; Journal/Archive → their subagents), execution rules,
+                   the Advisor Chain, reference index
+  modes/           one self-contained body per dispatchable mode, read imperatively on dispatch —
+                   so an edit here edits a live run (design: docs/grounding-restructure-spec.md)
   store/           the pluggable system of record (see store/README.md): config.json picks the
                    active backend; each store/<backend>/ pair is schema.md (domain map) + mapping.md
                    (the six store verbs → that backend's tools). Ships notion/ (MCP; the reference
                    backend), obsidian/ + markdown/ (filesystem). Skills speak backend-neutral verbs
-  references/      databases (placeholder-id schema registry, Notion backend), calendar/comms mapping,
-                   briefing, reminders-policy, autonomy-policy(+config), memory protocol, advisor-chain,
-                   slack-ssot (template: the pinned fact sheet Slack drafts assert from),
-                   salience, archons, notion-rate-limits (stub → store/notion/mapping.md),
-                   proposed-learnings (Dream's PR target)
-  docs/            asyncio-daemon-design.md + asyncio-daemon-plan.md (the reactive-core design),
-                   cockpit-spec.md (the Seneschal Cockpit design spec — pipe, model dials/Fable
-                   delegation, Oikonomos, health panels; the auth stack documented as deferred),
-                   notion-write-behind-outbox-spec.md (durable act-low Notion writes; Notion
-                   backend only), reminder-exact-time-scheduling-spec.md (the slots→exact-times
-                   rework), telegram-inbound-spec.md (attachments/replies/reactions),
-                   slack-draft-and-hold-spec.md (Slack reply drafting: SSOT + held approvals)
-                   + spec-prompts/ (the historical planning prompts behind specs)
+  references/      the policies and maps every mode reads (databases, calendar/comms mapping,
+                   briefing, reminders-policy, autonomy-policy(+config), memory, advisor-chain,
+                   slack-ssot, salience, archons, proposed-learnings) — router:
+                   seneschal/references/CLAUDE.md
+  docs/            the design record — every spec + its status, grouped — router:
+                   seneschal/docs/CLAUDE.md (spec-prompts/ holds the planning prompts behind specs)
   scripts/         presence.py (resident asyncio daemon), sentinel.py (helper/one-shot),
                    identity_common.py (persona/identity.json reader — never raises, defaults
                    when absent; presence.py renders its grounding/slot prompts from it),
-                   telegram/discord/proton/google comms bridges, reminders_* queue+ack ledger
-                   (incl. reminders_seed.py — the whole-day exact-time seeder),
+                   telegram/discord/proton/google comms bridges (telegram_* — send/poll, the
+                   one HTTP transport, Markdown→HTML, topics, ask pickers: TELEGRAM_SETUP.md),
+                   mouth.py + turns.py + promises.py + channel_declare.py + turn_suppression.py
+                   + tomorrow_marker.py (said-log/dispatch queue, turn capture, promises, reply
+                   routing — each spec in docs/CLAUDE.md), reminders_* queue+ack ledger
+                   (incl. reminders_seed.py — the whole-day exact-time seeder; reminders_cadence
+                   / reminder_premise* / reminder_suppressions / reminders_live / _reconcile),
+                   ack.py (free-text ack) + watch_ack/_reconcile/_suppress (Watch-send gates),
                    cockpit_pipe.py + model_config.py + governor.py + fable_delegate.py (the
                    cockpit pipe, model dials, budget governor, and Fable delegation one-shot),
                    outbox.py + outbox_common.py (durable write-behind journal for act-low
                    Notion writes — Notion backend only; filesystem backends write direct),
                    session_stamp.py + session_heartbeat.py + mini_dream.py (multi-session
                    registry under state/sessions/ + the per-session mini-dream distiller),
-                   rag_* (local semantic index), router.py, salience tooling, health/presence
+                   jobs.py + job_*.py + worktree_gc.py (durable background jobs —
+                   docs/background-jobs-spec.md), loops.py + cadence_chain/owi_*/
+                   observation_gate/standing_safety/brief_prestage/carryover_region (the
+                   open-work register and its satellites — state/README.md),
+                   rag_* (local semantic index), router.py, salience tooling,
+                   usage_probe/_activity/_health + spend_levers + trace + record_search +
+                   transcript_archive/_size_watch (plan-meter, spend and session-trace
+                   observability — docs/usage-telemetry-spec.md, docs/session-trace-spec.md),
+                   cockpit_site + archon_sites (daemon-supervised web UIs), health/presence
                    pipelines, archive_common.py + telegram_ingest.py + discord_export_ingest.py
                    + sms_ingest.py + archive_aggregate.py (message archiver),
                    setup_state.py + setup_env.py + setup_doctor.py + settings_merge.py +
@@ -65,10 +75,34 @@ seneschal/
                    /doctor green/yellow/red health board + the ~/.claude/settings.json hook
                    merger + the daemon chapter's launcher/unit/plist renderer + the
                    git-worktree guard preflight and render_units --apply enforce),
-                   check_placeholders.py (CI guard), *_SETUP.md guides,
-                   seneschald-control.ps1 + run-*.cmd (Windows scheduled-task wrappers)
+                   foundation primitives (each module's docstring is its spec): paths.py
+                   (state-dir resolution), stateio.py + memory_write.py (atomic state writes),
+                   envfile.py, clock.py + activity_day.py (owner wall clock + the
+                   owner.dayBoundaryHour after-midnight cut, over tz_common), failures.py
+                   (state/failures.jsonl), dream_steps.py (Dream step ledger), state_backup.py,
+                   notes.py, learnings.py (proposed-learnings close/retire/audit), log_rotation.py,
+                   gate_git.py, domain_age.py, _http_test_server.py (test fixture),
+                   send_gate.py + send_gate_hook.py + pending_approvals.py + send_recipients.py
+                   (the outbound approval gate, its one approval store, the non-content send
+                   ledger — SEND_GATE_SETUP.md; _owner_fixture.py is their test fixture),
+                   provenance_guard.py (the RAG index's writer-provenance registry),
+                   the opt-in guard hooks — merge_guard.py (owner-approved head SHA before any
+                   merge; MERGE_GUARD_SETUP.md), branch_delete_guard.py, bash_path_guard.py,
+                   script_file_guard.py, query_shape_hook.py (each its *_SETUP.md) — and the
+                   PR automation pr_*.py + picker_*.py + watch_pr.py + branch_sweep.py +
+                   develop_ci_status.py, configured by repo_config.py (references/pr-guard.json),
+                   the CI gate set — check_*.py (each docstring is its spec) + count_tests.py +
+                   ci_local.py (runs every CI gate locally) + check_placeholders.py —
+                   *_SETUP.md guides + INTEGRATIONS.md,
+                   seneschald-control.ps1 + run-*.cmd (Windows scheduled-task wrappers) +
+                   seneschald_revive.py (the watchdog's revive predicate), backends/ (the
+                   warm-session Backend seam: claude_cli / codex_cli + CODEX_SETUP.md),
+                   interleave.py (the mid-turn relevance gate), instructions_loaded.py
+                   (opt-in sub-router load logger)
   setup/           env-manifest.json — the machine-readable manifest of every configurable env
                    surface, which the /setup wizard's env walker + the doctor read
+  *.json           the CI gates' tracked config: context-budget.json, context-pointers.json,
+                   context-stores.json, state-write-allowlist.json, wall-clock-allowlist.json
   state/           local-first runtime cache — gitignored except README + *.example.*
 cockpit/           the Seneschal Cockpit — a local-first web observatory over the daemon
                    (see cockpit/README.md): server/ is a FastAPI backend (127.0.0.1:8760; the
@@ -81,7 +115,7 @@ cockpit/           the Seneschal Cockpit — a local-first web observatory over 
                    stack + setup walkthrough), breakglass/ (the stdlib-only emergency-recovery
                    supervisor + its 3-rung ladder), and decoy/ (the public honeypot chat —
                    separate process, zero tools/data). test_parity.py is the CI tripwire
-                   for its hand-duplicated model_config/governor copies
+                   for its hand-duplicated model_config/governor copies. Router: cockpit/CLAUDE.md
 subagents/         morning-briefing, eod-wrap, email-triage, slack-triage, calendar-steward,
                    store-qa, reminders, message-archivist, journal-steward (generic core),
                    archon-forge, persona-wizard, store-setup, setup (the unified /setup
@@ -92,7 +126,7 @@ phone/             the voice call-screener (Cloudflare Workers + Twilio; deploys
                    (com.kumouri.seneschal, committed Gradle project) feeding presence/health
 archons/           Archon staff data (Forge mode) — the shipped `proteus/` job-application
                    example (profile.example.json + stdlib tools); real needs/stables/profiles
-                   are gitignored on installs
+                   are gitignored on installs. Router: archons/CLAUDE.md
 ```
 
 First-run setup is `/setup` — the unified, **resumable** wizard (`subagents/setup/SKILL.md` +
@@ -143,7 +177,18 @@ itself when a PR merges (`seneschald-update` scheduled task → ff-pull → grac
 branch has no unique commits AND the session registry says no live session claims it (`sentinel.py
 --branch-claimed`, fail-closed), stamps `state/seneschald-health.json` every cycle (`last_ok` is the
 watch-the-watcher field), and nudges the owner on Telegram when blocked > 3 cycles (~30 min, re-alert ≤
-every 6 h) — see `scripts/PATH_A_CUTOVER.md`. Runtime state lives in gitignored `seneschal/state/`.
+every 6 h) — see `scripts/PATH_A_CUTOVER.md`. It also revives a dead daemon (`seneschald_revive.py`,
+`docs/seneschald-revive-spec.md`) and restarts it when the owner logs into a different Claude account. Runtime state lives in gitignored `seneschal/state/`.
+
+**Supervised tasks + resilience** (the full list and recipe: `docs/how-to-add-a-daemon-task.md`):
+beside chat/reminders/control the daemon supervises the cockpit backend (`cockpit_site.py`),
+archon sites (`archon_sites.py`) and a PR watch (`pr_sweep.py` + `pr_repair.py` — asks via the merge
+guard, never merges). The warm session sits behind a **backend** seam (`scripts/backends/`: claude-cli
+default, codex-cli opt-in via the model-config dial), **resumes** across reloads when the gate allows
+(`docs/session-continuity-spec.md`), is cut off by an idle-gap **hung-turn deadline**
+(`docs/hung-turn-deadline-spec.md`), and observes mid-turn arrivals (`interleave.py`). A self
+**crash-loop guard** keeps a fast crash loop from burning, and the watchdog stands down for it and for a
+deliberate stop. The Notion write-behind outbox flush is daemon-owned and Notion-backend only.
 
 **Multi-session awareness:** a session registry (`state/sessions/`) tracks every live Claude Code
 session on the box — the daemon defers non-piercing nudges into a live interactive `/assistant` chat
@@ -176,18 +221,28 @@ ancient Greek — "oh-NAY-roy" — script/file names are unchanged).
 
 ## CI
 
-`.github/workflows/ci.yml` runs on push/PR to `main` and `develop`: byte-compiles every
-tracked `.py`, runs the unittest suite under `seneschal/scripts/`, checks uv.lock consistency,
-validates autonomy-config.json, and runs the UUID placeholder guard. Two cockpit jobs cover the
-web observatory: `cockpit-server` (`uv sync --extra cockpit --group test`, then unittest discover
-over `cockpit/server/`, `cockpit/decoy/`, and `cockpit/breakglass/` — including `test_parity.py`,
-the tripwire for the cockpit's hand-duplicated model_config/governor tables) and `cockpit-web`
-(Node 22, `npm ci` + `npm run typecheck` + `npm run build` in `cockpit/web/`). `android.yml` builds the
-Call Shield app on `phone/android/**` changes. The phone Worker has its own npm gates
-(`cd phone && npm run typecheck && npm test`). Reproduce the Python checks locally:
+`.github/workflows/ci.yml` runs on push/PR to `main` and `develop`. The `python` job (full-history
+checkout — three gates diff against `origin/develop`) byte-compiles every tracked `.py`, measures
+the suites (`count_tests.py --check`: the total is published to the job summary and must never be
+typed into this file or the README), runs the unittest suites under `seneschal/scripts/` and
+`archons/proteus/tools/`, checks
+uv.lock, runs the UUID placeholder guard, then the context/doc gates — **blocking**:
+`check_context_pointers` (dangling pointers), `check_doc_status` (every `seneschal/docs/` file
+declares a status), `check_state_writes` (no truncating `state/` write), `check_wall_clock` (no
+zone-less clock read in checkers/tests), `check_rulings` (new ruling language needs a
+`seneschal/docs/rulings.md` row), and `check_context_budget --enforce-headroom`; **report-only**:
+the byte budget itself, `check_no_utcnow`, `check_context_stores --venue ci`,
+`check_carryover_prose`, `check_grounding_dates` — and AST-parses every `.ps1`. Each gate's
+docstring is its spec. `Reference data check` validates every tracked `.json`
+(`check_json_files.py`). Two cockpit jobs cover the web observatory: `cockpit-server`
+(`uv sync --extra cockpit --group test`, then unittest discover over `cockpit/server/`,
+`cockpit/decoy/`, and `cockpit/breakglass/` — including `test_parity.py`, the tripwire for the
+cockpit's hand-duplicated model_config/governor tables) and `cockpit-web` (Node 22, `npm ci` +
+`npm run typecheck` + `npm test` + `npm run build` in `cockpit/web/`). `android.yml` builds the Call Shield app
+on `phone/android/**` changes. The phone Worker has its own npm gates (`cd phone && npm run
+typecheck && npm test`). Run every gate CI runs, locally, before pushing:
 
 ```
-git ls-files '*.py' | xargs python -m py_compile
-python -m unittest discover -s seneschal/scripts -p "test_*.py"  # from the repo root
-python seneschal/scripts/check_placeholders.py
+python seneschal/scripts/ci_local.py            # every CI step, ci.yml order; --list / --only <step>
+python seneschal/scripts/check_docs.py          # just the doc-side gates, every finding in one pass
 ```

@@ -9,6 +9,14 @@ exactly like a hand-edit or a `governor.save()` call on that side. This module i
 VALIDATED-WRITE half only — it has no notion of the daemon-only concerns (the fable_oneshot rail gate,
 the in-flight concurrency counter, alert dedupe/send): those stay in `seneschal/scripts/governor.py`, the
 one place that actually enforces or alerts on anything. The cockpit only displays state and edits config.
+
+**Two token bases.** `rollups()` mirrors the daemon side's: `tokens_by_model` is the RAW flat sum a
+ledger row has always carried, and `billable_by_model` is the weighted figure every rail and alert
+decides on (per-row `billable_tokens` when present, falling back to raw `tokens` for a legacy row).
+`basis_by_model` names which fed each model so the Thresholds panel can label its meters instead of
+presenting two units as one number. The weight table itself lives ONLY on the daemon side
+(`seneschal/scripts/governor.py`'s `TOKEN_WEIGHTS`) — this module reads figures already derived on disk
+and deliberately does not re-derive them, so there is no third copy of the ratios to drift.
 """
 from __future__ import annotations
 
@@ -55,12 +63,16 @@ SCHEMA: dict = {
         "kind": "advisory", "default": 40, "min": 1, "max": 1000,
         "alert_at_pct": 80, "hard_stop": False,
     },
+    # Opus budgets sized for a warm session's cache-heavy turns — see the same comment in
+    # seneschal/scripts/governor.py, whose SCHEMA this mirrors byte-for-byte on purpose.
     "daily_token_budget_by_model": {
         "type": "dict_int", "label": "Daily token budget (per model)", "unit": "tokens/day",
         "kind": "rail", "min": 0, "max": 50_000_000, "alert_at_pct": 80, "hard_stop": False,
         "default": {
             "claude-haiku-4-5": 2_000_000, "claude-sonnet-5": 1_000_000,
-            "claude-opus-4-8": 400_000, "claude-fable-5": 150_000,
+            "claude-opus-4-8": 30_000_000, "claude-opus-5": 30_000_000,
+            "claude-opus-5-5": 30_000_000,
+            "claude-fable-5": 150_000, "claude-fable-5-1": 150_000,
         },
     },
     "weekly_token_budget_by_model": {
@@ -68,7 +80,9 @@ SCHEMA: dict = {
         "kind": "rail", "min": 0, "max": 200_000_000, "alert_at_pct": 80, "hard_stop": False,
         "default": {
             "claude-haiku-4-5": 10_000_000, "claude-sonnet-5": 5_000_000,
-            "claude-opus-4-8": 2_000_000, "claude-fable-5": 750_000,
+            "claude-opus-4-8": 150_000_000, "claude-opus-5": 150_000_000,
+            "claude-opus-5-5": 150_000_000,
+            "claude-fable-5": 750_000, "claude-fable-5-1": 750_000,
         },
     },
     "fable_oneshots_per_day": {
@@ -252,10 +266,31 @@ def _read_ledger(state_dir: Path) -> list[dict]:
     return out
 
 
+METERED_UNAVAILABLE = "unavailable"
+BASIS_BILLABLE = "billable"
+BASIS_RAW = "raw"
+BASIS_MIXED = "mixed"
+
+
+def _resolve_basis(seen: set) -> str | None:
+    if not seen:
+        return None
+    if seen == {BASIS_BILLABLE}:
+        return BASIS_BILLABLE
+    if seen == {BASIS_RAW}:
+        return BASIS_RAW
+    return BASIS_MIXED
+
+
 def rollups(state_dir: Path, now: datetime | None = None) -> dict:
     """Day/week spend totals from the ledger, gated on the owner's local calendar-day boundaries —
-    read-only mirror of seneschal/scripts/governor.py's `rollups()`. Used by `GET /api/governor-config` to
-    show today/this-week spend alongside the config."""
+    read-only mirror of seneschal/scripts/governor.py's `rollups()`, including its two-basis split
+    (`tokens_by_model` raw / `billable_by_model` weighted / `basis_by_model` naming which, plus
+    `unmetered_by_model` for spend that happened but couldn't be measured). Used by
+    `GET /api/governor-config` to show today/this-week spend alongside the config.
+
+    Like the daemon side, token totals accrue from ANY row carrying them, not only `kind == "tokens"` —
+    a `fable_oneshot` row's tokens are real spend."""
     today_local = _to_local_date(now) if now is not None else _local_today()
     day_key = today_local.isoformat()
     week_key = _week_key(today_local)
@@ -263,6 +298,12 @@ def rollups(state_dir: Path, now: datetime | None = None) -> dict:
     fable_day = fable_week = 0
     tokens_day: dict[str, int] = {}
     tokens_week: dict[str, int] = {}
+    billable_day: dict[str, int] = {}
+    billable_week: dict[str, int] = {}
+    seen_day: dict[str, set] = {}
+    seen_week: dict[str, set] = {}
+    unmetered_day: dict[str, int] = {}
+    unmetered_week: dict[str, int] = {}
 
     for rec in _read_ledger(state_dir):
         ts = _parse_iso(rec.get("ts"))
@@ -273,23 +314,50 @@ def rollups(state_dir: Path, now: datetime | None = None) -> dict:
         same_week = _week_key(rec_date) == week_key
         if not same_day and not same_week:
             continue
-        kind = rec.get("kind")
-        if kind == "fable_oneshot":
+        if rec.get("kind") == "fable_oneshot":
             if same_day:
                 fable_day += 1
             if same_week:
                 fable_week += 1
-        elif kind == "tokens":
-            model = rec.get("model") if isinstance(rec.get("model"), str) else "unknown"
-            tok = rec.get("tokens")
-            tok = int(tok) if isinstance(tok, (int, float)) and not isinstance(tok, bool) else 0
+
+        model = rec.get("model") if isinstance(rec.get("model"), str) else "unknown"
+        if rec.get("metered") == METERED_UNAVAILABLE:
             if same_day:
-                tokens_day[model] = tokens_day.get(model, 0) + tok
+                unmetered_day[model] = unmetered_day.get(model, 0) + 1
             if same_week:
-                tokens_week[model] = tokens_week.get(model, 0) + tok
+                unmetered_week[model] = unmetered_week.get(model, 0) + 1
+            continue
+
+        raw = rec.get("tokens")
+        raw = int(raw) if isinstance(raw, (int, float)) and not isinstance(raw, bool) else None
+        bill = rec.get("billable_tokens")
+        bill = int(bill) if isinstance(bill, (int, float)) and not isinstance(bill, bool) else None
+        if raw is None and bill is None:
+            continue
+        basis = BASIS_BILLABLE if bill is not None else BASIS_RAW
+        if bill is None:
+            bill = raw
+        if raw is None:
+            raw = 0
+
+        for same, tok_acc, bill_acc, seen_acc in (
+            (same_day, tokens_day, billable_day, seen_day),
+            (same_week, tokens_week, billable_week, seen_week),
+        ):
+            if not same:
+                continue
+            tok_acc[model] = tok_acc.get(model, 0) + raw
+            bill_acc[model] = bill_acc.get(model, 0) + bill
+            seen_acc.setdefault(model, set()).add(basis)
 
     return {
         "day": day_key, "week": week_key,
         "fable_oneshots": {"day": fable_day, "week": fable_week},
         "tokens_by_model": {"day": tokens_day, "week": tokens_week},
+        "billable_by_model": {"day": billable_day, "week": billable_week},
+        "basis_by_model": {
+            "day": {m: _resolve_basis(s) for m, s in seen_day.items()},
+            "week": {m: _resolve_basis(s) for m, s in seen_week.items()},
+        },
+        "unmetered_by_model": {"day": unmetered_day, "week": unmetered_week},
     }

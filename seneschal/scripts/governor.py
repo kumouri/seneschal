@@ -22,10 +22,24 @@ in the file but not in ``SCHEMA`` (a newer version's knob, read by an older one)
 on save — forward compat, never dropped.
 
 **Spend ledger** — ``state/governor-ledger.jsonl``: one JSON line per governed spend event,
-``{ts, kind, model?, tokens?, conversation_id?}``. Two kinds are written today: ``"tokens"`` (a turn's
-usage, appended by ``presence.py``'s stream tee) and ``"fable_oneshot"`` (a successful Fable delegation,
-appended by ``fable_delegate.py``). ``rollups()`` computes day/week totals from it, gated on the
-**owner's local day boundaries** — the house rule (rule 5: after-midnight activity counts as the prior
+``{ts, kind, model?, tokens?, billable_tokens?, components?, basis?, metered?, conversation_id?,
+turn_id?, levers?}``. Two kinds are written today: ``"tokens"`` (a turn's usage, appended by
+``presence.py``'s stream tee) and ``"fable_oneshot"`` (a successful Fable delegation, appended by
+``fable_delegate.py``).
+
+**Two bases, and the rails use the second one.** ``tokens`` is the raw sum of every token field the CLI
+reported — it keeps exactly the meaning it has always had, so rows written before the billable basis
+existed are never silently reinterpreted. ``billable_tokens`` is that same usage run through
+``TOKEN_WEIGHTS`` below, and it is what every rail, rollup and alert actually reads (falling back to
+``tokens`` for a legacy row that has no breakdown). The flat sum is the wrong basis for a rail: a cache
+**read** is not the same cost as a fresh input token (Anthropic meters it at 0.1x), and because the warm
+session re-reads its whole conversation every turn, the flat sum grows with conversation LENGTH rather
+than with spend — the longer a session runs (i.e. the *cheaper* each turn gets), the louder a flat-sum
+rail cries wolf. On a cache-heavy day the raw sum can overstate the billable figure several-fold. **Do
+not restore the flat sum as the rails' basis.** (It is still recorded, as ``tokens``; it is just not
+what anything decides on.)
+
+``rollups()`` computes day/week totals from the ledger, gated on the **owner's local day boundaries** — the house rule (rule 5: after-midnight activity counts as the prior
 day; date logic runs in the owner's timezone, never UTC). The day-boundary math is delegated to the
 sibling ``tz_common`` (configured owner zone → machine-local fallback), imported guarded exactly the
 way ``presence.py`` guards it — without the module the day keys degrade to the machine-local clock and
@@ -42,6 +56,12 @@ inventing an excuse.
 Everything here is fail-open on read: a missing/corrupt config or ledger degrades to defaults/empty,
 never raises, never blocks a legitimate call over an I/O hiccup. Writes (``save``, the ledger append,
 the alert-state write) use the same atomic tmp-then-``os.replace`` pattern as ``model_config.py``.
+
+``cockpit/server/governor.py`` duplicates the SCHEMA and the basis-aware rollups (cockpit-spec.md
+ruling 3); ``cockpit/server/test_parity.py`` fails CI when the two drift. ``TOKEN_WEIGHTS`` is THE ONE
+PLACE the billable basis is defined; the invariant guarding it is that ``tokens`` stays the RAW sum
+forever while everything that DECIDES reads ``billable_tokens`` with a per-row raw fallback, and every
+consumer names which basis it used.
 """
 from __future__ import annotations
 
@@ -70,6 +90,113 @@ INFLIGHT_FILE = "governor-inflight.json"
 DEFAULT_ALERT_PCT = 80
 ALERT_REALERT_HOURS = 6  # per-knob dedupe window: re-alert on a still-hot threshold at most every 6h
 
+
+# ------------------------------------------------------------------------------- the billable basis
+# ONE named weight table. Do not scatter these ratios across call sites — a rail whose unit is defined
+# in three places is a rail nobody can audit.
+#
+# The weights are Anthropic's PUBLISHED prompt-caching price ratios, each expressed relative to one
+# base (uncached) input token — https://docs.claude.com/en/docs/build-with-claude/prompt-caching#pricing
+#   * cache READ ............ 0.1x base input
+#   * cache WRITE, 5m TTL ... 1.25x base input
+#   * cache WRITE, 1h TTL ... 2x base input
+#   * base input ............ 1x, by definition
+#
+# Output is deliberately weighted AT PAR (1.0). This basis is an **input-token-equivalent**, not a
+# dollar-equivalent: these knobs are *token* budgets, and a token budget that silently folded in the
+# output/input price ratio would be a third unit nobody asked for. The dollar figure is already
+# tracked, separately and exactly, by the CLI itself — `metrics.jsonl`'s `cost_usd`/`session_cost_usd`.
+BILLABLE_BASIS = "input_token_equivalent_v1"
+
+TOKEN_WEIGHTS: dict = {
+    "input": 1.0,
+    "output": 1.0,
+    "cache_read": 0.1,
+    "cache_write_5m": 1.25,
+    "cache_write_1h": 2.0,
+    # A `cache_creation_input_tokens` total with no ephemeral_5m/_1h breakdown to explain it. Anthropic's
+    # default cache TTL is 5 minutes, so that is what an unqualified cache write is priced at.
+    "cache_write_unspecified": 1.25,
+}
+
+# The raw token fields presence.py has always summed into `tokens`. Kept as a named list so the raw
+# basis and the billable basis are visibly reading the SAME usage object, not two different subsets.
+RAW_TOKEN_FIELDS = (
+    "input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens",
+)
+
+
+def _int_field(d, key) -> int:
+    """One non-negative int out of a usage dict, tolerantly. Anything else reads as 0 — a usage block
+    is provider-shaped data this module doesn't control, so it is parsed defensively throughout."""
+    if not isinstance(d, dict):
+        return 0
+    val = d.get(key)
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        return max(0, int(val))
+    return 0
+
+
+def raw_tokens(usage) -> int | None:
+    """The flat sum of every token field, i.e. `tokens`'s long-standing meaning. Returns None when the
+    usage block carries no recognizable token field at all (so a caller can tell "nothing reported"
+    apart from "reported zero")."""
+    if not isinstance(usage, dict):
+        return None
+    total = 0
+    found = False
+    for key in RAW_TOKEN_FIELDS:
+        val = usage.get(key)
+        if isinstance(val, (int, float)) and not isinstance(val, bool):
+            total += int(val)
+            found = True
+    return total if found else None
+
+
+def usage_components(usage) -> dict | None:
+    """Normalize a claude-CLI usage block into the flat component dict `TOKEN_WEIGHTS` is keyed by.
+
+    The CLI reports cache writes twice over: a `cache_creation_input_tokens` total AND, when it knows
+    the TTLs, a `cache_creation: {ephemeral_5m_input_tokens, ephemeral_1h_input_tokens}` breakdown. The
+    breakdown is only trusted when its parts actually add up to the total — otherwise the remainder is
+    booked as `cache_write_unspecified` so no cache write is ever silently dropped or double-counted.
+
+    Returns None when the block carries no token fields at all."""
+    if raw_tokens(usage) is None:
+        return None
+    created = _int_field(usage, "cache_creation_input_tokens")
+    breakdown = usage.get("cache_creation") if isinstance(usage, dict) else None
+    write_5m = _int_field(breakdown, "ephemeral_5m_input_tokens")
+    write_1h = _int_field(breakdown, "ephemeral_1h_input_tokens")
+    if write_5m + write_1h > created:
+        # The breakdown claims more than the total — don't trust either half of it over the total.
+        write_5m = write_1h = 0
+    return {
+        "input": _int_field(usage, "input_tokens"),
+        "output": _int_field(usage, "output_tokens"),
+        "cache_read": _int_field(usage, "cache_read_input_tokens"),
+        "cache_write_5m": write_5m,
+        "cache_write_1h": write_1h,
+        "cache_write_unspecified": created - write_5m - write_1h,
+    }
+
+
+def billable_from_components(components) -> int | None:
+    """Apply TOKEN_WEIGHTS to a `usage_components` dict. Rounded to a whole token — the ledger's unit is
+    tokens, and a fractional token in a budget meter is noise pretending to be precision."""
+    if not isinstance(components, dict):
+        return None
+    total = 0.0
+    for key, weight in TOKEN_WEIGHTS.items():
+        total += _int_field(components, key) * weight
+    return int(round(total))
+
+
+def billable_tokens(usage) -> int | None:
+    """usage block -> billable tokens on BILLABLE_BASIS. None when nothing is metered."""
+    return billable_from_components(usage_components(usage))
+
+
 # ------------------------------------------------------------------------------------------- SCHEMA
 # Every knob cockpit-spec.md's "Oikonomos" section lists, initial set. `kind` is "rail" (enforced in
 # Python, see `check()`/the metering below) or "advisory" (prompt/doc-side guidance only — see the
@@ -97,12 +224,20 @@ SCHEMA: dict = {
         "kind": "advisory", "default": 40, "min": 1, "max": 1000,
         "alert_at_pct": 80, "hard_stop": False,
     },
+    # Opus budgets are sized for a warm session, not guessed from a one-shot: every turn re-reads the
+    # whole conversation, so a normal day is millions of (overwhelmingly cached) tokens, and a budget
+    # sized before cache reads were metered would sit roughly two orders of magnitude low. They are set
+    # above a busy day so the alert means "today is anomalous", not "today was busy". A model with NO
+    # entry here is metered but never alerted (`due_alerts` skips it) — keep every warm-eligible model
+    # (model_config.RANK) listed so a dial change can't leave the warm session unrailed.
     "daily_token_budget_by_model": {
         "type": "dict_int", "label": "Daily token budget (per model)", "unit": "tokens/day",
         "kind": "rail", "min": 0, "max": 50_000_000, "alert_at_pct": 80, "hard_stop": False,
         "default": {
             "claude-haiku-4-5": 2_000_000, "claude-sonnet-5": 1_000_000,
-            "claude-opus-4-8": 400_000, "claude-fable-5": 150_000,
+            "claude-opus-4-8": 30_000_000, "claude-opus-5": 30_000_000,
+            "claude-opus-5-5": 30_000_000,
+            "claude-fable-5": 150_000, "claude-fable-5-1": 150_000,
         },
     },
     "weekly_token_budget_by_model": {
@@ -110,7 +245,9 @@ SCHEMA: dict = {
         "kind": "rail", "min": 0, "max": 200_000_000, "alert_at_pct": 80, "hard_stop": False,
         "default": {
             "claude-haiku-4-5": 10_000_000, "claude-sonnet-5": 5_000_000,
-            "claude-opus-4-8": 2_000_000, "claude-fable-5": 750_000,
+            "claude-opus-4-8": 150_000_000, "claude-opus-5": 150_000_000,
+            "claude-opus-5-5": 150_000_000,
+            "claude-fable-5": 750_000, "claude-fable-5-1": 750_000,
         },
     },
     "fable_oneshots_per_day": {
@@ -281,18 +418,65 @@ def ledger_path(state_dir) -> str:
     return os.path.join(state_dir, LEDGER_FILE)
 
 
+METERED_UNAVAILABLE = "unavailable"
+
+
 def append_spend(state_dir, kind: str, model: str | None = None, tokens: int | None = None,
-                 conversation_id: str | None = None) -> None:
+                 conversation_id: str | None = None, usage=None,
+                 metered: str | None = None, turn_id: str | None = None,
+                 levers: dict | None = None) -> None:
     """Append one governed-spend line. Fail-open: an I/O error here must never break the caller's
     real work (a chat turn, a delegation) — swallow and move on, same posture as the cockpit
-    transcript tee (cockpit_pipe.append_transcript_event)."""
+    transcript tee (cockpit_pipe.append_transcript_event).
+
+    Pass `usage` (the claude-CLI's raw usage block) and this derives the whole row: `tokens` stays the
+    flat raw sum it has always been, and `components`/`billable_tokens`/`basis` carry the breakdown the
+    rails actually read. An explicit `tokens=` still wins, so a caller that only knows a scalar can say
+    so — such a row is simply legacy-shaped and rolls up on the raw basis.
+
+    `metered=METERED_UNAVAILABLE` marks a spend event that genuinely happened but whose usage could not
+    be read. That row deliberately carries NO token count at all. **Never write a 0 for unknown spend:**
+    a 0 is indistinguishable from "measured, and it was free", and the fable_oneshot gate *trusts* the
+    number it reads — an unread delegation metered as zero would sail under the tightest budget on the
+    board.
+
+    `turn_id` is the **join key** to the `metrics.jsonl` row for the same turn. The two rows are written
+    moments apart by the same function, and without a shared key the only way to pair them is
+    timestamp proximity — a heuristic that breaks the moment two turns finish in the same second or a
+    delegation writes a row between them. One field makes every lever `metrics.jsonl` already carries
+    (turns served, server tools, context estimate, cost) joinable to the spend it produced. It is
+    omitted, not zeroed, when the caller has no turn to name — a delegation or a job child is not a warm
+    turn, and the never-write-a-0 reasoning applies just as much to a fabricated key.
+
+    `levers` is the **cause** block — what the turn actually did, as counted at the stream tee.
+    Decomposing by token type turned a wrong number into a right one; this decomposes a right number
+    into an actionable one. It is written **only when the caller measured something**: a None or an
+    empty dict leaves the key off entirely rather than writing zeros, because a 0 reads as *measured,
+    and free*. Purely additive: no existing field changes meaning, and a row written without levers is
+    byte-identical to what this function has always produced. **It is recorded, never enforced** —
+    nothing in this module reads it, and the rails keep deciding on `billable_tokens` alone."""
     line: dict = {"ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), "kind": kind}
     if model is not None:
         line["model"] = model
+    if metered == METERED_UNAVAILABLE:
+        line["metered"] = METERED_UNAVAILABLE
+        usage = None
+        tokens = None
+    components = usage_components(usage)
+    if tokens is None:
+        tokens = raw_tokens(usage)
     if tokens is not None:
-        line["tokens"] = tokens
+        line["tokens"] = int(tokens)
+    if components is not None:
+        line["components"] = components
+        line["billable_tokens"] = billable_from_components(components)
+        line["basis"] = BILLABLE_BASIS
     if conversation_id is not None:
         line["conversation_id"] = conversation_id
+    if turn_id:
+        line["turn_id"] = str(turn_id)
+    if isinstance(levers, dict) and levers:
+        line["levers"] = levers
     try:
         os.makedirs(state_dir, exist_ok=True)
         with open(ledger_path(state_dir), "a", encoding="utf-8") as fh:
@@ -322,16 +506,51 @@ def _read_ledger(state_dir) -> list[dict]:
     return out
 
 
+BASIS_BILLABLE = "billable"    # every counted row carried a billable_tokens breakdown
+BASIS_RAW = "raw"              # every counted row was legacy (flat sum, cache reads at full weight)
+BASIS_MIXED = "mixed"          # both — the normal case while a ledger straddles the upgrade
+
+
+def _resolve_basis(seen: set) -> str | None:
+    """A model's rollup basis from the set of per-row bases that fed it. None means "no basis" — no
+    counted rows at all — and callers that must name their unit (due_alerts) decline to fire on it."""
+    if not seen:
+        return None
+    if seen == {BASIS_BILLABLE}:
+        return BASIS_BILLABLE
+    if seen == {BASIS_RAW}:
+        return BASIS_RAW
+    return BASIS_MIXED
+
+
 def rollups(state_dir, now: datetime | None = None) -> dict:
     """Day/week spend totals from the ledger, gated on the owner's local calendar-day boundaries
     (the house rule — after-midnight activity counts as the PRIOR day because it converts each
     record's actual UTC timestamp to the owner's wall-clock date via tz_common, not by re-bucketing
     at a fixed UTC offset).
 
+    Token totals, deliberately side by side:
+      * ``tokens_by_model`` — the RAW flat sum, unchanged in meaning since the first row was written.
+        Kept so history stays readable and nothing silently reinterprets existing rows.
+      * ``billable_by_model`` — the basis every rail/alert decides on: each row's ``billable_tokens``
+        when it has one, **falling back to its raw ``tokens``** when it doesn't (a legacy row). The
+        fallback is why a pre-upgrade day still rolls up at all instead of reading as free.
+      * ``basis_by_model`` — which of the two fed each model's billable figure ("billable" / "raw" /
+        "mixed"), so a consumer names its unit instead of quietly averaging two of them.
+      * ``unmetered_by_model`` — count of spend events that happened but could not be measured
+        (``metered: "unavailable"``). They add nothing to either total; surfacing the count is how a
+        meter stays honest about a gap rather than showing it as zero spend.
+
+    Token totals accrue from ANY row carrying token data, not only ``kind == "tokens"`` — a
+    ``fable_oneshot`` row that reports its own usage must count that cost, not just the delegation.
+
     Returns:
         {"day": "YYYY-MM-DD", "week": "YYYY-Www",
          "fable_oneshots": {"day": N, "week": N},
-         "tokens_by_model": {"day": {model: n}, "week": {model: n}}}
+         "tokens_by_model":    {"day": {model: n}, "week": {model: n}},
+         "billable_by_model":  {"day": {model: n}, "week": {model: n}},
+         "basis_by_model":     {"day": {model: str}, "week": {model: str}},
+         "unmetered_by_model": {"day": {model: n}, "week": {model: n}}}
     """
     today_local = _to_local_date(now) if now is not None else _local_today()
     day_key = today_local.isoformat()
@@ -340,6 +559,12 @@ def rollups(state_dir, now: datetime | None = None) -> dict:
     fable_day = fable_week = 0
     tokens_day: dict[str, int] = {}
     tokens_week: dict[str, int] = {}
+    billable_day: dict[str, int] = {}
+    billable_week: dict[str, int] = {}
+    seen_day: dict[str, set] = {}
+    seen_week: dict[str, set] = {}
+    unmetered_day: dict[str, int] = {}
+    unmetered_week: dict[str, int] = {}
 
     for rec in _read_ledger(state_dir):
         ts = _parse_iso(rec.get("ts"))
@@ -350,26 +575,67 @@ def rollups(state_dir, now: datetime | None = None) -> dict:
         same_week = _week_key(rec_date) == week_key
         if not same_day and not same_week:
             continue
-        kind = rec.get("kind")
-        if kind == "fable_oneshot":
+        if rec.get("kind") == "fable_oneshot":
             if same_day:
                 fable_day += 1
             if same_week:
                 fable_week += 1
-        elif kind == "tokens":
-            model = rec.get("model") if isinstance(rec.get("model"), str) else "unknown"
-            tok = rec.get("tokens")
-            tok = int(tok) if isinstance(tok, (int, float)) and not isinstance(tok, bool) else 0
+
+        model = rec.get("model") if isinstance(rec.get("model"), str) else "unknown"
+        if rec.get("metered") == METERED_UNAVAILABLE:
             if same_day:
-                tokens_day[model] = tokens_day.get(model, 0) + tok
+                unmetered_day[model] = unmetered_day.get(model, 0) + 1
             if same_week:
-                tokens_week[model] = tokens_week.get(model, 0) + tok
+                unmetered_week[model] = unmetered_week.get(model, 0) + 1
+            continue
+
+        raw = rec.get("tokens")
+        raw = int(raw) if isinstance(raw, (int, float)) and not isinstance(raw, bool) else None
+        bill = rec.get("billable_tokens")
+        bill = int(bill) if isinstance(bill, (int, float)) and not isinstance(bill, bool) else None
+        if raw is None and bill is None:
+            continue  # a non-spend row (e.g. a fable_oneshot marker that carries no usage)
+        basis = BASIS_BILLABLE if bill is not None else BASIS_RAW
+        if bill is None:
+            bill = raw
+        if raw is None:
+            raw = 0
+
+        for same, tok_acc, bill_acc, seen_acc in (
+            (same_day, tokens_day, billable_day, seen_day),
+            (same_week, tokens_week, billable_week, seen_week),
+        ):
+            if not same:
+                continue
+            tok_acc[model] = tok_acc.get(model, 0) + raw
+            bill_acc[model] = bill_acc.get(model, 0) + bill
+            seen_acc.setdefault(model, set()).add(basis)
 
     return {
         "day": day_key, "week": week_key,
         "fable_oneshots": {"day": fable_day, "week": fable_week},
         "tokens_by_model": {"day": tokens_day, "week": tokens_week},
+        "billable_by_model": {"day": billable_day, "week": billable_week},
+        "basis_by_model": {
+            "day": {m: _resolve_basis(s) for m, s in seen_day.items()},
+            "week": {m: _resolve_basis(s) for m, s in seen_week.items()},
+        },
+        "unmetered_by_model": {"day": unmetered_day, "week": unmetered_week},
     }
+
+
+def describe_basis(basis: str | None) -> str:
+    """One clause naming a rollup's unit, for an alert or refusal to append. A mixed-basis figure must
+    SAY it is mixed rather than present two units as one number."""
+    if basis == BASIS_BILLABLE:
+        return "billable basis — cache reads discounted per Anthropic's published cache ratios"
+    if basis == BASIS_RAW:
+        return ("legacy raw basis — cache reads counted at full weight, which overstates a "
+                "long warm session substantially")
+    if basis == BASIS_MIXED:
+        return ("MIXED basis — part billable (cache reads discounted), part legacy raw (cache reads "
+                "at full weight); this total is not a single unit")
+    return "unknown basis"
 
 
 def _conversation_fable_count(state_dir, conversation_id: str | None) -> int:
@@ -475,20 +741,25 @@ def _check_fable_oneshot(state_dir, conversation_id: str | None) -> Verdict:
             "for the current one-shot to finish before starting another."
         ), {"concurrency": 0})
 
+    # The token budget reads the BILLABLE basis (falling back per-row to raw for legacy rows) — see
+    # `rollups`. This is the one token budget that actually blocks, so the unit it compares against had
+    # better be the unit Anthropic bills in.
     fable_model = "claude-fable-5"
     daily_budget = cfg["daily_token_budget_by_model"].get(fable_model)
     weekly_budget = cfg["weekly_token_budget_by_model"].get(fable_model)
-    tok_day = roll["tokens_by_model"]["day"].get(fable_model, 0)
-    tok_week = roll["tokens_by_model"]["week"].get(fable_model, 0)
+    tok_day = roll["billable_by_model"]["day"].get(fable_model, 0)
+    tok_week = roll["billable_by_model"]["week"].get(fable_model, 0)
+    basis_day = describe_basis(roll["basis_by_model"]["day"].get(fable_model))
+    basis_week = describe_basis(roll["basis_by_model"]["week"].get(fable_model))
     if isinstance(daily_budget, int) and daily_budget > 0 and tok_day >= daily_budget:
         return Verdict(False, (
-            f"Fable's daily token budget is used up ({tok_day:,}/{daily_budget:,} tokens); it resets at "
-            "local midnight (the owner's day boundary)."
+            f"Fable's daily token budget is used up ({tok_day:,}/{daily_budget:,} tokens, {basis_day}); "
+            "it resets at local midnight (the owner's day boundary)."
         ), {"day_tokens": 0})
     if isinstance(weekly_budget, int) and weekly_budget > 0 and tok_week >= weekly_budget:
         return Verdict(False, (
-            f"Fable's weekly token budget is used up ({tok_week:,}/{weekly_budget:,} tokens); it resets "
-            "Monday (the owner's local week)."
+            f"Fable's weekly token budget is used up ({tok_week:,}/{weekly_budget:,} tokens, "
+            f"{basis_week}); it resets Monday (the owner's local week)."
         ), {"week_tokens": 0})
 
     return Verdict(True, None, {
@@ -551,37 +822,50 @@ def record_alert_sent(state_dir, knob_key: str, now: datetime | None = None) -> 
     _write_alert_state(state_dir, state)
 
 
+def _unmetered_clause(count: int) -> str:
+    """Never let an unmeasurable spend event vanish into a clean-looking total."""
+    if not count:
+        return ""
+    noun = "call" if count == 1 else "calls"
+    return f" ({count} {noun} could not be metered and is NOT in that figure.)"
+
+
 def due_alerts(state_dir, model: str, now: datetime | None = None) -> list[dict]:
     """Which of `model`'s daily/weekly token-budget alerts are due right now, WITHOUT marking them
     sent (the caller does that via `record_alert_sent` only after a send actually lands). Each item:
-    ``{"knob": "<dedupe key>", "text": "<ready-to-send message>"}``."""
+    ``{"knob": "<dedupe key>", "text": "<ready-to-send message>"}``.
+
+    Reads the BILLABLE basis and **names it in the text**. An alert whose basis can't be resolved does
+    not fire at all: a budget warning that can't say what unit its number is in is the failure mode the
+    billable basis exists to remove, and a silent non-alert is the safer of the two wrong answers (the
+    number is still on the cockpit's Thresholds panel either way)."""
     cfg = load(state_dir)
     roll = rollups(state_dir, now=now)
     out: list[dict] = []
 
-    daily = cfg["daily_token_budget_by_model"].get(model)
-    used_day = roll["tokens_by_model"]["day"].get(model, 0)
-    day_pct = SCHEMA["daily_token_budget_by_model"].get("alert_at_pct", DEFAULT_ALERT_PCT)
-    if isinstance(daily, int) and daily > 0:
-        key = f"daily_token_budget_by_model:{model}"
-        if should_alert(state_dir, key, used_day, daily, day_pct, now=now):
-            pct = (used_day / daily) * 100.0
-            out.append({"knob": key, "text": (
-                f"Heads up — {model} has used {used_day:,}/{daily:,} tokens today "
-                f"({pct:.0f}%). Daily budget resets at local midnight (owner-local)."
-            )})
-
-    weekly = cfg["weekly_token_budget_by_model"].get(model)
-    used_week = roll["tokens_by_model"]["week"].get(model, 0)
-    week_pct = SCHEMA["weekly_token_budget_by_model"].get("alert_at_pct", DEFAULT_ALERT_PCT)
-    if isinstance(weekly, int) and weekly > 0:
-        key = f"weekly_token_budget_by_model:{model}"
-        if should_alert(state_dir, key, used_week, weekly, week_pct, now=now):
-            pct = (used_week / weekly) * 100.0
-            out.append({"knob": key, "text": (
-                f"Heads up — {model} has used {used_week:,}/{weekly:,} tokens this week "
-                f"({pct:.0f}%). Weekly budget resets Monday (owner-local)."
-            )})
+    for period, knob_key, used_map, when in (
+        ("today", "daily_token_budget_by_model", "day",
+         "Daily budget resets at local midnight (owner-local)."),
+        ("this week", "weekly_token_budget_by_model", "week",
+         "Weekly budget resets Monday (owner-local)."),
+    ):
+        budget = cfg[knob_key].get(model)
+        if not isinstance(budget, int) or budget <= 0:
+            continue
+        basis = roll["basis_by_model"][used_map].get(model)
+        if basis is None:
+            continue  # no basis => no unit => no alert (see the docstring)
+        used = roll["billable_by_model"][used_map].get(model, 0)
+        alert_pct = SCHEMA[knob_key].get("alert_at_pct", DEFAULT_ALERT_PCT)
+        key = f"{knob_key}:{model}"
+        if not should_alert(state_dir, key, used, budget, alert_pct, now=now):
+            continue
+        pct = (used / budget) * 100.0
+        unmetered = _unmetered_clause(roll["unmetered_by_model"][used_map].get(model, 0))
+        out.append({"knob": key, "text": (
+            f"Heads up — {model} has used {used:,}/{budget:,} tokens {period} "
+            f"({pct:.0f}%, {describe_basis(basis)}). {when}{unmetered}"
+        )})
 
     return out
 

@@ -12,7 +12,9 @@ even then it's conservative:
 1. Home Assistant is standing and reachable (`ha.env` set).
 2. The owner has **approved** a given automation (`"approved": true`) — until then every match is
    draft-and-hold.
-3. The daemon integration (below) is explicitly enabled.
+3. The daemon integration (below) **exists** — and today it does not. There is no switch to flip:
+   nothing outside the tests imports `presence_actions` or `ha_client`, so condition 3 is a build,
+   not a setting. See "Daemon integration (the deferred wiring)".
 
 A `"failsafe": true` automation (e.g. a water-system **leak cutoff**) stays **ask-high always**, even
 approved — it never fires unattended.
@@ -35,8 +37,27 @@ or `{"kind":"activity","label":"in_vehicle","transition":"exit"}`, or `{"kind":"
 
 ## Setup (when HA is up)
 
-1. **`ollama`-style env:** `cp ha.env.example ha.env`, set `HA_URL` (e.g. `http://homeassistant.local:8123`
-   or a Tailscale/LAN IP) and a long-lived `HA_TOKEN` (HA → your profile → *Long-Lived Access Tokens*).
+0. **Stand HA up first.** Home Assistant in a container on the same machine as the daemon is the
+   simplest start; a dedicated always-on box (a Pi, a NUC) is the natural permanent home. Choices
+   that keep a later move cheap and the install safe:
+   - **Keep the config on a host bind-mount directory outside this repo** (not an anonymous volume):
+     it survives a container rebuild and is easy to read and back up by hand.
+   - **Depend on no HA add-on.** HA Container has no add-on store; an add-on-free config is what makes
+     moving to another host a plain backup/restore.
+   - **Set the container's `TZ` to the owner's zone** (the same IANA name as `owner.timezone` in
+     `persona/identity.json`), and `--restart unless-stopped`.
+   - **Publish the port to loopback only** (`-p 127.0.0.1:8123:8123`) and reach it off-box through a
+     reverse proxy you control, guarded to your LAN ranges, rather than exposing the raw port.
+     HA must trust that proxy (`http: use_x_forwarded_for: true` + `trusted_proxies`) or every proxied
+     request answers 400 — and when the proxy reaches a Docker Desktop published port, the request
+     arrives from the Docker bridge gateway (e.g. `172.17.0.1`), not `127.0.0.1`, so that address
+     belongs in `trusted_proxies` too. Recent HA versions migrate these `http:` settings out of
+     `configuration.yaml` into `.storage/http` on first boot; after that, editing the YAML silently
+     does nothing — change them in `.storage/http` with the container stopped.
+1. **`ollama`-style env:** `cp ha.env.example ha.env`, set `HA_URL` (e.g. your proxy's hostname or a
+   literal LAN/Tailscale IP) and a long-lived `HA_TOKEN` (HA → your profile → *Long-Lived Access
+   Tokens*). **Prefer a literal IP or the proxy hostname over `homeassistant.local`** — with HA in a
+   container (especially on Windows), mDNS from this host is not something to count on.
 2. **Automations:** `cp ../state/presence-automations.example.json ../state/presence-automations.json`,
    set your real `entity_id`s. Leave `approved:false` at first.
 3. **Smoke-test one call (read-only-ish):**
@@ -67,7 +88,17 @@ for a in presence_actions.actions_for_edge(edge, presence_actions.load_automatio
 ```
 
 Edge detection: compare the newest `presence.db` event against the prior one per `kind` (the context
-recompute already reads them). Keep it **idempotent** — fire once per edge, not once per poll.
+recompute already reads them). Keep it **idempotent** — fire once per edge, not once per poll, and
+**keep the marker on disk**: the daemon reloads itself on every merge, so an in-memory "last edge seen"
+would re-fire the owner's arrival the next time a PR lands while they're home. The other invariant is
+the `else` branch above: an unapproved match is **draft-and-hold**, never a silent skip and never a
+fire — the ask is how the owner learns what an automation would have done before granting it.
 
-Until that hook is enabled, presence sensing and reminder-gating (Phases 1–4) run exactly as before; this
-layer just sits ready. See `../references/autonomy-policy.md` for the act-low / ask-high line.
+Also **don't write a `kind: "sleep"` automation yet.** The schema accepts one, but `asleep` in
+`presence-context.json` is informational only — the reminder gate stopped reading it because a
+phone-only Sleep API reads an idle phone as a sleeping owner (`presence_rules.py`'s docstring).
+
+Until that hook is built, presence sensing and reminder-gating (Phases 1–4) run exactly as before; this
+layer just sits ready. See `../references/autonomy-policy.md` for the act-low / ask-high line — which
+this layer does not move: no phase grants blanket device authority, each automation is approved
+individually, and a `failsafe` stays ask-high always.

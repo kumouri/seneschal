@@ -1,0 +1,49 @@
+{
+  "schema": "seneschal.job/1",
+  "id": "20260728-201044-4e43",
+  "title": "CI: PR #42",
+  "argv": ["gh", "pr", "checks", "42", "--watch"],
+  "cwd": "/path/to/seneschal",
+  "log_path": "/path/to/seneschal/seneschal/state/jobs/20260728-201044-4e43.log",
+  "status": "done",
+  "pid": 102616,
+  "child_pid": 102872,
+  "created_at": "2026-07-28T20:10:44Z",
+  "started_at": "2026-07-28T20:10:44Z",
+  "ended_at": "2026-07-28T20:14:56Z",
+  "exit_code": 0,
+  "deadline_sec": 21600,
+  "lease": false,
+  "wake": true,
+  "notify": {"channel": "telegram"},
+  "notified_at": "2026-07-28T20:14:58Z",
+  "notify_delivery": "landed",
+  "origin": {
+    "session_id": "00000000-0000-0000-0000-000000000000",
+    "source": "build",
+    "cwd": "/path/to/seneschal-dev",
+    "branch": "feature/example",
+    "goal": "confirm PR #42's CI is green before merging it",
+    "stamped_by": "env",
+    "request": {"by": "owner", "surface": "telegram", "turn_id": "a1b2c3d4e5f6", "message_id": null,
+                "reason_class": null, "resolved_by": "turn-pointer", "why": null}
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "started_at": "2026-07-28T20:10:44Z",
+      "ended_at": "2026-07-28T20:14:56Z",
+      "duration_sec": 252.0,
+      "exit_code": 0,
+      "outcome": "done",
+      "retry_enabled": false,
+      "classification": "success",
+      "signature": null,
+      "fast_fail": false,
+      "confidence": "none",
+      "decision": "succeeded",
+      "log_offset": 0,
+      "next_attempt_at": null
+    }
+  ]
+}

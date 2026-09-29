@@ -14,7 +14,7 @@ import os
 import sys
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest import mock
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -148,6 +148,29 @@ class WarmSessionGate(unittest.TestCase):
         # warm_busy=False → cadence is due (no last-peek stamp) → it fires (stubbed)
         self.assertTrue(pr.maybe_peek(d, args, lambda *_: None, [], warm_busy=False))
 
+    def test_peek_survives_corrupt_last_peek(self):
+        # Regression (a last-peek outage): the warm session clobbered `last-peek` with a status
+        # *dict* instead of a timestamp string. parse_iso(dict) raised an uncaught AttributeError that
+        # crashed the scheduler task and took the whole daemon down on every restart. A garbled cache
+        # must now fail open — treat the cadence as due — and never raise.
+        d = tempfile.mkdtemp()
+        pr.save_json(os.path.join(d, "last-peek"),
+                     {"sleep_state": "just_asleep", "finding": "nothing hot", "status": "ok"})
+        args = argparse.Namespace(peek_interval_min=5, watch_prompt="peek", watch_cmd=None,
+                                  stub_brain=True)
+        self.assertTrue(pr.maybe_peek(d, args, lambda *_: None, [], warm_busy=False))
+        # …and it self-heals: the dict is overwritten with a real timestamp stamp for next time.
+        stamped = pr.load_json(os.path.join(d, "last-peek"), None)
+        self.assertIsInstance(stamped, str)
+        pr.parse_iso(stamped)  # a valid instant now — no raise
+
+    def test_parse_iso_rejects_non_string(self):
+        # parse_iso must raise a *caught* exception type (TypeError, not AttributeError) on non-str
+        # input, so every reader's `except (ValueError, TypeError)` guard fails open instead of crashing.
+        for bad in ({"peek_at": "2026-07-23T21:02:00-05:00"}, ["2026-07-23T21:02:00Z"], 1_721_000_000):
+            with self.assertRaises((ValueError, TypeError)):
+                pr.parse_iso(bad)
+
     def test_slots_deferred_while_warm_busy(self):
         # maybe_run_slots returns early (launches nothing) when warm_busy — verified by no slots.json write.
         d = tempfile.mkdtemp()
@@ -202,10 +225,94 @@ class SlotReap(unittest.TestCase):
     def test_gives_up_and_stamps_after_max_retries(self):
         retries = {"reminders-morning": pr.SLOT_MAX_RETRIES - 1}
         children = {"reminders-morning": _RcProc(rc=1)}
+        hold = {"reminders-morning": self.when + timedelta(seconds=30)}  # a stale hold from a prior attempt
         pr.reap_finished_slots(children, self.dir, lambda *_: None, retries,
-                               max_retries=pr.SLOT_MAX_RETRIES, now_local=self.when)
+                               max_retries=pr.SLOT_MAX_RETRIES, now_local=self.when,
+                               slot_hold_until=hold)
         self.assertEqual(self._stamp().get("reminders-morning"), "2026-07-08")  # gave up → stamped
         self.assertNotIn("reminders-morning", retries)                          # cleared on give-up
+        self.assertNotIn("reminders-morning", hold)                             # hold cleared too
+
+    def test_clean_exit_also_clears_a_stale_hold(self):
+        children, retries = {"reminders-morning": _RcProc(rc=0)}, {}
+        hold = {"reminders-morning": self.when + timedelta(seconds=60)}
+        pr.reap_finished_slots(children, self.dir, lambda *_: None, retries, now_local=self.when,
+                               slot_hold_until=hold)
+        self.assertNotIn("reminders-morning", hold)
+
+    def test_reset_named_in_output_holds_until_that_clock_time(self):
+        # The hybrid retry wait: a failure whose own output names a usage-limit reset holds the
+        # relaunch until that time, in preference to the exponential backoff.
+        os.makedirs(os.path.join(self.dir, "slot-logs"), exist_ok=True)
+        with open(pr.slot_log_path(self.dir, "dream"), "w", encoding="utf-8") as fh:
+            fh.write("! claude turn error: You've hit your session limit · resets 9:15am "
+                     "(UTC)\n")
+        children, retries, hold = {"dream": _RcProc(rc=1)}, {}, {}
+        pr.reap_finished_slots(children, self.dir, lambda *_: None, retries, now_local=self.when,
+                               slot_hold_until=hold)
+        self.assertEqual(retries["dream"], 1)
+        self.assertEqual(hold["dream"], datetime(2026, 7, 8, 9, 15))  # self.when is 08:01 — later today
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "slots.json")))  # not stamped — still due
+
+    def test_reset_named_earlier_than_now_holds_until_tomorrow(self):
+        # A run that fails at 22:05 naming "resets 12:40am" means 00:40 the NEXT day, not 22 hours ago.
+        late = datetime(2026, 7, 8, 22, 5)
+        os.makedirs(os.path.join(self.dir, "slot-logs"), exist_ok=True)
+        with open(pr.slot_log_path(self.dir, "dream"), "w", encoding="utf-8") as fh:
+            fh.write("session limit · resets 12:40am (UTC)\n")
+        children, hold = {"dream": _RcProc(rc=1)}, {}
+        pr.reap_finished_slots(children, self.dir, lambda *_: None, {}, now_local=late,
+                               slot_hold_until=hold)
+        self.assertEqual(hold["dream"], datetime(2026, 7, 9, 0, 40))
+
+    def test_plain_failure_backs_off_exponentially(self):
+        # No captured output names a reset (here: no log file at all) → the exponential-backoff
+        # fallback, doubling each attempt and capped at SLOT_BACKOFF_CAP_SEC.
+        children, hold = {"reminders-morning": _RcProc(rc=1)}, {}
+        retries = {"reminders-morning": 2}  # this failure is the 3rd attempt
+        pr.reap_finished_slots(children, self.dir, lambda *_: None, retries, now_local=self.when,
+                               slot_hold_until=hold)
+        self.assertEqual(retries["reminders-morning"], 3)
+        expected = pr.SLOT_BACKOFF_BASE_SEC * (2 ** 2)  # attempt 3 → base * 2**(3-1)
+        self.assertLess(expected, pr.SLOT_BACKOFF_CAP_SEC)  # sanity: this attempt hasn't hit the cap yet
+        self.assertEqual(hold["reminders-morning"], self.when + timedelta(seconds=expected))
+
+    def test_backoff_is_capped(self):
+        children, hold = {"reminders-morning": _RcProc(rc=1)}, {}
+        # SLOT_MAX_RETRIES - 2 → this failure becomes attempt SLOT_MAX_RETRIES - 1, large enough to be
+        # well past the doubling cap but still short of the give-up threshold (tested separately above).
+        retries = {"reminders-morning": pr.SLOT_MAX_RETRIES - 2}
+        pr.reap_finished_slots(children, self.dir, lambda *_: None, retries,
+                               max_retries=pr.SLOT_MAX_RETRIES, now_local=self.when,
+                               slot_hold_until=hold)
+        self.assertEqual(retries["reminders-morning"], pr.SLOT_MAX_RETRIES - 1)  # still short of give-up
+        self.assertEqual(hold["reminders-morning"], self.when + timedelta(seconds=pr.SLOT_BACKOFF_CAP_SEC))
+
+    def test_backoff_ladder_stays_inside_the_catchup_window(self):
+        # The whole point of capping the backoff well below --slot-catchup-min (default 180 min): a
+        # wait that outlasts the window is pointless, because classify_slots stamps the slot too_late
+        # before a later retry ever gets to fire. Assert the full SLOT_MAX_RETRIES ladder's total wait
+        # leaves real headroom inside the default window rather than consuming or exceeding it.
+        total_wait = sum(pr.slot_backoff_seconds(attempt) for attempt in range(1, pr.SLOT_MAX_RETRIES + 1))
+        default_catchup_sec = 180 * 60  # --slot-catchup-min's own default
+        self.assertLess(total_wait, default_catchup_sec)
+        self.assertLess(pr.SLOT_BACKOFF_CAP_SEC, default_catchup_sec)
+
+    def test_a_held_slot_is_skipped_by_maybe_run_slots_until_the_hold_passes(self):
+        # The other half of R3: reap_finished_slots sets the hold, maybe_run_slots must honor it.
+        args = argparse.Namespace(no_slots=False, stub_brain=False, fake_inbox=None,
+                                  slot_catchup_min=180, claude_bin="claude", notion_mcp=None,
+                                  permission_mode="bypassPermissions", slot_model=None, model=None)
+        with mock.patch.object(pr, "datetime") as mock_dt, \
+             mock.patch.object(pr, "SLOTS", [{"name": "dream", "at": "22:00", "prompt": "go"}]):
+            mock_dt.now.return_value = datetime(2026, 7, 8, 22, 1)
+            mock_dt.side_effect = lambda *a, **k: datetime(*a, **k)
+            hold = {"dream": datetime(2026, 7, 8, 22, 10)}  # still ahead of "now"
+            pr.maybe_run_slots(self.dir, args, lambda *_: None, [], warm_busy=False,
+                               slot_children={}, slot_hold_until=hold)
+        # Held slot must not have been stamped fired (it wasn't launched) and the hold survives.
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "slots.json")))
+        self.assertIn("dream", hold)
 
 
 class RouterShadow(unittest.TestCase):
@@ -267,6 +374,22 @@ class RouterShadow(unittest.TestCase):
         self.assertFalse(os.path.exists(pr.router_log_path(self.dir)))
 
 
+_FROZEN_NOW = datetime(2026, 6, 15, 12, 0, 0)
+
+
+class _FrozenDateTime(datetime):
+    """`pr.datetime` swapped in for this class's tests — `maybe_seed_day` reads `datetime.now()`
+    live (machine-local, by its own design; presence.py is outside this gate's scope). Freezing it
+    to one instant, rather than letting the test and the function under test each take their own
+    live read, closes the same #711 gap `test_turn_suppression.pin_wall_clock` closes there: two
+    calls to the real clock milliseconds apart agree in practice, but only in practice, and a test
+    should not depend on that."""
+
+    @classmethod
+    def now(cls, tz=None):
+        return _FROZEN_NOW if tz is None else _FROZEN_NOW.astimezone(tz)
+
+
 class SeedDayRollover(unittest.TestCase):
     """maybe_seed_day — the once-per-local-day exact-time reminder seed that retired the four fixed
     reminder slots. Fires on the first tick of each new owner-local date (slots.json[SEED_SLOT_NAME]
@@ -275,7 +398,15 @@ class SeedDayRollover(unittest.TestCase):
 
     def setUp(self):
         self.dir = tempfile.mkdtemp()
-        self.today = pr.local_now().strftime("%Y-%m-%d")
+        self.today = _FROZEN_NOW.strftime("%Y-%m-%d")
+        patcher = mock.patch.object(pr, "datetime", _FrozenDateTime)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        # maybe_seed_day reads the owner-tz clock through local_now() (tz_common), which the
+        # datetime swap above does not reach — freeze that seam to the same instant.
+        lp = mock.patch.object(pr, "local_now", lambda: _FROZEN_NOW)
+        lp.start()
+        self.addCleanup(lp.stop)
 
     def _args(self, **over):
         base = dict(no_slots=False, no_seed_day=False, stub_brain=False, fake_inbox=None,
@@ -336,10 +467,13 @@ class SeedDayRollover(unittest.TestCase):
     def test_reaper_stamps_seed_under_its_name_on_clean_exit(self):
         # The reused slot lifecycle: a clean seed exit stamps slots.json[SEED_SLOT_NAME], so the
         # next-loop guard reads "already seeded today" — the once-per-day contract.
+        # A frozen instant, not the live clock: the stamp is derived from the `now_local` handed in,
+        # and asserting against a second live read could straddle midnight between the two.
+        now = datetime(2026, 1, 15, 9, 30)
         children = {pr.SEED_SLOT_NAME: _RcProc(rc=0)}
-        pr.reap_finished_slots(children, self.dir, lambda *_: None, {}, now_local=datetime.now())
+        pr.reap_finished_slots(children, self.dir, lambda *_: None, {}, now_local=now)
         stamped = pr.load_json(os.path.join(self.dir, "slots.json"), {})
-        self.assertEqual(stamped.get(pr.SEED_SLOT_NAME), datetime.now().strftime("%Y-%m-%d"))
+        self.assertEqual(stamped.get(pr.SEED_SLOT_NAME), "2026-01-15")
 
 
 class StoreBackendActive(unittest.TestCase):

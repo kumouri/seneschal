@@ -16,7 +16,8 @@ export type Verdict =
   | "message" // caller left a message
   | "spam" // identified as spam / robocall
   | "gate_fail" // never pressed 1 — almost certainly a robodialer
-  | "rejected"; // blocklisted, declined before answering ($0)
+  | "rejected" // blocklisted, declined before answering ($0)
+  | "talk"; // outbound talk-mode call: a live conversation with the owner, not a screened caller
 
 /** What happens to a caller who passes the press-1 gate. */
 export type PostGateAction = "converse" | "ring_through";

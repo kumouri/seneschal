@@ -28,6 +28,17 @@ uv sync --extra cockpit
 `uv sync --frozen` never pulls these in; the prod venv stays lean). No `uv` → offer its
 install (per-OS, confirmed) or hold the chapter (`blocked --summary "no uv"`).
 
+Then make it **survive the next deploy**: a bare `uv sync --frozen` doesn't just skip the extras,
+it UNINSTALLS them, and the Windows updater (`seneschald-control.ps1 -Action Update`) runs one on
+every merge. Confirmed, drop the durable opt-in it reads:
+
+```
+python -c "import pathlib; p = pathlib.Path('seneschal/state/cockpit-enabled'); p.parent.mkdir(parents=True, exist_ok=True); p.touch()"
+```
+
+— while `seneschal/state/cockpit-enabled` exists, every deploy syncs with `--extra cockpit`;
+deleting it lets the next deploy prune the extras back out.
+
 ## 2 — Frontend build (confirm-to-run)
 
 Needs Node 22+ (`node --version`). Confirmed:

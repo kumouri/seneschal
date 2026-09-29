@@ -97,11 +97,17 @@ reference file just-in-time, right before you execute that phase.
 **Phase 4 — Delegations** (`references/delegations.md`)
 - Extension hooks for delegated sibling skills (the core ships none). If you've wired any, run the
   inline ones here against the entries captured in Phase 1 and note the results in the run log.
+- A delegation **owned by a gate script** (the shape for anything outbound — see
+  `references/delegations.md` → *Gated delegations*) is read, not assumed: run the gate's `status`,
+  act only through its recording wrapper, and write what `status` returned. **Never defer it to
+  another mode or write that it "will send later"** — the daemon's backstop owns it if this run doesn't.
 
 **Phase 5 — Clear + carry-over (critical path #2)** (`references/clear-and-carryover.md`)
 - **Clear** the journal's processed day (its entries live in the Phase-1 capture) and build **tomorrow's
   carry-over callout** — grouped `<details>` toggles by category + all Active/Carrying-Over Important
-  Flags. Runs after Phase 3 so flag statuses are current; never skip it.
+  Flags. The callout is **rebuilt from current sources every run, never appended to**: audience first
+  (is it the owner's?), then the drop criteria, with unverifiable items held ≤ 3 days and then asked.
+  Runs after Phase 3 so flag statuses are current; never skip it.
 
 **Phase 6 — Finalize the run log** (`references/run-log.md`)
 - Update counts, set Status (Success/Partial/Failed), write Actions Summary, Carry-Over Context,

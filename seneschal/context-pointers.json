@@ -1,0 +1,130 @@
+{
+  "_note": [
+    "Allowlist + extra resolution bases for check_context_pointers.py, the dangling-pointer check",
+    "(seneschal/scripts/check_context_pointers.py's docstring is the design record).",
+    "",
+    "`reason` is REQUIRED and non-empty per entry: an exemption should be a decision someone wrote",
+    "down, not a silent pass. Same principle as context-budget.json's raises[].",
+    "",
+    "Entries are EXACT STRINGS, not patterns. A pattern-based allowlist grows to cover things nobody",
+    "examined, and the whole point is that each exemption was looked at once. Adding an entry here is",
+    "a claim that the pointer is legitimately unresolvable, not a way to quiet a finding.",
+    "",
+    "`bases` declares extra resolution roots per document. No single base works: a doc in",
+    "`seneschal/docs/` writing `state/run-log.md` means `seneschal/state/run-log.md`, while the root",
+    "CLAUDE.md writing `scripts/presence.py` means `seneschal/scripts/presence.py`."
+  ],
+  "bases": {
+    "CLAUDE.md": [
+      "seneschal/"
+    ],
+    "README.md": [
+      "seneschal/"
+    ],
+    "archons/CLAUDE.md": [
+      "archons/proteus/"
+    ],
+    "seneschal/references/archons.md": [
+      "archons/proteus/"
+    ],
+    "seneschal/docs/asyncio-daemon-design.md": [
+      "seneschal/",
+      "seneschal/state/"
+    ],
+    "seneschal/docs/asyncio-daemon-plan.md": [
+      "seneschal/",
+      "seneschal/state/"
+    ],
+    "seneschal/references/memory.md": [
+      "seneschal/",
+      "seneschal/state/"
+    ],
+    "seneschal/references/databases.md": [
+      "seneschal/",
+      "seneschal/state/"
+    ],
+    "seneschal/references/reminders-policy.md": [
+      "seneschal/",
+      "seneschal/state/"
+    ],
+    "subagents/journal-steward/daily-journal-steward/SKILL.md": [
+      "seneschal/"
+    ],
+    "subagents/message-archivist/SKILL.md": [
+      "seneschal/"
+    ],
+    "subagents/morning-briefing/SKILL.md": [
+      "subagents/",
+      "seneschal/"
+    ],
+    "subagents/reminders/SKILL.md": [
+      "seneschal/"
+    ],
+    "subagents/store-setup/SKILL.md": [
+      "seneschal/"
+    ],
+    "subagents/email-triage/SKILL.md": [
+      "subagents/",
+      "seneschal/"
+    ],
+    "subagents/archon-forge/SKILL.md": [
+      "subagents/",
+      "seneschal/",
+      "archons/"
+    ]
+  },
+  "allow": [
+    {
+      "pointer": "**/.obsidian",
+      "reason": "A glob describing an Obsidian vault's marker directory on the owner's disk (the store-setup probe), not a repo path."
+    },
+    {
+      "pointer": "../../seneschal/references/reminder-aliases.json",
+      "reason": "Per-install vocabulary file: gitignored, seeded from the tracked reminder-aliases.example.json beside it (ack.py reads the live file, falling back to the example). Never tracked, so it never resolves in a checkout."
+    },
+    {
+      "pointer": "../demiurge",
+      "reason": "An example sibling-checkout path (the public archon-forge code repo lives beside this one, not inside it). Relative to the repo root rather than to the doc, and never a pointer into this tree."
+    },
+    {
+      "pointer": ".claude/rules/",
+      "reason": "`.claude/` paths are allowlisted rather than resolved: whether `.claude/worktrees/` is ignored depends on an untracked `.git/info/exclude`, so rung 2's answer there is machine-dependent and a blocking gate may not depend on it. The rules directory is discussed as a design option; no rule file ships."
+    },
+    {
+      "pointer": ".claude/rules/**/*.md",
+      "reason": "Same as `.claude/rules/`: a glob naming the scanned/budgeted shape for path-scoped rule files, none of which ship."
+    },
+    {
+      "pointer": ".claude/rules/*.md",
+      "reason": "Same as `.claude/rules/`: a glob describing path-scoped rule files as a design option, not a pointer to a file that ships."
+    },
+    {
+      "pointer": "archons/*/site.json",
+      "reason": "Same convention as `archons/<id>/site.json`: the glob has nothing to match until an archon that serves a site is added."
+    },
+    {
+      "pointer": "archons/<id>/site.json",
+      "reason": "Names the per-archon `site.json` convention - a file an archon ships once it serves a site. No archon in this tree ships one yet, so the glob has nothing to match."
+    },
+    {
+      "pointer": "references/proposed-learnings-archive.md",
+      "reason": "Created by `learnings.py retire` the first time a closed learning is archived; absent on a fresh install by design."
+    },
+    {
+      "pointer": "references/reminder-aliases.json",
+      "reason": "Per-install vocabulary file: gitignored, seeded from the tracked reminder-aliases.example.json beside it (ack.py reads the live file, falling back to the example). Never tracked, so it never resolves in a checkout."
+    },
+    {
+      "pointer": "references/telegram-topics.json",
+      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
+    },
+    {
+      "pointer": "seneschal/scripts/advisors.py",
+      "reason": "Deferred advisor rails (references/advisor-chain.md's later phase and slack-draft-and-hold-spec.md). A design doc naming a module it PROPOSES is legitimate; silently passing it is not. This row is a to-do with a home."
+    },
+    {
+      "pointer": "tools/<id>_paths.py",
+      "reason": "A template path: each archon's own `<id>_paths.py` module, named generically in the Forge's instructions. The shipped instance is `archons/proteus/tools/proteus_paths.py`."
+    }
+  ]
+}

@@ -138,7 +138,7 @@ The owner taps "Download personal data" when they feel like it (monthly is plent
 dashboard keep themselves current. This is the whole manual burden: **one tap, occasionally.**
 
 > Alternatively, fold the same two commands into the nightly **Dream** run, which already does act-low
-> local cache refreshes (`seneschal/SKILL.md` → Dream). No new scheduled task, one fewer moving part.
+> local cache refreshes (`seneschal/modes/dream.md`). No new scheduled task, one fewer moving part.
 
 ### Tier 1 — genuinely automatic, via Health Connect (built; transport = Tailscale/LAN)
 

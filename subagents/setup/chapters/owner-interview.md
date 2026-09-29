@@ -47,14 +47,18 @@ python seneschal/scripts/setup_state.py mark owner-interview in-progress --step 
 
 1. **Name + pronunciation.** The owner's name; ask whether it's pronounced the way it's
    spelled and capture a phonetic spelling only if not (`owner.nameSpoken`).
-2. **Pronouns.** (`owner.pronouns`.)
+2. **Pronouns.** (`owner.pronouns`.) Then, as its own question, **their email addresses** — the
+   primary (`owner.email`) and any others a message to them might go to, e.g. a work address
+   (`owner.emails`, a list). The outbound send gate treats exactly these as "the owner": a send
+   only to them passes untouched, anything else needs an approval (`seneschal/scripts/SEND_GATE_SETUP.md`).
 3. **Timezone + day boundary.** IANA zone, machine's current zone offered as the default
    (hint it with `python -c "from datetime import datetime; print(datetime.now().astimezone().tzinfo)"`
    — that prints an offset name on some platforms, so have the owner confirm the proper IANA
    name, e.g. `Europe/Berlin`). Then the
    **after-midnight rule**: activity before their usual sleep hour counts as the *prior* day
-   — confirm the boundary hour (default 03:00). Date logic everywhere gates on this zone,
-   never UTC.
+   — confirm the boundary hour (default 05:00; a whole hour, 0–12). The answer is
+   `owner.dayBoundaryHour` (an int, e.g. `4` for 04:00). Date logic everywhere gates on this
+   zone and this cut, never UTC.
 4. **Work.** What they do, where, and roughly what shape their week has — two or three lines
    the briefings can lean on. Nothing sensitive is required; whatever they offer.
 5. **Top ~3 projects.** What's actually live right now, one line each (the store's In-Progress
@@ -85,7 +89,8 @@ python seneschal/scripts/setup_state.py mark owner-interview in-progress --step 
    and current beats exhaustive; the template's section headings, one owner. Show it. One
    approval → write (in the turn *after* the approval, so no question ever has a file card
    under it).
-2. Merge `owner.*` (name / nameSpoken / pronouns / email / timezone) into
+2. Merge `owner.*` (name / nameSpoken / pronouns / email / emails / timezone / dayBoundaryHour, and
+   `nightCurfew` only if the owner asked for a different overnight window than 01:00–07:00) into
    `persona/identity.json` — read-modify-write, preserving `assistant.*` untouched. Create
    the file from `persona/identity.example.json` if it doesn't exist yet.
 3. Never write on a skipped confirmation; a fully-skipped interview marks the chapter

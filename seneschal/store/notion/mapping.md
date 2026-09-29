@@ -135,9 +135,20 @@ keep it out of wide parallel bursts (Throughput #1).
      `store-query` whenever an id or a view will do.
    - **Ack by cached page id — skip the query** (below).
 
-**Reuse the baked-in references first.** `schema.md` (ids + schema) and the Dream context digest answer
-most orientation with **zero** Notion calls. Only re-read to confirm a write when it actually matters
-(an ack you're about to claim landed) — don't read-back reflexively.
+**Reuse the baked-in references first.** `schema.md` (ids + schema) answers most orientation with
+**zero** Notion calls. Only re-read to confirm a write when it actually matters (an ack you're about to
+claim landed) — don't read-back reflexively.
+
+**The Brief reads Dream's pre-stage, not a fresh fan-out.** The morning Brief used to fire a full 4-read
+batch (Tasks due/overdue, Active/Carrying-Over Flags, In-Progress Projects, + carry-over) every morning.
+Now Dream (nightly, step 1b) snapshots the three DB reads (Tasks due/overdue **today + tomorrow**, Flags,
+Projects) into the timestamped `../../state/brief-prestage.json` (`scripts/brief_prestage.py` — one
+writer, one reader); the Brief reads that store first (`brief_prestage.py read`) and issues only **delta**
+live-queries (Tasks completed/created since the snapshot stamp; Flags/Projects changed since). The
+snapshot predates the overnight hours, so the light delta check is still required — it is a warm base,
+not the last word; if it reads stale, absent, or corrupt (exit 3), the Brief falls back to the full
+batch. (This replaces the retired `state/context-digest.md` "Brief pre-stage" block — the digest's jobs
+were split into single-purpose stores with one writer each.)
 
 ### Reminders id-cache — ack by cached id, skip the query
 
@@ -199,19 +210,28 @@ touch it. Full design: `../../docs/notion-write-behind-outbox-spec.md`.
 never a pre-baked payload. An `ack_reminder` intent flushes as one **`notion-update-page`** on the
 **cached** ⏰ page id (the worked example above, replayed verbatim: `Status` = the translated option
 string, `Last Acknowledged` = the ack's local date, `Consecutive Misses` = 0, untick `Ack` — no lookup
-query, no read-back). A `med_log` intent flushes as one **`notion-create-pages`** into its target
-`collection://…`. The generic enqueued intents (`run_log_finalize`, `reminder_status`) flush as
-`notion-update-page` by the row id they carry. Property names and option strings resolve through
+query, no read-back). A `med_log` intent flushes as one **`notion-create-pages`** with
+`parent: {"data_source_id": target_id}` — a `'db'` target is a **data-source** id (`collection://…`),
+never a `database_id`; passing it as one 404s every time. The generic enqueued intents
+(`run_log_finalize`, `reminder_status`) flush as `notion-update-page` by the row id they carry, and a
+`task_status` intent (the register → Tasks projection, enqueued only by `loops.py`) flushes as
+`notion-update-page` on the Tasks page id, setting `Status` to `payload.status` (and `Completed` to
+`payload.completed_date` when present). Property names and option strings resolve through
 `schema.md`, exactly like a direct write.
 
 **Flush rules.** The drain is **single-consumer FIFO** (oldest first — per-target order for free) and
 runs opportunistically inside LLM turns: `outbox.py pull --json` → replay each intent via the tool above
 → `outbox.py mark --done` (for a create, pass `--notion-page-id` so the landed row id is recorded in the
-same local transaction). Every entry carries a **`UNIQUE` idempotency key** (`ack:<row>:<date>`,
-`medlog:<intent-uuid>`, …), so a repeat enqueue is a no-op and a replayed update converges — flushing
-twice is safe. A transient failure (429/5xx/network) is `mark --retry` — exponential backoff, honoring
-`Retry-After`; a permanent one (404/400/403) or an exhausted attempt budget is `mark --dead-letter` —
-the entry stops retrying but **stays in the table and is surfaced** (`outbox.py status` lists every
-dead-letter; never silently dropped, never blocking the rest of the queue). The happy path is
-belt-and-suspenders: the turn's direct write still fires, and the drainer finds the entry
-already-satisfied.
+same local transaction). `pull` first **sweeps superseded acks** (an entry whose date a newer ack — in
+`acks.json` or already landed here — has overtaken is resolved write-free), so a drainer is never
+handed a write that would move `Last Acknowledged` backwards. Every entry carries a **`UNIQUE`
+idempotency key** (`ack:<row>:<date>`, `medlog:<intent-uuid>`, `task_status:<page>:<status>`, …), so a
+repeat enqueue is a no-op and a replayed update converges — flushing twice is safe. A transient failure
+(429/5xx/network) is `mark --retry` — exponential backoff, honoring `Retry-After`; a permanent one or an
+exhausted attempt budget is `mark --dead-letter --status-code <code>` — the entry stops retrying but
+**stays in the table and is surfaced** (`outbox.py status` lists every dead-letter; never silently
+dropped, never blocking the rest of the queue). The status code classifies it: 400/404 read as a likely
+**caller bug** (wrong id/parent shape — flagged in `status`), never assumed permanent. A write that must
+*not* happen is `outbox.py retract --id <id> --reason …` — resolved without a Notion write, never parked
+as a dead-letter. The happy path is belt-and-suspenders: the turn's direct write still fires, and the
+drainer finds the entry already-satisfied.

@@ -4,7 +4,10 @@ import { ArchonsPanel } from './components/ArchonsPanel'
 import { BreakglassPage } from './components/BreakglassPage'
 import { ChatPanel } from './components/ChatPanel'
 import { DeployHealthPanel } from './components/DeployHealthPanel'
+import { DocStatusPanel } from './components/DocStatusPanel'
+import { PanelErrorBoundary } from './components/ErrorBoundary'
 import { HealthSummaryPanel } from './components/HealthSummaryPanel'
+import { JobsPanel } from './components/JobsPanel'
 import { MealsPanel } from './components/MealsPanel'
 import { ModelDialsPanel } from './components/ModelDialsPanel'
 import { NutritionPanel } from './components/NutritionPanel'
@@ -17,6 +20,7 @@ import { SessionsPanel } from './components/SessionsPanel'
 import { SleepPanel } from './components/SleepPanel'
 import { StatusPanel } from './components/StatusPanel'
 import { ThresholdsPanel } from './components/ThresholdsPanel'
+import { TracePanel } from './components/TracePanel'
 import { UsagePanel } from './components/UsagePanel'
 import { WorkoutsPanel } from './components/WorkoutsPanel'
 import { usePolling } from './usePolling'
@@ -60,9 +64,10 @@ export default function App() {
         <div>
           <h1>Seneschal Cockpit</h1>
           <div className="subtitle">
-            Live chat over the daemon pipe, model dials + thresholds, archon tiles, the
-            health/meal panel group, and real OIDC auth + break-glass (dev-no-auth remains the
-            default until an IdP is configured)
+            Live chat over the daemon pipe, the session trace, the background-jobs monitor, the
+            open-spec ledger, model dials + thresholds, archon tiles, the health/meal panel group,
+            and real OIDC auth + break-glass (dev-no-auth remains the default until an IdP is
+            configured)
           </div>
         </div>
         <div className="header-actions">
@@ -79,31 +84,56 @@ export default function App() {
       </header>
 
       <main className="layout">
-        <ChatPanel />
+        {/* Every panel renders inside its own error boundary: one panel rendering a malformed field
+            must never blank the whole dashboard (ErrorBoundary.tsx). */}
+        <PanelErrorBoundary name="Chat">
+          <ChatPanel />
+        </PanelErrorBoundary>
+
+        {/* Trace sits HERE and not in the grid below: it is a two-pane log reader over verbatim
+            transcript text, and a 320px-minimum tile starved its content column to zero pixels
+            (TracePanel.tsx, decision 1). Sized like the chat pane above it, collapsed by default. */}
+        <PanelErrorBoundary name="Trace">
+          <TracePanel />
+        </PanelErrorBoundary>
 
         <div className="grid">
-          <SessionsPanel />
-          <StatusPanel />
-          <ModelDialsPanel />
-          <ThresholdsPanel />
-          <RouterPanel />
-          <ArchonsPanel />
-          <OneiroiPanel />
-          <DeployHealthPanel />
-          <PresencePanel />
-          <RemindersPanel />
-          <UsagePanel />
-          <HealthSummaryPanel />
-          <SleepPanel />
-          <WorkoutsPanel />
-          <NutritionPanel />
-          <MealsPanel />
+          {(
+            [
+              ['Sessions', SessionsPanel],
+              ['Status', StatusPanel],
+              ['Jobs', JobsPanel],
+              // The open-spec ledger. A TILE rather than a section under the chat pane, unlike the
+              // Trace panel: this is a reference list you go looking for, not a live read-along of
+              // the conversation. Collapsed by default for the same reason.
+              ['Open specs', DocStatusPanel],
+              ['Model dials', ModelDialsPanel],
+              ['Thresholds', ThresholdsPanel],
+              ['Router', RouterPanel],
+              ['Archons', ArchonsPanel],
+              ['Oneiroi', OneiroiPanel],
+              ['Deploy health', DeployHealthPanel],
+              ['Presence', PresencePanel],
+              ['Reminders', RemindersPanel],
+              ['Usage', UsagePanel],
+              ['Health', HealthSummaryPanel],
+              ['Sleep', SleepPanel],
+              ['Workouts', WorkoutsPanel],
+              ['Nutrition', NutritionPanel],
+              ['Meals', MealsPanel],
+            ] as const
+          ).map(([name, PanelComponent]) => (
+            <PanelErrorBoundary key={name} name={name}>
+              <PanelComponent />
+            </PanelErrorBoundary>
+          ))}
         </div>
       </main>
 
       <p className="footer-note">
         Reads seneschal/state/* read-only, every ~5s; the chat pane is live over the daemon pipe (GET
-        /api/ws). Writes: the restart button, model/threshold saves, and anything you send in chat.
+        /api/ws). Writes: the restart buttons (daemon + per-archon), model/threshold saves, and anything you send in
+        chat.
       </p>
     </>
   )

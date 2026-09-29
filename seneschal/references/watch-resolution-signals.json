@@ -1,0 +1,19 @@
+{
+  "schema": "seneschal.watch-resolution-signals/1",
+  "signals": [
+    "no longer",
+    "resolved",
+    "restored",
+    "cleared",
+    "paid",
+    "is now positive",
+    "back to normal",
+    "back in good standing",
+    "back on track",
+    "closed",
+    "cured",
+    "issue has been fixed",
+    "problem has been fixed",
+    "problem has been resolved"
+  ]
+}

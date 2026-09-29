@@ -21,15 +21,16 @@ CREATE TABLE IF NOT EXISTS blocklist (
   hit_count   INTEGER NOT NULL DEFAULT 1
 );
 
--- One row per inbound call, with the verdict and an estimated cost.
+-- One row per inbound call (or outbound talk-mode call), with the verdict and an estimated cost.
+-- cost_estimate_usd summed over today's rows is the daily-budget guard's spend (sumSpendToday).
 CREATE TABLE IF NOT EXISTS calls (
   id                TEXT PRIMARY KEY,
   from_e164         TEXT NOT NULL DEFAULT '',
   to_e164           TEXT NOT NULL DEFAULT '',
   started_at        TEXT NOT NULL,
   ended_at          TEXT,
-  outcome_stage     TEXT NOT NULL,        -- allowlist | blocklist | gate_fail | conversation
-  verdict           TEXT NOT NULL,        -- allowed | bridged | message | spam | gate_fail | rejected
+  outcome_stage     TEXT NOT NULL,        -- allowlist | blocklist | gate_fail | conversation | talk
+  verdict           TEXT NOT NULL,        -- allowed | bridged | message | spam | gate_fail | rejected | talk
   caller_name       TEXT,
   reason            TEXT,
   transcript        TEXT,

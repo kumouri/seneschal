@@ -532,6 +532,12 @@ button.btn-secondary:hover {
   background: var(--accent);
 }
 
+/* The "Recent decisions" verdict badge. `→ escalate (other)` is longer than a bare verdict was, and
+   it must not wrap — a badge broken across two lines stops reading as one decision. */
+.pill-decision {
+  white-space: nowrap;
+}
+
 /* -------------------------------------------------------------- v3.5: Oikonomos / Thresholds panel */
 
 .threshold-group {
@@ -550,6 +556,46 @@ button.btn-secondary:hover {
 }
 
 /* --------------------------------------------------------- v4: health / workout / meal panels */
+
+/* Context-fill gauge (StatusPanel). Same plain-CSS family as the router/health bars — no new deps —
+   but the track is `position: relative` rather than `overflow: hidden`, because the Oikonomos
+   context_fill_winddown_pct marker has to sit ON the track at an absolute percentage. */
+.ctx-gauge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+}
+
+.ctx-gauge-track {
+  flex: 1;
+  position: relative;
+  height: 10px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.06);
+  min-width: 80px;
+}
+
+.ctx-gauge-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 5px;
+  transition: width 0.2s ease;
+}
+
+.ctx-gauge-fill.hot {
+  background: var(--warn);
+}
+
+.ctx-gauge-marker {
+  position: absolute;
+  top: -2px;
+  width: 2px;
+  height: 14px;
+  background: var(--text-dim);
+  opacity: 0.8;
+}
+
 
 .health-bar-row {
   display: flex;
@@ -754,6 +800,17 @@ a.btn-secondary:hover {
   text-decoration: underline;
 }
 
+button.restart-btn.archon-restart-btn {
+  padding: 4px 12px;
+  font-size: 0.78rem;
+}
+
+.archon-restart-ack {
+  flex-basis: 100%;
+  margin: 0;
+}
+
+
 /* ----------------------------------------------------------------------------- v5: break-glass page */
 
 .breakglass-page {
@@ -920,4 +977,478 @@ button.breakglass-danger-btn:disabled {
   padding-left: 20px;
   color: var(--text-dim);
   font-size: 0.82rem;
+}
+
+/* A crashed panel's bulkhead card (ErrorBoundary.tsx) — visibly wrong, quietly contained. */
+.panel-crashed {
+  border-color: #ff5470;
+}
+
+/* ------------------------------------------------------------------ Jobs panel (JobsPanel.tsx)
+   Durable background jobs — seneschal/docs/background-jobs-spec.md. Plain CSS, no new deps, matching the
+   v4 panels. Only ONE thing here is styled as an alarm (.job-alarm / .job-unpushed): a finished job
+   whose completion push hasn't landed. Everything else is deliberately quiet — a failed job is
+   information, an undelivered ping is the failure this whole feature exists to prevent. */
+
+.job-alarm {
+  background: var(--danger-soft);
+  border: 1px solid var(--danger);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  font-size: 0.82rem;
+  color: var(--text);
+}
+
+.job-row {
+  border-bottom: 1px solid var(--panel-border);
+  padding: 6px 0;
+}
+
+.job-row:last-child {
+  border-bottom: none;
+}
+
+.job-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  background: none;
+  border: none;
+  padding: 2px 0;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.job-head:disabled {
+  cursor: default;
+}
+
+.job-head:not(:disabled):hover .job-title {
+  color: var(--accent);
+}
+
+.job-status {
+  flex: 0 0 auto;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.job-status-running {
+  color: var(--accent);
+}
+
+.job-status-ok {
+  color: var(--accent2);
+}
+
+.job-status-bad {
+  color: var(--danger);
+}
+
+.job-status-muted {
+  color: var(--text-dim);
+}
+
+.job-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.88rem;
+}
+
+.job-unpushed {
+  color: var(--danger);
+  font-size: 0.76rem;
+  padding: 2px 0 4px;
+}
+
+.job-detail {
+  padding: 4px 0 6px;
+}
+
+.job-command,
+.job-log {
+  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  font-size: 0.74rem;
+  background: var(--bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  padding: 6px 8px;
+  margin: 4px 0;
+  color: var(--text-dim);
+  /* Logs are arbitrary-width; scroll them inside the card rather than stretching the grid column. */
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.job-log {
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.job-error {
+  color: var(--danger);
+  font-size: 0.78rem;
+  margin: 4px 0;
+}
+
+.job-divider {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  margin: 10px 0 4px;
+}
+
+/* The divider doubles as the collapsible group's header, so the toggle sits on its right. Styled to
+   read as part of the label rather than as a control — collapsing history is housekeeping, and it
+   must not compete for attention with .job-alarm two rows above it. */
+.job-group-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.job-collapse-toggle {
+  flex: 0 0 auto;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.job-collapse-toggle:hover {
+  color: var(--accent);
+}
+
+/* ── Collapsible panel heading (Panel.tsx) ───────────────────────────────────────────────────── */
+.panel-title-toggle {
+  display: flex; align-items: center; gap: 6px;
+  font: inherit; color: inherit; background: transparent; border: 0; padding: 0;
+  cursor: pointer; text-align: left;
+}
+.panel-title-toggle:hover { color: var(--accent); }
+.panel-title-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+.panel-caret { font-size: 0.75em; opacity: 0.7; width: 0.8em; }
+/* Collapsed, the section is its heading and nothing else — no residual gap where the body was. */
+.panel.is-collapsed { gap: 0; }
+
+/* ── Trace panel (the session trace, phase 1 — cockpit/server/trace.py) ──────────────────────────
+   Two panes: sessions on the left, the selected session's events on the right. The event list is
+   monospace and dense on purpose — it is read by scanning for something, not by reading through.
+
+   THIS PANEL IS NOT A TILE (a deliberate layout decision). It lives under the chat pane in `.layout`,
+   full width, sized like chat. In the `.grid` of `minmax(320px, 1fr)` tiles it got 346px, the two
+   panes split that to a 94px detail column, and the event row's fixed ts/src/kind columns (220px
+   +gaps) then starved the content column to LITERALLY 0px — every tool name and every line of
+   conversation rendering into a zero-width box. That was the squish.
+
+   The breakpoint below is a CONTAINER query, not a media query, and that is the other half of the
+   bug: the old `@media (max-width: 720px)` asked the VIEWPORT whether to stack, so on a 1280px
+   desktop it never fired while the actual container sat at 346px. A panel that can be re-placed
+   must measure the box it is in, never the window it is in. */
+.trace-panel { max-height: 70vh; }
+.trace-panel:not(.is-collapsed):not(.is-message) { min-height: 420px; }
+/* Collapsed, or showing a one-line status, it shrinks to fit rather than holding 420px of nothing. */
+.trace-panel.is-collapsed, .trace-panel.is-message { min-height: 0; max-height: none; }
+
+.trace-panel .panel-body {
+  flex: 1;
+  min-height: 0;          /* lets the panes scroll instead of growing the panel past max-height */
+  overflow: hidden;       /* each pane owns its own scrollbar */
+  display: flex;          /* gives `.trace` a definite height to be `flex: 1` of */
+  container-type: inline-size;  /* the query container for every @container rule below */
+}
+.trace-panel.is-message .panel-body { display: block; overflow: visible; }
+
+/* The height chain from the panel down to the two scroll panes is load-bearing, and every link of
+   it is here: `flex: 1` + `min-height: 0` so the grid fills the panel and may be smaller than its
+   content, and `grid-template-rows: minmax(0, 1fr)` so the single row cannot grow to fit instead.
+   Without that last one the row sized to its content — 46,343px of event log — and `overflow:
+   hidden` above silently clipped all but the first screenful, with no scrollbar to reach the rest.
+
+   The first column used to be a fixed `minmax(200px, 260px)` — no way to widen it to read a long
+   session title or tool call short of squinting or hovering. `--trace-sessions-width` is a CSS
+   variable `TracePanel.tsx` writes from its drag state (`traceResize.ts` owns the clamping math);
+   the middle column is the drag handle itself. */
+.trace {
+  display: grid;
+  grid-template-columns: var(--trace-sessions-width, 260px) 10px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  gap: 0 4px;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.trace-sessions-pane { display: flex; flex-direction: column; gap: 6px; min-height: 0; }
+.trace-sessions-head { display: flex; justify-content: flex-end; flex: none; }
+.trace-sort {
+  display: flex; align-items: center; gap: 5px;
+  font-size: 0.78em; opacity: 0.85;
+}
+.trace-sort select {
+  font: inherit; font-size: 0.85em; padding: 2px 4px;
+  border: 1px solid var(--border); border-radius: 4px;
+  background: var(--input-bg, rgba(127, 127, 127, 0.08)); color: inherit;
+}
+
+/* The drag handle between the two panes. A thin centred bar rather than a full-width fill, so it
+   reads as a seam to grab rather than a third pane. */
+.trace-resize-handle {
+  cursor: col-resize;
+  position: relative;
+  flex: none;
+}
+.trace-resize-handle::before {
+  content: ''; position: absolute; top: 0; bottom: 0; left: 50%;
+  width: 2px; transform: translateX(-50%);
+  background: var(--border);
+}
+.trace-resize-handle:hover::before, .trace-resize-handle:active::before { background: var(--accent); }
+
+.trace-sessions {
+  display: flex; flex-direction: column; gap: 4px;
+  flex: 1; min-height: 0; overflow-y: auto; padding-right: 4px;
+}
+.trace-session {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+  padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px;
+  background: transparent; color: inherit; text-align: left; cursor: pointer; font: inherit;
+  flex: none;             /* a long list must scroll, never squash its own rows */
+}
+.trace-session:hover { border-color: var(--accent); }
+.trace-session.is-selected { border-color: var(--accent); background: var(--panel-alt, rgba(142, 0, 255, 0.08)); }
+/* Default: still a hash (the backend had no first line of conversation to give it), so monospace
+   and one line is honest. `.is-title` is the common case — the owner's own words, which read like a
+   sentence and may need more than one line; wrapping beats an ellipsis that hides most of it. */
+.trace-session-id { font-family: var(--mono, monospace); font-size: 0.85em; }
+.trace-session-id.is-title {
+  font-family: inherit; font-size: 0.85em; font-weight: 600;
+  overflow-wrap: anywhere; white-space: normal;
+}
+.trace-session-when { font-size: 0.72em; opacity: 0.6; }
+.trace-session-meta { font-size: 0.78em; opacity: 0.75; }
+.trace-errors { color: var(--bad, #ff6b6b); }
+
+.trace-badge {
+  font-size: 0.7em; padding: 1px 5px; border-radius: 3px;
+  border: 1px solid var(--border); opacity: 0.85;
+}
+.trace-badge-ok { border-color: var(--ok, #00ff0f); color: var(--ok, #00ff0f); }
+
+/* The control bar stays put while the events scroll under it — it is the control for what you're
+   scrolling through, so scrolling it away is backwards. */
+.trace-detail { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.trace-controls {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between;
+  margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px solid var(--panel-border);
+  flex: none;
+}
+.trace-filters, .trace-controls-right { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.trace-filter {
+  font: inherit; font-size: 0.8em; padding: 2px 8px; cursor: pointer;
+  border: 1px solid var(--border); border-radius: 999px; background: transparent; color: inherit;
+}
+.trace-filter.is-active { border-color: var(--accent); color: var(--accent); }
+.trace-search {
+  font: inherit; font-size: 0.8em; padding: 3px 10px; min-width: 180px;
+  border: 1px solid var(--border); border-radius: 999px;
+  background: var(--input-bg, rgba(127, 127, 127, 0.08)); color: inherit;
+}
+.trace-search:focus { outline: none; border-color: var(--accent); }
+.trace-count { font-size: 0.8em; white-space: nowrap; }
+.trace-events { flex: 1; min-height: 0; overflow-y: auto; padding-right: 4px; }
+.trace-hint { margin: 0; }
+
+/* ── Turn groups ───────────────────────────────────────────────────────────────────────────────
+   A turn is the unit. Collapsed, the block IS the exchange — the owner's message, the reply, and what the
+   turn cost; the 66 intermediate steps are one click away rather than in the way. Grouping is what
+   makes a 68-row turn readable, which no amount of column-width ever could. */
+.trace-turn {
+  border: 1px solid var(--border); border-radius: 8px;
+  margin-bottom: 8px; overflow: hidden;
+}
+.trace-turn.is-open { border-color: var(--accent); }
+.trace-turn.has-error { border-left: 3px solid var(--bad, #ff6b6b); }
+
+.trace-turn-head {
+  display: flex; align-items: baseline; gap: 10px; width: 100%;
+  font: inherit; font-size: 0.8em; text-align: left; cursor: pointer;
+  padding: 5px 10px; border: 0; border-bottom: 1px solid transparent;
+  background: var(--panel-alt, rgba(142, 0, 255, 0.06)); color: inherit;
+}
+.trace-turn-head:hover { background: var(--panel-alt-hover, rgba(142, 0, 255, 0.12)); }
+.trace-turn-head:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.trace-turn.is-open .trace-turn-head { border-bottom-color: var(--border); }
+.trace-turn-caret { opacity: 0.7; width: 0.8em; flex: none; }
+.trace-turn-stats { font-family: var(--mono, monospace); opacity: 0.85; }
+/* Pushed right and dimmed: it is the least interesting number on the row, and it is the one that
+   tells you whether expanding is worth it. */
+.trace-turn-steps { margin-left: auto; opacity: 0.55; white-space: nowrap; }
+
+.trace-turn-said { padding: 6px 10px; font-size: 0.82em; overflow-wrap: anywhere; }
+.trace-turn-events { padding: 0 10px 4px; border-top: 1px solid var(--border); }
+.trace-turn-hidden { margin: 6px 0 2px; font-size: 0.78em; }
+
+.trace-event {
+  display: grid;
+  /* `minmax(0, 1fr)` and not `1fr`: an `auto` minimum lets a long unbroken token set the track's
+     floor and shove the row into overflow. This column holds arbitrary transcript text. */
+  grid-template-columns: 62px 16px 124px minmax(0, 1fr);
+  gap: 8px;
+  padding: 4px 0; border-bottom: 1px solid var(--border);
+  font-size: 0.8em; align-items: baseline;
+}
+.trace-event.is-error { background: var(--bad-bg, rgba(255, 107, 107, 0.07)); }
+.trace-event-ts { font-family: var(--mono, monospace); opacity: 0.6; }
+.trace-event-src { text-align: center; }
+/* Truncate rather than wrap: a two-line kind would break the baseline grid the whole list is read
+   by. The full string is on the row's `title`. */
+.trace-event-kind {
+  font-family: var(--mono, monospace); opacity: 0.8;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.trace-event-detail { min-width: 0; overflow-wrap: anywhere; }
+
+/* The tool's input renders INLINE, not only on hover: at 66 tool calls in one turn, a log you have
+   to hover row by row to read is a log you don't read. `traceView.toolPreview` no longer truncates
+   it (it used to cut at 90 characters, which quietly undid the point of rendering it inline at
+   all), so this wraps rather than ellipsizing:
+   an `overflow: hidden` here would just reintroduce the same hiding one layer up. */
+.trace-tools { display: flex; flex-wrap: wrap; gap: 4px 10px; }
+.trace-tool { display: inline-flex; align-items: baseline; gap: 5px; min-width: 0; }
+.trace-tool code { padding: 0 4px; border-radius: 3px; background: var(--code-bg, rgba(127,127,127,0.15)); }
+.trace-tool-input {
+  font-family: var(--mono, monospace); opacity: 0.6; min-width: 0;
+  overflow-wrap: anywhere; white-space: normal;
+}
+.trace-said { margin: 2px 0; }
+.trace-preview { opacity: 0.7; }
+/* A !private turn: the absence is rendered, never an empty row that reads as "nothing was said". */
+.trace-redacted { opacity: 0.6; font-style: italic; }
+
+/* Narrow CONTAINER (not viewport): stack the panes, and cap the sessions list so the events still
+   get room. Fires whether the pane is narrow because the window is small or because someone put
+   the panel somewhere tighter. Stacked, there is no horizontal split left to drag, so the resize
+   handle hides — `display: none` drops it out of the grid entirely rather than leaving a dead
+   10px column, which is why the row template below only names the two panes that remain. */
+@container (max-width: 680px) {
+  .trace { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .trace-resize-handle { display: none; }
+  .trace-sessions-pane { max-height: 220px; }
+}
+
+/* Narrower still: the four-column event row has no honest way to fit, so drop the fixed columns
+   onto their own line and give the content the full width. Zero-width columns are what this
+   whole block exists to prevent — degrading is fine, vanishing is not. */
+@container (max-width: 460px) {
+  .trace-event { grid-template-columns: 62px 16px minmax(0, 1fr); row-gap: 2px; }
+  .trace-event-kind { grid-column: 3; }
+  .trace-event-detail { grid-column: 1 / -1; }
+  /* The turn header's stats wrap onto a second line rather than compressing each other — the
+     `margin-left: auto` that pushes the step count right is exactly wrong once the row wraps. */
+  .trace-turn-head { flex-wrap: wrap; row-gap: 2px; }
+  .trace-turn-steps { margin-left: 0; }
+}
+
+/* ---------------------------------------------------------------- the open-spec ledger
+   Derived from each document's own status header (cockpit/server/doc_status.py). Three colours and
+   no more: OPEN work, DONE, and the one alarm state — a document with no readable status, which
+   means CI is red. A palette that gave each of the five tokens its own hue would read as five
+   priorities, and only one distinction here is actionable.
+
+   Sizes are in ch/em and the list wraps, so this panel does not need a width query. If that ever
+   changes, it is a `@container` query and never `@media` — the Trace panel shipped an
+   `@media (max-width: 720px)` that never fired on a 1280px desktop while its own box sat at 346px.
+   The window is not the box. */
+.doc-status {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+
+.doc-group-title {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0 0 0.3rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.doc-group-gloss {
+  font-weight: 400;
+  font-size: 0.78rem;
+  color: var(--text-dim);
+}
+
+.doc-token {
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  padding: 0.1rem 0.45rem;
+  border-radius: 0.35rem;
+  border: 1px solid transparent;
+}
+
+.doc-token-open {
+  color: var(--accent, #8e00ff);
+  border-color: color-mix(in srgb, var(--accent, #8e00ff) 45%, transparent);
+  background: color-mix(in srgb, var(--accent, #8e00ff) 12%, transparent);
+}
+
+.doc-token-done {
+  color: var(--text-dim);
+  border-color: color-mix(in srgb, var(--text-dim) 40%, transparent);
+}
+
+.doc-token-bad {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 55%, transparent);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+
+.doc-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.doc-row {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  padding: 0.12rem 0;
+  font-size: 0.82rem;
+}
+
+.doc-name {
+  font-family: var(--mono, ui-monospace, monospace);
+}
+
+/* The qualifier is the answer to "which parts", and on a PARTIAL row it is the whole point of the
+   line. Muted but never hidden, and never truncated with an ellipsis: a truncated "phases 0, 1 and
+   §14" is worse than none, for the same reason a cited section with no text is. */
+.doc-qualifier {
+  color: var(--text-dim);
+  font-size: 0.78rem;
+}
+
+.doc-finding {
+  color: var(--danger);
+  font-size: 0.78rem;
 }

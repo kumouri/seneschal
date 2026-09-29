@@ -77,7 +77,7 @@ path for the daemon.
 
 | Component | What it is |
 |---|---|
-| **Orchestrator** ([`seneschal/SKILL.md`](seneschal/SKILL.md)) | The conductor: modes, execution rules, the Advisor Chain, the approval gate, memory. |
+| **Orchestrator** ([`seneschal/SKILL.md`](seneschal/SKILL.md) + [`seneschal/modes/`](seneschal/modes/)) | The conductor: a thin mode router (execution rules, the Advisor Chain, the approval gate, memory) that dispatches to one self-contained file per mode — Chat, Brief, Wrap, Triage, Ask, Reminders, Watch, Dream, Forge — read only when that mode runs. |
 | **Subagent skills** ([`subagents/`](subagents/)) | Morning briefing, end-of-day wrap, email/Slack triage, calendar steward, store Q&A, reminders, a generic daily-journal steward, a person-centric message archiver, and the Forge (mints persistent "Archon" staff agents). |
 | **Presence daemon** ([`seneschal/scripts/presence.py`](seneschal/scripts/presence.py)) | The always-on reactive core — warm chat, reminders, comms-peek. Stdlib-first asyncio. |
 | **Cockpit** ([`cockpit/`](cockpit/)) | A local-first web observatory over the daemon: live chat over the daemon pipe, model dials, budget thresholds, health panels, archon tiles, plus the real OIDC auth stack (self-hosted Zitadel IdP, break-glass recovery ladder, and a public honeypot decoy chat). FastAPI backend + Vite/React frontend, `127.0.0.1`-only; dev-no-auth remains the default until an IdP is configured. |
@@ -86,12 +86,18 @@ path for the daemon.
 | **Local RAG + salience** ([`seneschal/scripts/rag_*.py`](seneschal/scripts/)) | A free, local semantic index (Ollama + stdlib sqlite) over your journal/notes, and an observe-only "what's safe to forget" experiment. |
 
 Setup guides for each integration (email, Telegram, Discord, Google, Home Assistant, health,
-scheduling) live in [`seneschal/scripts/*_SETUP.md`](seneschal/scripts/).
+scheduling) live in [`seneschal/scripts/*_SETUP.md`](seneschal/scripts/). The design record — every
+spec, with its status — is indexed by [`seneschal/docs/CLAUDE.md`](seneschal/docs/CLAUDE.md).
 
 ## Architecture, briefly
 
-The orchestrator **delegates, doesn't duplicate** — it loads a subagent's `SKILL.md` and runs it
-rather than reinventing the logic. Every substantive turn writes a **Run Log** and updates
+The orchestrator **delegates, doesn't duplicate** — it picks a mode, reads that mode's file, and
+loads the owning subagent's `SKILL.md` rather than reinventing the logic. Anything outbound or
+destructive stops at the **approval gate** — drafted, held, and sent only once you approve; an
+outbound send to anyone but you is also refused in code without an approval row behind it. The
+calendar has **two doors, tried in order** — a Calendar MCP if one is connected, otherwise a stdlib
+Google Calendar REST bridge — and "no calendar" is reported only when both fail; a read returning
+zero events is an empty day, not a missing integration. Every substantive turn writes a **Run Log** and updates
 **carry-over**, so the next run (or a restart) picks up where the last left off. A nightly
 **Dream** run consolidates the day, pre-stages the morning brief, and proposes gated "learnings"
 you approve before they change any behavior. Memory logs are local-first and gitignored; the
@@ -103,14 +109,17 @@ configured store is the durable system of record.
   PRs merge with **merge commits**; never merge red CI.
 - **Stdlib-first Python**, two sanctioned deps (`websockets`, `tzdata`) — everything degrades
   gracefully without the venv.
-- **CI** byte-compiles every `.py`, runs the unittest suite, checks the uv lockfile, validates
-  config, enforces that no real identifiers ship (all UUIDs must be `00000000-…`
-  placeholders), and gates the cockpit (backend + decoy + break-glass unit tests incl. the
-  duplicated-table parity tripwire; frontend typecheck + build). Reproduce locally:
+- **CI** byte-compiles every `.py`, measures and runs the unittest suite, checks the uv
+  lockfile, validates every tracked JSON file, enforces that no real identifiers ship (all
+  UUIDs must be `00000000-…` placeholders), runs the docs-and-grounding gates (no dangling
+  pointers, a readable status on every design doc, no truncating state writes, no zone-less
+  clock reads in tests, a ledger row for every new decision; byte budget and a few others
+  report-only), and gates the cockpit (backend + decoy + break-glass unit tests incl. the
+  duplicated-table parity tripwire; frontend typecheck + build). Reproduce locally — every
+  step CI runs, in order:
 
   ```bash
-  git ls-files '*.py' | xargs python -m py_compile
-  python -m unittest discover -s seneschal/scripts -p "test_*.py"
+  python seneschal/scripts/ci_local.py        # --list shows the steps; --only <step> runs one
   ```
 
 - **Testing `/setup` as a first-time user.** A walk on your own machine inherits *your*

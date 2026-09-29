@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Tests for router.py's fable arm (`classify_fable`, cockpit-spec.md v3 "Model dials & Fable
 delegation"). The pre-existing trivial/escalate arm (`classify`) is exercised indirectly via
-test_presence_state.py's RouterShadow tests; this file covers the fable arm specifically, stubbing
-`_ollama_chat` so no live Ollama is required.
+test_presence_state.py's RouterShadow tests; this file covers the fable arm specifically, the shared
+keep-alive / model-override transport seams, and the CLI, stubbing `_ollama_chat` (or `urlopen`) so no
+live Ollama is required. The steer arm lives in test_router_steer.py; the fallback-rate check in
+test_router_fallback_rate.py.
 
 Stdlib ``unittest`` only. Run:  python -m unittest seneschal.scripts.test_router
 """
@@ -11,6 +13,7 @@ import os
 import sys
 import unittest
 import urllib.error
+from unittest import mock
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
@@ -74,7 +77,7 @@ class ClassifyFable(unittest.TestCase):
     def test_uses_the_fable_system_prompt(self):
         seen = {}
 
-        def spy(message, cfg, timeout, system_prompt=router.SYSTEM_PROMPT):
+        def spy(message, cfg, timeout, system_prompt=router.SYSTEM_PROMPT, **_kw):
             seen["system_prompt"] = system_prompt
             return {"verdict": "standard", "confidence": 0.9, "reason": "ok"}
 
@@ -93,6 +96,72 @@ class ClassifyFable(unittest.TestCase):
         # by checking the documented exception set actually covers what _ollama_chat can raise.
         with self.assertRaises(RuntimeError):
             router.classify_fable("task")
+
+
+class KeepAliveAndModelOverride(unittest.TestCase):
+    """`ROUTER_KEEP_ALIVE` reaches every arm's call; `_ollama_chat`'s `model`/`keep_alive` seams
+    land in the actual `/api/chat` payload (and stay absent when unset)."""
+
+    CFG = {"OLLAMA_URL": "http://127.0.0.1:1", "ROUTER_MODEL": "m-default",
+           "ROUTER_CONF_THRESHOLD": "0.7", "ROUTER_KEEP_ALIVE": "45m"}
+
+    def setUp(self):
+        self._orig = router._ollama_chat
+        self.addCleanup(lambda: setattr(router, "_ollama_chat", self._orig))
+
+    def _spy(self, seen):
+        def spy(message, cfg, timeout, system_prompt=None, model=None, keep_alive=None):
+            seen.update(model=model, keep_alive=keep_alive)
+            return {"verdict": "escalate", "category": "other", "confidence": 0.9, "reason": "r"}
+        return spy
+
+    def test_triage_arm_passes_the_keep_alive(self):
+        seen = {}
+        router._ollama_chat = self._spy(seen)
+        router.classify("hello", cfg=dict(self.CFG))
+        self.assertEqual(seen["keep_alive"], "45m")
+
+    def test_fable_arm_passes_the_keep_alive(self):
+        seen = {}
+        router._ollama_chat = self._spy(seen)
+        router.classify_fable("hello", cfg=dict(self.CFG))
+        self.assertEqual(seen["keep_alive"], "45m")
+
+    def test_the_default_keep_alive_is_thirty_minutes(self):
+        self.assertEqual(router.DEFAULTS["ROUTER_KEEP_ALIVE"], "30m")
+        self.assertEqual(router.DEFAULTS["ROUTER_STEER_MODEL"], "")
+        self.assertEqual(router.DEFAULTS["ROUTER_STEER_TIMEOUT"], "20")
+
+    def _payload_for(self, **kwargs):
+        captured = {}
+
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return json.dumps({"message": {"content": '{"verdict": "escalate"}'}}).encode()
+
+        def fake_urlopen(req, timeout=None):
+            captured["payload"] = json.loads(req.data.decode("utf-8"))
+            return _Resp()
+
+        with mock.patch.object(router.urllib.request, "urlopen", fake_urlopen):
+            self._orig("msg", dict(self.CFG), 5, **kwargs)
+        return captured["payload"]
+
+    def test_payload_carries_model_override_and_keep_alive(self):
+        payload = self._payload_for(model="m-steer", keep_alive="10m")
+        self.assertEqual(payload["model"], "m-steer")
+        self.assertEqual(payload["keep_alive"], "10m")
+
+    def test_payload_omits_keep_alive_when_unset_and_uses_router_model(self):
+        payload = self._payload_for()
+        self.assertEqual(payload["model"], "m-default")
+        self.assertNotIn("keep_alive", payload)
 
 
 class CliSmokeTest(unittest.TestCase):
@@ -126,6 +195,20 @@ class CliSmokeTest(unittest.TestCase):
 
     def test_bare_fable_flag_with_no_message_is_usage_error(self):
         rc = router._main(["router.py", "--fable"])
+        self.assertEqual(rc, 2)
+
+    def test_steer_flag_uses_classify_steer(self):
+        calls = []
+        orig = router.classify_steer
+        self.addCleanup(lambda: setattr(router, "classify_steer", orig))
+        router.classify_steer = lambda msg, ctx: calls.append((msg, ctx)) or {"verdict": "hold"}
+        with mock.patch("sys.stdout"):
+            rc = router._main(["router.py", "--steer", "The owner asked: plan it", "also", "this"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls, [("also this", "The owner asked: plan it")])
+
+    def test_steer_flag_without_a_message_is_usage_error(self):
+        rc = router._main(["router.py", "--steer", "context only"])
         self.assertEqual(rc, 2)
 
 

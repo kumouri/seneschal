@@ -30,6 +30,9 @@ import sys
 import urllib.error
 import urllib.request
 
+import send_gate
+import send_recipients
+
 ENV_KEYS = ("DISCORD_BOT_TOKEN", "DISCORD_CHANNEL_ID", "DISCORD_API_BASE")
 
 # Discord asks bots to send a descriptive User-Agent; urllib's default can draw a 403.
@@ -79,7 +82,11 @@ def api_request(c: dict, method: str, path: str, body: dict | None = None, timeo
             raw = resp.read().decode("utf-8")
             return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as e:  # Discord returns JSON error bodies on 4xx
-        detail = e.read().decode("utf-8", "replace")
+        # `with e:` — an HTTPError IS the response (it inherits `urllib.response.addinfourl`, itself a
+        # `tempfile._TemporaryFileWrapper`), so reading the body without closing holds the connection
+        # until the cycle collector reaches it.
+        with e:
+            detail = e.read().decode("utf-8", "replace")
         try:
             payload = json.loads(detail)
             msg = payload.get("message", detail)
@@ -100,6 +107,7 @@ def main() -> int:
 
     creds = load_env(args.env_file)
     c = cfg(creds)
+    default_channel_id = c["channel_id"]
     if args.channel_id:
         c["channel_id"] = args.channel_id
 
@@ -126,6 +134,19 @@ def main() -> int:
     if args.dry_run:
         print(json.dumps({"ok": True, "dry_run": True, "channel_id": c["channel_id"], "chars": len(text)}))
         return 0
+
+    try:
+        cls = send_recipients.classify_single_recipient(c["channel_id"], default_channel_id)
+    except Exception:  # noqa: BLE001 — a classification failure logs unknown, never raises into the send
+        cls = "unknown"
+    # The send gate: the configured channel is the assistant's own private one (owner, passes); a
+    # different explicit --channel-id needs an approved row for that channel id (send_gate.py).
+    verdict = send_gate.require_approval("discord", c["channel_id"] if cls != "owner" else None,
+                                         recipient_class=cls, channel="discord_send")
+    send_recipients.record("discord_send", cls, gate=verdict)
+    if not verdict["allowed"]:
+        print(json.dumps(send_gate.refusal_payload(verdict, channel_id=c["channel_id"])))
+        return send_gate.EXIT_REFUSED
 
     try:
         res = api_request(c, "POST", f"/channels/{c['channel_id']}/messages", {"content": text})

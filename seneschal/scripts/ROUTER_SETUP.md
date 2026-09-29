@@ -9,7 +9,9 @@ section).
 
 As of **v3** (`../docs/cockpit-spec.md` "Model dials & Fable delegation"), the SAME `router.py` also
 carries a second, independent classifier — the **fable arm** — that decides, among escalations,
-*standard* vs *Fable-level*. See "The fable arm (v3)" below.
+*standard* vs *Fable-level*. See "The fable arm (v3)" below. A third, the **steer arm**, judges
+whether a message that lands mid-turn is about the work in flight — see "The steer arm" below — and
+`router.py check-fallback-rate` catches a router silently stuck in its fallback.
 
 It's **free-but-local** (local Ollama + Python **standard library** — no `pip`, mirrors `rag_common.py`)
 and **conservative by construction**: `router.classify()` never raises, and any failure or low-confidence
@@ -39,7 +41,11 @@ gather accuracy evidence, to be reviewed before phase 2 turns on local handling.
    ```
    cp seneschal/scripts/router.env.example seneschal/scripts/router.env
    ```
-   `router.env` is gitignored.
+   `router.env` is gitignored. **If your Ollama is not on the default port, set `OLLAMA_URL`** — a
+   misconfigured router fails *silently*: every arm is fail-safe, so every message falls back to
+   `escalate`, which is exactly what phase 1 does anyway. The tell is in the verdict, not in any error:
+   fallback rows carry `confidence: 0.0` and a `reason` of `classifier unavailable (URLError)`. The
+   fallback-rate check below turns that into an explicit alert.
 3. **Nothing else.** The daemon defaults to `--router-mode shadow`, so once `presence.py` restarts on the
    merged code it starts logging verdicts automatically. To try it standalone:
    ```
@@ -111,12 +117,61 @@ session's own judgment, or a force-route (`!fable` prefix / the cockpit's "Send 
 `GROUNDING`'s delegation section in `presence.py`). `fable_delegate.py` re-enforces the ceiling itself
 (refuses with exit 2 if it doesn't admit Fable) — belt and braces with the arm-gating above.
 
+## The steer arm (mid-turn relevance gate)
+
+A third classifier in the same `router.py` — `classify_steer(new_message, in_flight)` — decides whether
+a message that arrived **while a turn was already running** is about the work in flight (`steer`: a
+correction, an addition, a clarification, a go-ahead) or something new that should wait its own turn
+(`hold`). It is the only arm that classifies a **relation**, so it takes two arguments; an empty
+`in_flight` is refused straight to the fallback instead of being judged as if the message stood alone.
+The safe fallback is **`hold`** (the status quo): a false steer would cut off the answer the owner is
+waiting for, a false hold only costs a short wait. It reuses `ROUTER_CONF_THRESHOLD` for a `steer`
+verdict. Its first phase is **observe-only** — the daemon's mid-turn gate logs what it would have done
+and nothing acts on it; that daemon wiring lands separately, so until it does this arm is callable but
+idle. The gate around it (the carve-out, the log, the read-out) is `interleave.py`; the design is
+`../docs/mid-turn-interleave-spec.md`. Smoke test:
+
+```
+python seneschal/scripts/router.py --steer "The owner asked: review the job queue" "also add an applied button"
+```
+
+**Its own knobs** (all optional, all in `router.env.example`; each default matches the other arms):
+
+| knob | default | what it does |
+|------|---------|--------------|
+| `ROUTER_STEER_MODEL` | *(empty)* | a smaller/faster model for this arm only; empty = `ROUTER_MODEL` |
+| `ROUTER_STEER_TIMEOUT` | `20` | per-call timeout (seconds) for this arm; an explicit caller `timeout=` wins |
+| `ROUTER_KEEP_ALIVE` | `30m` | Ollama's `keep_alive` on **every** arm's call (Ollama's own default is `5m`) |
+
+**Why they exist:** the steer arm fires only on a mid-turn arrival — sparse enough that each call lands
+past Ollama's 5-minute idle unload, so it is a cold model load unless other traffic kept the model warm.
+Under host contention a cold load overruns the timeout, and the verdict is a `hold` fallback that never
+ran a real judgement. A longer keep-alive (trading idle VRAM for fewer cold loads), a smaller model, or a
+tuned timeout each raise how often the classifier actually renders a verdict. Compare a candidate
+`ROUTER_STEER_MODEL` against the default on your own messages before switching.
+
+## The fallback-rate check (is the router silently blind?)
+
+Every arm's fallback hard-codes `confidence: 0.0`, and a real verdict — even a sub-threshold one —
+keeps the model's own nonzero score. So an exact `0.0` marks a fallback (`router.is_fallback_verdict`),
+and `check-fallback-rate` flags a log whose trailing window is mostly fallback:
+
+```
+python seneschal/scripts/router.py check-fallback-rate --log seneschal/state/router-log.jsonl --filter-field arm --filter-value triage
+```
+
+It prints `{"alert", "rate", "rows", "fallbacks", "threshold", "reason"}` as JSON and **exits 1 on an
+alert** (0 otherwise), so it can gate a scheduled check. Defaults: the trailing `--window 20` rows, alert
+at `--threshold 0.5`, and it abstains (`alert: false`, `rate: null`) below `--min-rows 10`. It only reads
+the log — it writes no state. `--filter-field`/`--filter-value` narrow a mixed log to one arm
+(`arm: triage`/`arm: fable`) or, for a mid-turn gate log, to its `layer: model` rows.
+
 ## The phase-2 plan (how the TRIAGE arm graduates)
 
 Once the shadow log shows the classifier is reliably right on the whitelist — in particular, near-zero
 false-trivials — phase 2 adds `--router-mode live`: the daemon handles clearly-trivial turns locally (an
-`ack` writes the reminder ack + dequeues the nudge; `status`/`recall` answer from the cached
-`context-digest.md`), and escalates everything else to the warm Opus session unchanged. That's the payoff:
+`ack` writes the reminder ack + dequeues the nudge; `status`/`recall` answer from local state —
+the run-log, carry-over, and the open-work register), and escalates everything else to the warm Opus session unchanged. That's the payoff:
 instant, offline, zero-Notion trivial turns, and fewer Notion reads overall (a rate-limit win). Flipping
 shadow → live is **the owner's decision** on the evidence; a future **Dream** rollup can summarize router
 accuracy from `router-log.jsonl` to tee up the call. Live handling is **not** implemented in this phase.

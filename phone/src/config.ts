@@ -47,6 +47,16 @@ export interface Env {
   BLOCKLIST_SYNC_SECRET?: string;
   /** Bearer secret the assistant's local push_call.py must present to POST /push-call. */
   PUSH_CALL_SECRET?: string;
+
+  // --- Telegram (secrets) — owner notifications go here when both are set; SMS otherwise ---
+  /** The assistant's bot token (the same bot the daemon uses). */
+  TELEGRAM_BOT_TOKEN?: string;
+  /** The owner's chat id with the bot. */
+  TELEGRAM_CHAT_ID?: string;
+  /** Optional private-chat topic (`message_thread_id`) to file notifications under. */
+  TELEGRAM_THREAD_ID?: string;
+  /** Optional Bot API base override (proxy / test harness only). */
+  TELEGRAM_API_BASE?: string;
 }
 
 /** Trimmed value, or undefined when unset/blank — wrangler.toml [vars] default to "". */

@@ -25,6 +25,9 @@ import sys
 import urllib.error
 import urllib.request
 
+import send_gate
+import send_recipients
+
 ENV_KEYS = ("PUSH_SMS_URL", "PUSH_SMS_SECRET", "PUSH_SMS_TO")
 
 
@@ -79,6 +82,18 @@ def main() -> int:
     if not url or not secret:
         print(json.dumps({"ok": False, "error": "missing PUSH_SMS_URL / PUSH_SMS_SECRET (set in env or --env-file)"}))
         return 1
+
+    try:
+        cls = send_recipients.classify_single_recipient(to)
+    except Exception:  # noqa: BLE001 — a classification failure logs unknown, never raises into the send
+        cls = "unknown"
+    # The send gate: no --to override is the owner's own phone (owner, passes); an explicit
+    # override needs an approved row for that number (send_gate.py). Fail-closed.
+    verdict = send_gate.require_approval("sms", to, recipient_class=cls, channel="push_sms")
+    send_recipients.record("push_sms", cls, gate=verdict)
+    if not verdict["allowed"]:
+        print(json.dumps(send_gate.refusal_payload(verdict, to=to)))
+        return send_gate.EXIT_REFUSED
 
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(

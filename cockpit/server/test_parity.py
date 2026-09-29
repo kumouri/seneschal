@@ -57,17 +57,27 @@ class ModelConfigParity(unittest.TestCase):
     def test_alias_tables_equal(self):
         self.assertEqual(cockpit_model_config.ALIASES, daemon_model_config.ALIASES)
 
+    def test_backend_lists_equal(self):
+        self.assertEqual(cockpit_model_config.BACKENDS, daemon_model_config.BACKENDS)
+
     def test_canonical_agrees_on_every_alias_and_id(self):
-        probes = set(cockpit_model_config.RANK) | set(daemon_model_config.RANK)
-        probes |= set(cockpit_model_config.ALIASES) | set(daemon_model_config.ALIASES)
+        # RANK / ALIASES are keyed per backend, so the probes are every id and alias of EVERY
+        # backend, each tried against every backend (ids never cross backends — both sides must
+        # agree on that too).
+        probes = set()
+        for mod in (cockpit_model_config, daemon_model_config):
+            for backend in mod.BACKENDS:
+                probes |= set(mod.RANK.get(backend, ()))
+                probes |= set(mod.ALIASES.get(backend, {}))
         probes |= {p.upper() for p in probes} | {f"  {p}  " for p in probes}
         probes |= {"", "   ", "not-a-model", None, 42}
-        for probe in probes:
-            with self.subTest(probe=probe):
-                self.assertEqual(
-                    cockpit_model_config.canonical(probe),
-                    daemon_model_config.canonical(probe),
-                )
+        for backend in daemon_model_config.BACKENDS:
+            for probe in probes:
+                with self.subTest(backend=backend, probe=probe):
+                    self.assertEqual(
+                        cockpit_model_config.canonical(probe, backend),
+                        daemon_model_config.canonical(probe, backend),
+                    )
 
     def test_config_filename_equal(self):
         self.assertEqual(cockpit_model_config.CONFIG_FILE, daemon_model_config.CONFIG_FILE)

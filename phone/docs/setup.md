@@ -22,10 +22,20 @@ wrangler secret put USER_CELL_E164
 wrangler secret put PUBLIC_BASE_URL
 ```
 
+Optional — **owner notifications over Telegram** instead of SMS (recommended: US long-code SMS also
+needs Twilio A2P 10DLC registration). Use the same bot + chat as the assistant's daemon
+(`seneschal/scripts/TELEGRAM_SETUP.md`); both of the first two must be set or the Worker stays on SMS:
+
+```bash
+wrangler secret put TELEGRAM_BOT_TOKEN
+wrangler secret put TELEGRAM_CHAT_ID
+wrangler secret put TELEGRAM_THREAD_ID   # optional: a private-chat topic id; omit for the main chat
+```
+
 ## 2. Provision D1
 
 ```bash
-wrangler d1 create call_screener        # paste the returned database_id into wrangler.toml
+wrangler d1 create call_screener        # paste the returned database_id over the 00000000-… placeholder in wrangler.toml
 npm run db:apply:local                  # or db:apply:remote for production
 ```
 

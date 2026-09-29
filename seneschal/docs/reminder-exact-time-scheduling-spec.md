@@ -1,7 +1,11 @@
 # Exact-time reminders — retire the 4-slot model — design
 
-**Status:** approved direction — the owner signed off on the shape (2026-07-14); since **implemented**
-(`presence.maybe_seed_day` + `reminders_seed.py`; reminders-policy.md is the living model) · **Owner:** the assistant · **Scope:**
+**Status:** `BUILT` — approved direction — the owner signed off on the shape (2026-07-14); since **implemented**
+(`presence.maybe_seed_day` + `reminders_seed.py`, fired on date-rollover; the four fixed reminder slots are
+retired; reminders-policy.md → *"Exact per-reminder times + the daily seed"* is the living model).
+**Amended since:** the re-fire ladder's eligibility predicate is now `Nag Until Done` **alone** (§4
+amendment) — the cadence, the ack gate and the quiet-window pierce are unchanged. The
+sleep-until-next-due timer wheel stays deliberately out of scope (see *Non-goals*). · **Owner:** the assistant · **Scope:**
 `seneschal/references/reminders-policy.md`, `seneschal/references/databases.md` (⏰ schema), the Reminders
 subagent (`subagents/reminders/SKILL.md`), `seneschal/scripts/presence.py` (`SLOTS` + a new seed trigger),
 and one new brain step folded into Wrap/Dream. Companion: [asyncio-daemon-design.md](asyncio-daemon-design.md),
@@ -74,7 +78,7 @@ so nothing is lost:
 |---|---|---|
 | **Daily reset** (re-`Pending` Daily/Weekdays habits, `Consecutive Misses += 1` for yesterday's unacked, clear `Reminded Today`, apply pending acks first) | **Morning slot only**, once per owner-local day | The single most load-bearing slot duty. |
 | **Enqueue a window's habits** (a `Pending` row whose `Time Window` matches this slot) | each slot | This is the "firing" the schema change is really about. |
-| **Re-fire unacked important** (`Importance ≥ ⭐ High` **or** `Nag Until Done`) until `Done` | **every** slot | The frequency-not-sharpness persistence. |
+| **Re-fire unacked important** (`Importance ≥ ⭐ High` **or** `Nag Until Done`) until `Done` | **every** slot | The frequency-not-sharpness persistence. **Predicate superseded — see the amendment under §4.** |
 | **Re-surface Snoozed** ("later" → re-fire next slot today) | next slot | |
 | **Journal-presence gate** (fetch journal page → auto-satisfy or nudge) | Evening (nudge-or-satisfy) + Bedtime (satisfy-only) | Needs a *late-day* Notion read — can't be predicted at dawn. |
 | **Linked-task truth refresh** (a Deadline-Watch whose linked Task went `Done` midday should stop) | implicit each slot re-read | Partly covered by the ack gate today. |
@@ -130,8 +134,9 @@ day:
    - `Times` present ⇒ one instant per listed `HH:MM`.
    - `Times` empty ⇒ the `Time Window` default time.
    - `Deadline Watch` / `One-off` ⇒ default hour on the `Due / Target` day while in-window.
-   - **Re-fire items** (`Importance ≥ ⭐ High` **or** `Nag Until Done`) ⇒ the primary instant **plus** a
-     **re-fire schedule** through the rest of the day (a small set of later instants — Q4).
+   - **Re-fire items** (`Importance ≥ ⭐ High` **or** `Nag Until Done`; **`Nag Until Done` alone since the
+     amendment under §4**) ⇒ the primary instant **plus** a **re-fire schedule** through the rest of the
+     day (a small set of later instants — Q4).
 3. **Enqueue each instant** as a `reminders.json` entry with the exact `due_at` (UTC), the row's
    `reminder_id`, and (for Critical-and-above) `--pierce-quiet`, using stable idempotent ids
    `rmd-<local-date>-<rowslug>-<HH><MM>`. Future-only and idempotent — **exactly the `reminders_roll.py`
@@ -186,6 +191,17 @@ primary time **plus a re-fire every 90 minutes** from that time through the end 
 Note the deliberate contrast with **rolls**, which set `ack_gate: false` (one "checked messages" must
 *not* cancel the day's other pings). Re-fires are the opposite — one ack *should* cancel the rest — so they keep
 `ack_gate: true`. The two cases are already distinguished by exactly this flag.
+
+**Amendment — the ladder's predicate is `Nag Until Done` ALONE.** Everything above about *cadence* (90
+minutes, ack-gated, whole-day, re-seeded tomorrow) stands unchanged; only **which rows get it** moved.
+`Importance ≥ ⭐ High` no longer implies a ladder, so `Importance` answers *how loud / does it pierce* and
+`Nag Until Done` answers *does it chase* — the two fields the schema always called independent and the
+OR never let be. An install upgrading from the older rule makes the change behaviour-preserving by
+ticking the box on every active High-and-above row first, and the one new hazard — a future High row
+created without it — is made visible rather than silent (`reminders_seed.ladder_gap`: one `!` line +
+`no_ladder` in `seed-log.jsonl`). **The quiet-window pierce is a different mechanism and did not move**:
+still `Call Me` + Critical-and-above via `pierce_quiet` / `sentinel.entry_pierces_quiet`. Authority:
+`../references/reminders-policy.md` → "Why the two are decoupled (and the upgrade migration)".
 
 ### 5. Snooze — an ad-hoc enqueue at now + interval
 
@@ -301,8 +317,9 @@ same invariant the roll refill already satisfies.
   (deterministic off a fixed offset, like `roll_entries`).
 - **Reset-in-seed:** `Daily`/`Weekdays` re-`Pending`; miss increment for yesterday's unacked; acked-row
   not-a-miss; interval/Weekly/One-off untouched by the reset.
-- **Re-fire seeding + ack-gate suppression:** an important row seeds N entries; after `record_ack`, all
-  remaining are gated (`entry_acked` true); a `Nag Until Done` low-importance row seeds re-fires too.
+- **Re-fire seeding + ack-gate suppression:** a `Nag Until Done` row seeds N entries; after `record_ack`,
+  all remaining are gated (`entry_acked` true); a low-importance `Nag Until Done` row seeds re-fires too,
+  and (since the §4 amendment) an important row *without* the box seeds only its primaries.
 - **Idempotency / dual-run:** re-running the seed adds nothing; seed + slot for the same row don't
   double-queue; `maybe_seed_day` no-ops when the marker == today.
 - **Catch-up:** a seeded entry with a past `due_at` fires on the next tick; the stagger still drips a
@@ -323,7 +340,7 @@ All seven open questions are ruled; this is the design's decision record. Implem
 | Q1 | Keep `Time Window` or replace it? | **Keep** as optional sugar — an empty `Times` falls back to the window's default time (zero-regression migration). |
 | Q2 | Default times per window | **08:00 / 12:30 / 18:30 / 21:30** (today's slot times) — the fallback + migration anchors. |
 | Q3 | `Anytime` + empty-`Times` deadline hour | **09:00** for both. |
-| Q4 | Re-fire cadence for unacked important | **Every 90 minutes** from the primary time through end of local day, ack cancels the remainder (an 08:00 Critical re-nudges 09:30, 11:00, 12:30, … until acked). |
+| Q4 | Re-fire cadence for unacked important | **Every 90 minutes** from the primary time through end of local day, ack cancels the remainder (an 08:00 Critical re-nudges 09:30, 11:00, 12:30, … until acked). **Cadence unchanged; the *eligibility* predicate was later narrowed to `Nag Until Done` alone — §4 amendment.** |
 | Q5 | Snooze default interval | **+30 minutes.** |
 | Q6 | Seed trigger time | **Date-rollover** — the first daemon tick of each new owner-local date (not a fixed HH:MM), so the reset can never hit the catch-up skip cliff. |
 | Q7 | Per-time override richness | **Start simple** — a comma-list of `HH:MM` in one `Times` text field; add structured per-time options only if a real reminder needs it. |
@@ -332,3 +349,14 @@ All seven open questions are ruled; this is the design's decision record. Implem
 
 *The owner signed off on this shape 2026-07-14 (decisions above); it has since shipped through the
 phased, merge-on-green rollout.*
+
+## Router entry
+
+**Status:** BUILT.
+
+**What it decides:** Reminders fire at **arbitrary per-reminder times**; the four fixed
+Morning/Midday/Evening/Bedtime reminder slots are retired in favour of one once-per-owner-local-day seed.
+**The `SLOTS` list still in `presence.py` is NOT that model and must not be "cleaned up"** — those are
+the daemon's own heavyweight scheduled runs (the daily journal, the morning brief). What was retired is
+compute granularity for REMINDERS. Amended: the re-fire ladder's eligibility predicate is `Nag Until
+Done` **alone**. The sleep-until-next-due timer wheel is a stated non-goal.
