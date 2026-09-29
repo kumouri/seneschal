@@ -1,6 +1,6 @@
 # Before the tunnel — a pre-exposure threat model
 
-**Status:** MEMO
+**Status:** `MEMO`
 
 A threat model and GO/NO-GO checklist for the moment an install puts any seneschal surface on the
 public internet. **It ships nothing and changes no behaviour.** It is a list of conditions an installer

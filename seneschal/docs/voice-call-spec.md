@@ -71,7 +71,7 @@ reply-until-`end_call`, with a turn cap (`MAX_OWNER_TURNS`, 40 — much higher t
 since a real conversation runs long) as a backstop so a stuck model can't run up ConversationRelay
 minutes on the owner's own line.
 
-**Model.** Both conversations share `relay/session.ts`'s `MODEL` constant (a Haiku model) — fast and
+**Model.** Both conversations share `phone/src/relay/session.ts`'s `MODEL` constant (a Haiku model) — fast and
 cheap for real-time turns. **Trade-off noted, not exercised**: a larger model would likely read warmer
 in a real conversation with the owner, at a higher per-minute cost; the swap (or a `mode`-dependent
 choice) is left for measurement against real calls.
