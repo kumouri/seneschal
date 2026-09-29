@@ -107,18 +107,18 @@ specs and carry no status.
 
 ## Cost, context, and the root prompt
 
-- `spend-levers-spec.md` — **PARTIAL(phases 0-1 BUILT)** — twelve levers on turn cost, seven
-  measured.
-- `usage-telemetry-spec.md` — **PARTIAL(phase 1 BUILT)** — reads the real plan meters; never speaks
-  except on failure.
+- `spend-levers-spec.md` — **PARTIAL(phases 0-1 BUILT, tee wiring pending)** — twelve levers on
+  turn cost; diagnosis only.
+- `usage-telemetry-spec.md` — **PARTIAL(phase 1 BUILT, loop wiring pending)** — reads the real
+  plan meters; never speaks except on failure.
 - `grounding-restructure-spec.md` — **PARTIAL(mode router + modes/ + sub-routers BUILT)** — the root split into a
   router + sub-routers.
 - `read-first-retirement-spec.md` — **PARTIAL(the store + CLI BUILT — `standing_safety.py` /
   `state/standing-safety.json`; the digest itself RETIRED; the §4 classification/compression process
   and §6's completeness check remain unbuilt design)** — the READ FIRST digest section only ever
   grew; its jobs now have their own homes and the digest is gone.
-- `session-trace-spec.md` — **PARTIAL(phases 0-1 BUILT)** — joins the scattered logs into one
-  session.
+- `session-trace-spec.md` — **PARTIAL(readers + panel BUILT, join keys pending)** — joins the
+  scattered logs into one session.
 - `context-budget-spec.md` — **PARTIAL(phases 0-1 + §14 BUILT)** — the byte ratchet + the blocking
   pointer check.
 - `carry-over-region-spec.md` — **PARTIAL(`carryover_region.py` + `check_carryover_prose.py`
@@ -155,8 +155,8 @@ specs and carry no status.
 
 ## The cockpit
 
-- `cockpit-spec.md` — **BUILT(v0-v5; Tunnel deferred)** — the Seneschal Cockpit: pipe, model dials
-  + Fable delegation, Oikonomos, health panels, the auth stack.
+- `cockpit-spec.md` — **PARTIAL(v1-v5 + Jobs/Trace/Open-specs BUILT; supervision wiring pending)**
+  — pipe, model dials + Fable delegation, Oikonomos, health panels, auth.
 - `pre-exposure-threat-model.md` — **MEMO** — the pre-tunnel conditions; most of the top ones need
   no tunnel at all.
 

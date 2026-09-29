@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { getEmotes } from '../api'
 import type { ChatTurn } from '../chatEvents'
 import { turnText, turnToolUses } from '../chatEvents'
@@ -52,9 +52,17 @@ function TurnBubble({ turn, emotes }: { turn: ChatTurn; emotes: Map<string, stri
   )
 }
 
+// How close to the bottom (px) still counts as "at the bottom" — loose enough that a trackpad
+// wobble or a scrollbar drag doesn't disengage auto-follow, tight enough that scrolling up even one
+// turn does.
+const AUTO_SCROLL_THRESHOLD_PX = 48
+
 export function ChatPanel() {
   const { turns, status, wsConnected, pipeDown, lastAck, sendChat } = useChatSocket()
   const [emotes, setEmotes] = useState<Map<string, string>>(new Map())
+  const scrollRef = useRef<HTMLDivElement>(null)
+  // Defaults to true so the very first backfill (newest message = the bottom) lands there too.
+  const stickToBottomRef = useRef(true)
 
   useEffect(() => {
     let cancelled = false
@@ -68,6 +76,24 @@ export function ChatPanel() {
     }
   }, [])
 
+  // `turns` gets a new array reference on every chat.event — including mid-stream token deltas, not
+  // just new turns (see applyChatEvent) — so this fires continuously while a reply is streaming in.
+  // Only follow it to the bottom if that's where the reader already was; otherwise a streaming
+  // answer would yank the viewport out from under someone scrolled up reading history.
+  useEffect(() => {
+    const el = scrollRef.current
+    if (el && stickToBottomRef.current) {
+      el.scrollTop = el.scrollHeight
+    }
+  }, [turns])
+
+  function handleScroll() {
+    const el = scrollRef.current
+    if (!el) return
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+    stickToBottomRef.current = distanceFromBottom < AUTO_SCROLL_THRESHOLD_PX
+  }
+
   return (
     <section className="panel chat-panel">
       <div className="panel-title">
@@ -78,7 +104,7 @@ export function ChatPanel() {
           {status?.turn_in_flight ? 'Assistant is working…' : 'idle'}
         </span>
       </div>
-      <div className="chat-scroll">
+      <div className="chat-scroll" ref={scrollRef} onScroll={handleScroll}>
         {turns.length === 0 && <p className="empty-state">No turns yet — say something below.</p>}
         {turns.map((t) => (
           <TurnBubble key={`${t.turnId}-${t.startedAt}`} turn={t} emotes={emotes} />

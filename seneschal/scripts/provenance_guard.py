@@ -80,9 +80,9 @@ exactly the store the refusal exists to keep out of it.
 Stdlib only. The wiring: ``rag_index.index_records`` constructs one :class:`ProvenanceGuard` per
 ingest run, calls :meth:`ProvenanceGuard.check` per record, :meth:`ProvenanceGuard.record` into its
 own connection, and reads :func:`ledger_rows` for ``--stats``; ``mini_dream.py`` writes the producer
-stamp under :data:`STAMP_KEY`. **Not yet adopted in this tree** — this module lands ahead of that
-``rag_index.py`` / ``mini_dream.py`` rework, and until it does, the guard runs only as the dry-run
-``--check`` below.
+stamp under :data:`STAMP_KEY`. ``rag_index.py`` also calls :func:`ensure_ledger` on every open, so an
+index that predates the table gains it with no rebuild. The ``--check`` below is the same decision as
+a dry run over a JSONL, with no database and no writes.
 
 Usage:
   python provenance_guard.py --explain                # print the registry and the verdicts
@@ -119,7 +119,8 @@ SOURCE_PROVENANCE = {
     # guard here would be checking the same writer twice; the check that matters is upstream of it.
     "run-log": ATTESTED,
     "carry-over": ATTESTED,
-    "context-digest": ATTESTED,
+    # No "context-digest": the digest is retired and `rag_index.LOCAL_SOURCES` no longer indexes it.
+    # An unlisted source is refused, which is the correct posture for a source that no longer exists.
     # Store-resident, fetched by Dream's run: the owner's own journal and notes.
     "journal": ATTESTED,
     "notes": ATTESTED,

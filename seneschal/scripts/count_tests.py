@@ -57,6 +57,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # the registry failure mode this whole change exists to avoid re-creating.
 SUITES: tuple[tuple[str, str], ...] = (
     ("stdlib", "seneschal/scripts"),
+    ("proteus-tools", "archons/proteus/tools"),
 )
 
 # Discovered by CI, deliberately not counted here: the cockpit is its own dependency world

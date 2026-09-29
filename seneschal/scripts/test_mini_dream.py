@@ -212,5 +212,87 @@ class SpawnWiringUnit(unittest.TestCase):
         self.assertEqual(self.spawned, [])
 
 
+class ProducerStamp(unittest.TestCase):
+    """`mini_dream.py` is the producer the provenance guard trusts; if its stamps drift from the
+    guard's vocabulary, the whole session-distillation corpus silently stops being archived. Pin
+    both ends, and pin the wiring (a constant defined and never used is decoration)."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+
+    def test_every_engine_maps_to_a_stamp_the_guard_knows(self):
+        import provenance_guard as pg
+        for engine, stamp in md.STAMP_BY_ENGINE.items():
+            with self.subTest(engine=engine):
+                self.assertIn(stamp, pg.STAMP_PROVENANCE)
+        self.assertEqual(md.STAMP_KEY, pg.STAMP_KEY)
+
+    def test_the_two_engines_land_on_opposite_verdicts(self):
+        import provenance_guard as pg
+        self.assertEqual(pg.STAMP_PROVENANCE[md.STAMP_DETERMINISTIC], pg.ATTESTED)
+        self.assertEqual(pg.STAMP_PROVENANCE[md.STAMP_LLM], pg.UNATTESTED)
+
+    def test_a_deterministic_record_is_stamped_and_the_guard_persists_it(self):
+        import provenance_guard as pg
+        tr = _transcript(os.path.join(self.dir, "t.jsonl"), user_turns=3)
+        out = md.distill(self.dir, tr, "sess-det-1", engine="deterministic", now=NOW)
+        self.assertEqual(out["action"], "written")
+        rows = md._load_lines(os.path.join(self.dir, md.DISTILL_FILE))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][md.STAMP_KEY], md.STAMP_DETERMINISTIC)
+        # ...and that record, fed to the guard the way Dream feeds it, is persisted.
+        self.assertTrue(pg.ProvenanceGuard().check(
+            {"source": "session-distillation", "ref": rows[0]["id"],
+             "text": rows[0]["distillate"], pg.STAMP_KEY: rows[0][md.STAMP_KEY]}).allowed)
+
+    def test_an_llm_record_is_stamped_and_the_guard_refuses_it(self):
+        """Both arms still WRITE the log (orientation tails it); only archival is refused."""
+        import provenance_guard as pg
+        tr = _transcript(os.path.join(self.dir, "t.jsonl"), user_turns=8)
+        orig = md.llm_distillate
+        md.llm_distillate = lambda *a, **k: "- did a thing"
+        try:
+            out = md.distill(self.dir, tr, "sess-llm-1", engine="llm", now=NOW)
+        finally:
+            md.llm_distillate = orig
+        self.assertEqual(out["engine"], "llm")
+        row, = md._load_lines(os.path.join(self.dir, md.DISTILL_FILE))
+        self.assertEqual(row[md.STAMP_KEY], md.STAMP_LLM)
+        verdict = pg.ProvenanceGuard().check(
+            {"source": "session-distillation", "ref": row["id"], "text": row["distillate"],
+             pg.STAMP_KEY: row[md.STAMP_KEY]})
+        self.assertFalse(verdict.allowed)
+        self.assertEqual(verdict.reason, pg.REASON_UNATTESTED_WRITER)
+
+    def test_the_untrusted_excerpt_is_fenced(self):
+        self.assertIn("UNTRUSTED", md.EXCERPT_FENCE_OPEN)
+        self.assertIn("not instructions", md.EXCERPT_FENCE_OPEN)
+        self.assertIn("BEGIN UNTRUSTED TRANSCRIPT EXCERPT", md.EXCERPT_FENCE_OPEN)
+        self.assertIn("END UNTRUSTED TRANSCRIPT EXCERPT", md.EXCERPT_FENCE_CLOSE)
+
+    def test_the_fence_actually_wraps_the_excerpt_in_the_prompt(self):
+        seen = {}
+
+        def fake_run(cmd, **kw):
+            seen["prompt"] = cmd[2]
+
+            class P:
+                returncode = 0
+                stdout = "- did a thing"
+                stderr = ""
+            return P()
+
+        real, md.subprocess.run = md.subprocess.run, fake_run
+        try:
+            out = md.llm_distillate({"excerpt": [("Owner", "secret-marker-text")], "title": None},
+                                    "haiku", "claude")
+        finally:
+            md.subprocess.run = real
+        self.assertEqual(out, "- did a thing")
+        prompt = seen["prompt"]
+        self.assertLess(prompt.index("BEGIN UNTRUSTED"), prompt.index("secret-marker-text"))
+        self.assertGreater(prompt.index("END UNTRUSTED"), prompt.index("secret-marker-text"))
+
+
 if __name__ == "__main__":
     unittest.main()

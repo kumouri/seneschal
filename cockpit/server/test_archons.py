@@ -11,12 +11,15 @@ Run: python -m unittest cockpit.server.test_archons
 """
 from __future__ import annotations
 
+import gc
 import json
 import os
 import sys
 import tempfile
 import threading
 import unittest
+import urllib.request
+import warnings
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -46,6 +49,36 @@ class _FakeArchonHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+
+class _ErroringArchonHandler(BaseHTTPRequestHandler):
+    """Answers EVERY path with a 500. `_probe` always requests `/`, and an error status still counts as
+    reachable, so this is the arm where an unclosed response would pile up poll after poll."""
+
+    def log_message(self, fmt, *args):
+        pass
+
+    def do_GET(self):  # noqa: N802
+        body = b"upstream broke"
+        self.send_response(500)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class _RecordingResponse:
+    """A stand-in for what `urlopen` returns, so the success arm's close can be asserted directly — it
+    emits no ResourceWarning under CPython refcounting, so the warning can't be the signal there."""
+
+    def __init__(self, close_raises=False):
+        self.closed = False
+        self._close_raises = close_raises
+
+    def close(self):
+        self.closed = True
+        if self._close_raises:
+            raise OSError("socket already torn down")
 
 
 class ArchonsTestCase(unittest.TestCase):
@@ -78,6 +111,51 @@ class LoadRegistryTests(ArchonsTestCase):
     def test_loads_valid_registry(self):
         self._write_registry({"alpha-archon": {"title": "Alpha", "port": 9701, "status": "live"}})
         self.assertEqual(archons.load_registry()["alpha-archon"]["port"], 9701)
+
+
+class ProbeTests(ArchonsTestCase):
+    """`_probe` closes what it opens. Uses a real localhost server for the HTTP arms (same posture as
+    the proxy tests) and a stub only where a real socket can't show the difference."""
+
+    def _serve(self, handler) -> int:
+        server = HTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server.server_address[1]
+
+    def _patch_urlopen(self, resp) -> None:
+        original = urllib.request.urlopen
+        self.addCleanup(setattr, urllib.request, "urlopen", original)
+        urllib.request.urlopen = lambda url, timeout=None: resp
+
+    def test_error_status_still_counts_as_reachable(self):
+        self.assertTrue(archons._probe(self._serve(_ErroringArchonHandler)))
+
+    def test_error_response_is_closed(self):
+        """An unclosed `HTTPError` surfaces as `ResourceWarning: Implicitly cleaning up <HTTPError
+        500: ...>` from `tempfile`'s finalizer — it inherits `urllib.response.addinfourl`."""
+        port = self._serve(_ErroringArchonHandler)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", ResourceWarning)
+            self.assertTrue(archons._probe(port))
+            gc.collect()
+        self.assertEqual([str(w.message) for w in caught
+                          if issubclass(w.category, ResourceWarning)], [])
+
+    def test_ok_response_is_closed(self):
+        resp = _RecordingResponse()
+        self._patch_urlopen(resp)
+        self.assertTrue(archons._probe(1234))
+        self.assertTrue(resp.closed)
+
+    def test_a_failing_close_neither_raises_nor_flips_the_verdict(self):
+        """`_probe` promises it never raises, and it closes only after deciding — so a torn-down socket
+        can't report a live archon as unreachable."""
+        resp = _RecordingResponse(close_raises=True)
+        self._patch_urlopen(resp)
+        self.assertTrue(archons._probe(1234))
+        self.assertTrue(resp.closed)
 
 
 class ListArchonsTests(ArchonsTestCase):

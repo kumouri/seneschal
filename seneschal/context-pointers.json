@@ -95,10 +95,6 @@
       "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
     },
     {
-      "pointer": "../scripts/archon_sites.py",
-      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
-    },
-    {
       "pointer": ".claude/rules/",
       "reason": "`.claude/` paths are allowlisted rather than resolved: whether `.claude/worktrees/` is ignored depends on an untracked `.git/info/exclude`, so rung 2's answer there is machine-dependent and a blocking gate may not depend on it. The rules directory is discussed as a design option; no rule file ships."
     },
@@ -119,10 +115,6 @@
       "reason": "Names the per-archon `site.json` convention - a file an archon ships once it serves a site. No archon in this tree ships one yet, so the glob has nothing to match."
     },
     {
-      "pointer": "archons/proteus/tools/record_intel.py",
-      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
-    },
-    {
       "pointer": "docs/state-durability-spec.md",
       "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
     },
@@ -139,10 +131,6 @@
       "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
     },
     {
-      "pointer": "seneschal/docs/session-trace-spec.md",
-      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
-    },
-    {
       "pointer": "seneschal/scripts/advisors.py",
       "reason": "Deferred advisor rails (references/advisor-chain.md's later phase and slack-draft-and-hold-spec.md). A design doc naming a module it PROPOSES is legitimate; silently passing it is not. This row is a to-do with a home."
     },
@@ -151,36 +139,8 @@
       "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
     },
     {
-      "pointer": "seneschal/scripts/cockpit_site.py",
-      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
-    },
-    {
-      "pointer": "server/doc_status.py",
-      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
-    },
-    {
-      "pointer": "server/trace.py",
-      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
-    },
-    {
       "pointer": "tools/<id>_paths.py",
       "reason": "A template path: each archon's own `<id>_paths.py` module, named generically in the Forge's instructions. The shipped instance is `archons/proteus/tools/proteus_paths.py`."
-    },
-    {
-      "pointer": "tools/promote_intel.py",
-      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
-    },
-    {
-      "pointer": "tools/record_intel.py",
-      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
-    },
-    {
-      "pointer": "web/src/components/DocStatusPanel.tsx",
-      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
-    },
-    {
-      "pointer": "web/src/node-test-shim.d.ts",
-      "reason": "Forward pointer: the target is added by a change set still in flight on the integration branch (this doc was updated ahead of it). Delete this row once the file lands - the checker names any allowlist entry that has started resolving on its own."
     }
   ]
 }

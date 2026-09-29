@@ -17,11 +17,54 @@ Sources (all public, no auth unless noted):
   - Rippling    api.rippling.com/platform/api/ats/v1/board/<slug>/jobs (per-company; public board API +
                 capped per-posting detail GETs for descriptions/comp)
   - Adzuna      api.adzuna.com (aggregator; OPTIONAL — needs ADZUNA_APP_ID/ADZUNA_APP_KEY env)
+  - WelcomeToTheJungle  api.welcometothejungle.com/api/v3/organizations/<slug>/jobs (per-company;
+                UNOFFICIAL — the endpoint wttj.com's own front end calls, same standing as Workday
+                above. Public, no auth, honest User-Agent accepted. Rows carry STRUCTURED
+                salary_min/salary_max/currency on most rows and a structured office country_code,
+                which is better comp/location signal than Greenhouse gives. Paginates ?page=N at
+                30/page. Descriptions are NOT in the list rows — they need one detail call each, so
+                a fetch here NEVER buys them. They are bought AFTER scoring, for a capped shortlist
+                of the postings that are about to reach the owner, by hunt_cycle.hydrate_and_rescore
+                calling hydrate_wttj_descriptions below (a small fixed cap per cycle TOTAL, not per
+                company; the rest of the board stays visibly text-less rather than guessed at).
+
+                Its board-wide SEARCH endpoint (/api/v3/search/jobs) is NOT used, by standing
+                decision. It 403s every unauthenticated client, as does /api/v3/jobs-matches/counts;
+                those are the two personalised endpoints, and the gate is an account session, not a
+                missing header (holding the cookies the API itself mints plus the headers its own
+                front end sends still 403s). Company DISCOVERY therefore comes from their published
+                sitemaps instead — query-string-free and robots-allowed — via wttj_discover.py, which
+                is a separate, occasional tool, not part of a fetch cycle.
 
 Reads a watchlist JSON (see watchlist.json next to this tool), emits one normalized JSON document:
   {"fetched_at", "count", "warnings": [...], "jobs": [{source, company, title, location, remote,
-   url, posted_at, comp_min, comp_max, comp_currency, comp_note, employment_type, external_id,
-   description}]}
+   url, apply_url, posted_at, comp_min, comp_max, comp_currency, comp_note, employment_type,
+   external_id, description}]}
+
+WHO THE EMPLOYER IS, AND WHERE TO APPLY. A posting that reaches Proteus through republishers can
+arrive naming the wrong company — a curation board or a staffing agency rather than the employer.
+``attribute_employers`` corrects the employer **from the apply URL and nothing else** — an ATS hosts
+a req under the employer's own org slug, so ``jobs.ashbyhq.com/examplecorp/…`` names ExampleCorp no
+matter whose name the feed put in the field. Unrecognised host ⇒ nothing changes. A corrected row is
+MARKED, never laundered: it keeps ``company_reported`` and gets a scorer flag. Neither spends a
+request.
+
+Per-source reach of ``apply_url`` — what each feed can give for free:
+
+  - welcometothejungle      The field exists (``job.apply_url``) but is **detail-only — the list rows
+                            carry no such key**, so it fills in only for rows
+                            ``hydrate_wttj_descriptions`` bought a detail for.
+  - remoteok                Has an ``apply_url`` field, but it is byte-identical to ``url`` in
+                            practice — capturing it would add a field no surface can show. Not
+                            captured, deliberately.
+  - remotive, arbeitnow,    The employer's own link is not in the list payload (Remotive's is loose
+    adzuna                  inside description HTML, which ``html_to_text`` has already discarded by
+                            normalize time; Adzuna gives only its own tracking redirect). Each would
+                            need a fetch per posting. Out of scope.
+  - greenhouse, lever,      No gap: a direct board's ``url`` IS the req, so a second link would be
+    ashby, smartrecruiters, the same link. These are also never re-attributed — see
+    workday, rippling       ``attribute_employers``.
+  - hn_hiring               Prose typed by the employer; no structured link to capture.
 
 Per-source failures are warnings, never fatal — a cut-short run still delivers value.
 
@@ -39,8 +82,9 @@ import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
 
+import ats_hosts
 from proteus_comp import comp_from_text
-from source_tiers import tier_rank
+from source_tiers import MIRROR_SOURCES, tier_rank
 
 USER_AGENT = "proteus-job-fetch/1.0 (personal job search; stdlib urllib)"
 TIMEOUT = 25
@@ -109,6 +153,11 @@ def _job(**fields) -> dict:
         "workplace_type": None, "url": None, "posted_at": None, "comp_min": None, "comp_max": None,
         "comp_currency": None, "comp_note": None, "employment_type": None,
         "external_id": None, "description": "",
+        # Where to actually apply, when the posting is somebody's COPY of another board's req and
+        # the feed says where the original lives (welcometothejungle's mirror rows, once hydrated).
+        # None on a direct board — its `url` already IS the req, so a second link would be the same
+        # link — and None on an aggregator whose feed only knows its own page.
+        "apply_url": None,
     }
     base.update(fields)
 
@@ -439,6 +488,198 @@ def normalize_workday(company: str, base_url: str, payload: dict, details: dict 
     return jobs
 
 
+# --------------------------------------------------------------------- welcometothejungle
+#
+# WTTJ hands back a structured country_code per office. The scorer's US-eligibility screen reads
+# the *location string*, and its two curated lists are country NAMES and city names — so emitting
+# "New York, United States" / "Louviers, France" is what makes the screen work without depending on
+# whether a given city happens to be on the curated list. Emitting a bare "Louviers, FR" would fall
+# through both (the trailing-code path needs >=3 comma segments), which is exactly the shape of the
+# empty-location bug: a location the screen couldn't read let a German req alert as a US match.
+_WTTJ_COUNTRY_NAMES = {
+    "US": "United States", "GB": "United Kingdom", "UK": "United Kingdom", "CA": "Canada",
+    "FR": "France", "DE": "Germany", "NL": "Netherlands", "BE": "Belgium", "ES": "Spain",
+    "IT": "Italy", "PT": "Portugal", "PL": "Poland", "CZ": "Czech Republic", "SK": "Slovakia",
+    "HU": "Hungary", "RO": "Romania", "BG": "Bulgaria", "GR": "Greece", "SE": "Sweden",
+    "NO": "Norway", "DK": "Denmark", "FI": "Finland", "IE": "Ireland", "CH": "Switzerland",
+    "AT": "Austria", "LU": "Luxembourg", "IS": "Iceland", "EE": "Estonia", "LV": "Latvia",
+    "LT": "Lithuania", "SI": "Slovenia", "HR": "Croatia", "RS": "Serbia", "UA": "Ukraine",
+    "IN": "India", "CN": "China", "JP": "Japan", "KR": "South Korea", "SG": "Singapore",
+    "HK": "Hong Kong", "TW": "Taiwan", "AU": "Australia", "NZ": "New Zealand", "BR": "Brazil",
+    "MX": "Mexico", "AR": "Argentina", "CL": "Chile", "CO": "Colombia", "PE": "Peru",
+    "ZA": "South Africa", "NG": "Nigeria", "KE": "Kenya", "EG": "Egypt", "TR": "Turkey",
+    "IL": "Israel", "AE": "United Arab Emirates", "SA": "Saudi Arabia", "PH": "Philippines",
+    "VN": "Vietnam", "TH": "Thailand", "ID": "Indonesia", "MY": "Malaysia", "MA": "Morocco",
+    "TN": "Tunisia", "SN": "Senegal", "CI": "Ivory Coast", "RU": "Russia",
+}
+
+# WTTJ's `remote` enum -> (remote flag, workplace_type). workplace_type reuses the same vocabulary
+# the Ashby normalizer emits, because the scorer's structured_onsite() already reads those words.
+_WTTJ_REMOTE = {
+    "fulltime": (True, "Remote"),
+    "partial": (False, "Hybrid"),
+    "punctual": (False, "Hybrid"),
+    "no": (False, "Onsite"),
+}
+
+# salary_period -> multiplier to a yearly figure.
+_WTTJ_PERIOD_MULT = {"yearly": 1, "monthly": 12, "weekly": 52, "daily": 260, "hourly": 2080}
+
+
+def _wttj_location(row: dict) -> str | None:
+    """Human location string, PREFERRING US offices when a req lists several.
+
+    A role posted in both Paris and New York would otherwise render one string containing both
+    "France" and "United States", and the screen reads a foreign mark as disqualifying — so a
+    genuinely US-eligible req would be dropped. When any office is US, only the US ones are
+    emitted; when none is, all of them are, so the screen still sees the foreign mark.
+    """
+    offices = [o for o in (row.get("offices") or []) if isinstance(o, dict)]
+    if not offices and isinstance(row.get("office"), dict):
+        offices = [row["office"]]
+    us = [o for o in offices if (o.get("country_code") or "").strip().upper() == "US"]
+    parts = []
+    for office in (us or offices):
+        city = (office.get("city") or "").strip()
+        code = (office.get("country_code") or "").strip().upper()
+        country = _WTTJ_COUNTRY_NAMES.get(code, code)
+        piece = ", ".join(p for p in (city, country) if p)
+        if piece and piece not in parts:
+            parts.append(piece)
+    return ", ".join(parts) or None
+
+
+def _wttj_salary(row: dict) -> tuple[int | None, int | None, str | None]:
+    """(min, max, currency) annualized. Non-yearly periods are scaled; junk is dropped."""
+    mult = _WTTJ_PERIOD_MULT.get((row.get("salary_period") or "yearly").lower())
+    if mult is None:
+        return None, None, None
+    out = []
+    for key in ("salary_min", "salary_max"):
+        value = row.get(key)
+        out.append(int(value * mult) if isinstance(value, (int, float)) and value > 0 else None)
+    low, high = out
+    return low, high, (row.get("salary_currency") or None) if (low or high) else None
+
+
+def normalize_wttj(org_slug: str, payload: dict, details: dict | None = None) -> list[dict]:
+    """WTTJ per-organization job rows -> the normalized schema.
+
+    `details` maps a job slug -> its detail payload's `job` object (fetched separately and capped).
+    In the hourly loop it is ALWAYS empty — `fetch_wttj_company` is list-only — because
+    descriptions are bought after scoring, per row, by `hydrate_wttj_descriptions` below. The
+    parameter stays for a caller that already holds detail payloads; nothing in the cycle is one.
+    """
+    jobs = []
+    for row in (payload or {}).get("data", []):
+        if not isinstance(row, dict):
+            continue
+        if (row.get("status") or "published") != "published":
+            continue          # archived/unpublished reqs are still served; they are not openings
+        slug = row.get("slug") or ""
+        org = row.get("organization") or {}
+        org_slug_actual = org.get("slug") or org_slug
+        remote, workplace = _WTTJ_REMOTE.get((row.get("remote") or "").lower(), (None, None))
+        low, high, currency = _wttj_salary(row)
+        detail = (details or {}).get(slug) or {}
+        description = html_to_text(detail.get("description", "")) if detail else ""
+        jobs.append(_job(
+            source="welcometothejungle",
+            company=org.get("name") or org_slug,
+            title=row.get("name"),
+            location=_wttj_location(row),
+            remote=remote,
+            workplace_type=workplace,
+            url=(f"https://www.welcometothejungle.com/en/companies/"
+                 f"{urllib.parse.quote(org_slug_actual)}/jobs/{urllib.parse.quote(slug)}"
+                 if slug else None),
+            posted_at=row.get("published_at") or row.get("updated_at"),
+            comp_min=low, comp_max=high, comp_currency=currency,
+            employment_type=row.get("contract_type"),
+            external_id=str(row.get("reference") or slug),
+            description=description,
+            # The employer's own req this posting mirrors. Only present once hydrated, and it is
+            # what lets dedupe() prove two rows are one job rather than guessing from the title.
+            apply_url=detail.get("apply_url") or None,
+        ))
+    return jobs
+
+
+WTTJ_API = "https://api.welcometothejungle.com/api/v3/organizations"
+
+
+def fetch_wttj_company(slug: str, warnings: list[str], max_pages: int,
+                       max_per_company: int) -> list[dict]:
+    """List-only fetch for one WTTJ organization. Cheap by design: one request per 30 postings."""
+    quoted = urllib.parse.quote(slug)
+    collected: list[dict] = []
+    page_count = 1
+    for page in range(1, max_pages + 1):
+        payload = _get_json(f"{WTTJ_API}/{quoted}/jobs?page={page}", warnings,
+                            f"welcometothejungle:{slug}:p{page}")
+        if not payload:
+            break
+        rows = payload.get("data") or []
+        collected.extend(normalize_wttj(slug, payload))
+        page_count = int((payload.get("metadata") or {}).get("page_count") or 1)
+        if page >= page_count or len(rows) < 30 or len(collected) >= max_per_company:
+            break
+    return collected[:max_per_company]
+
+
+def hydrate_wttj_descriptions(jobs: list[dict], warnings: list[str], limit: int = 25) -> int:
+    """Fill in descriptions for WTTJ jobs that lack one — LAZILY, after scoring.
+
+    Fetching a description for every posting on every cycle is ~25 requests per company per hour,
+    which across a watchlist of a hundred-odd companies is >100k requests/day at one free public API.
+    Indefensible, and it would get the honest User-Agent blocked. The list rows already carry title,
+    structured comp, location and the remote flag — everything the scorer's reproducible floor needs
+    — so the description is only worth paying for once a job has earned attention.
+
+    Pass the jobs you actually care about (a scored shortlist). Mutates them in place; returns how
+    many were hydrated. Per-job failure is a warning, never fatal, and leaves the row's description
+    EMPTY — never a placeholder, so a req that could not be fetched stays visibly text-less.
+
+    **THE CALLER'S LIST IS THE REQUEST BUDGET, NOT `limit`.** `limit` counts SUCCESSES: a detail
+    call that fails, or answers with no prose, does not increment it and the walk continues. So on
+    a large text-less pool `limit` bounds nothing on its own. The one caller —
+    `hunt_cycle.hydrate_and_rescore`, via `hunt_cycle.hydration_shortlist` — hands in an
+    already-capped list, which is what makes the per-cycle bound provable.
+    """
+    hydrated = 0
+    for job in jobs:
+        if hydrated >= limit:
+            break
+        if job.get("source") != "welcometothejungle" or job.get("description"):
+            continue
+        url = job.get("url") or ""
+        match = re.search(r"/companies/([^/]+)/jobs/([^/?#]+)", url)
+        if not match:
+            continue
+        org, slug = match.group(1), match.group(2)
+        payload = _get_json(f"{WTTJ_API}/{org}/jobs/{slug}", warnings,
+                            f"welcometothejungle:detail:{slug[:40]}")
+        detail = (payload or {}).get("job") or {}
+        if not detail:
+            continue
+        text = html_to_text(detail.get("description", ""))
+        for extra in ("key_missions", "looking_for_candidate_description", "profile"):
+            value = detail.get(extra)
+            if isinstance(value, str) and value.strip():
+                text = f"{text}\n{html_to_text(value)}"
+        if text.strip():
+            job["description"] = text.strip()[:MAX_DESC_CHARS]
+            hydrated += 1
+        if detail.get("apply_url"):
+            job["apply_url"] = detail["apply_url"]
+        # The list row's comp is authoritative, but hydrate it if the list left it blank.
+        if job.get("comp_min") is None and job.get("comp_max") is None:
+            low, high, currency = _wttj_salary(detail)
+            if low or high:
+                job["comp_min"], job["comp_max"], job["comp_currency"] = low, high, currency
+    return hydrated
+
+
 def _ms_to_iso(ms):
     if not ms:
         return None
@@ -603,6 +844,20 @@ def fetch_all(watchlist: dict, warnings: list[str], max_per_company: int) -> lis
         else:
             warnings.append("adzuna: configured in watchlist but ADZUNA_APP_ID/ADZUNA_APP_KEY not set — skipped")
 
+    wttj = watchlist.get("welcometothejungle")
+    if wttj:
+        companies = wttj if isinstance(wttj, list) else wttj.get("companies", [])
+        max_pages = 3 if isinstance(wttj, list) else int(wttj.get("max_pages", 3))
+        for slug in companies:
+            jobs.extend(fetch_wttj_company(slug, warnings, max_pages, max_per_company))
+
+    # Before dedupe, deliberately: a corrected employer is part of the role key two lines down, so
+    # a republished row can finally fold into the direct board's row for the same job.
+    corrected = attribute_employers(jobs)
+    if corrected:
+        warnings.append(f"employer attribution: corrected {corrected} posting(s) from their apply URL's "
+                        "ATS org — each keeps the feed's name in company_reported")
+
     return dedupe(jobs)
 
 
@@ -613,6 +868,76 @@ sys.path.insert(0, TOOLS_DIR)
 import proteus_paths  # noqa: E402  (canonical state/ vs out/ paths)
 
 
+def attribute_employers(jobs: list[dict]) -> int:
+    """Correct a feed-reported employer from the ATS org its own apply URL names. Returns the count.
+
+    **The bug.** A posting can pass through several hands before it reaches Proteus — employer
+    careers page → a job-curation board → a republisher → an open aggregator → here — and each one
+    can put its own name in the employer field. The curator's name is what gets recorded, or one layer
+    of laundering further along, a staffing agency's. Meanwhile the req itself lives at
+    ``jobs.ashbyhq.com/<employer>/…``.
+
+    **The evidence, and only the evidence.** An ATS org slug is published under the employer's own
+    account on a system nobody else can post to, so it is the one attribution in the chain that a
+    republisher cannot restate. If the apply URL is not on a recognised ATS, ``ats_hosts`` returns
+    None and **this function changes nothing** — no name-matching, no curator/staffing-agency
+    list, no inference from the employer field itself. Declining is the common outcome and the
+    correct one; a wrong employer written confidently is worse than the feed's wrong employer,
+    because it looks derived.
+
+    **Marked, not laundered** (the same rule as the scorer's ``source-risk`` flag). A corrected row
+    keeps what the feed claimed:
+
+      ``company``           the derived employer — what the owner sees and what dedup keys on
+      ``company_reported``  verbatim what the feed said, never dropped
+      ``company_source``    ``"apply-url"`` — the marker every reader keys off
+      ``apply_ats`` / ``apply_org``   the system and org slug the correction came from
+
+    ``score_jobs`` turns those into a visible flag, so the disagreement reaches the owner rather than
+    being quietly resolved on their behalf.
+
+    Three deliberate scoping calls:
+
+    * **Direct boards are never touched** (tier S). Their ``company`` comes from the employer's own
+      board and their ``url`` *is* the req, so there is nothing to correct and a slug-vs-name
+      mismatch ("ExampleCorp PBC" vs ``examplecorp``) could only make a right answer worse.
+    * **``apply_url`` is preferred over ``url``** as the evidence, falling back to ``url`` so an
+      aggregator row that links straight at an ATS is caught too.
+    * **It runs before ``dedupe``**, so the corrected name participates in ``_role_key``. That is a
+      second win falling out of the first: a repost that used to carry the curator's name could never
+      fold into the direct row for the same req, so one job appeared twice under two employers. Now
+      it folds.
+    """
+    # An exact name already in hand beats a slug-derived one: a direct board that Proteus watches
+    # writes "ExampleCorp", where ``display_name`` can only manage "Examplecorp". Built from tier-S
+    # rows only, and from a plain dict, so the result never depends on fetch order.
+    exact: dict[str, str] = {}
+    for job in jobs:
+        company = (job.get("company") or "").strip()
+        if company and tier_rank(job.get("source")) >= 3:
+            exact.setdefault(ats_hosts.normalize_name(company), company)
+
+    corrected = 0
+    for job in jobs:
+        if tier_rank(job.get("source")) >= 3:
+            continue
+        hit = ats_hosts.employer_org(job.get("apply_url") or "") \
+            or ats_hosts.employer_org(job.get("url") or "")
+        if not hit:
+            continue
+        ats, org = hit
+        reported = (job.get("company") or "").strip()
+        if reported and ats_hosts.names_agree(reported, org):
+            continue          # the feed already had it right — the overwhelmingly common case
+        job["company"] = exact.get(ats_hosts.normalize_name(org)) or ats_hosts.display_name(org)
+        job["company_reported"] = reported or None
+        job["company_source"] = "apply-url"
+        job["apply_ats"] = ats
+        job["apply_org"] = org
+        corrected += 1
+    return corrected
+
+
 def _role_key(job: dict) -> tuple[str, str] | None:
     """A cross-source identity for the SAME role: normalized (company, title). None if either is blank."""
     company = re.sub(r"\s+", " ", (job.get("company") or "").strip().lower())
@@ -620,16 +945,55 @@ def _role_key(job: dict) -> tuple[str, str] | None:
     return (company, title) if company and title else None
 
 
+def _fold_into(survivor: dict, job: dict) -> None:
+    """Record `job` as another source of `survivor`, and let it fill blanks the survivor left.
+
+    Attribution first: the folded source is credited on ``also_sources`` so the row still shows
+    which feeds surfaced it. Then **enrichment**, which only ever fills a None — a direct board's
+    own fields are never overwritten by a mirror's copy of them.
+    """
+    also = set(survivor.get("also_sources") or [])
+    if job.get("source"):
+        also.add(job["source"])
+    survivor["also_sources"] = sorted(also)
+
+    # Comp is the field this is FOR. Greenhouse/Ashby bury pay ranges in JD prose, which
+    # comp_from_text catches only sometimes; WTTJ carries salary_min/salary_max as numbers on most
+    # rows. A blank comp is not neutral to the scorer — it scores a free 8/15 "unknown", so a role
+    # that hides its pay can outscore one that discloses honestly. Filling it in from the mirror
+    # makes that job score on what it actually pays.
+    if survivor.get("comp_min") is None and survivor.get("comp_max") is None:
+        if job.get("comp_min") is not None or job.get("comp_max") is not None:
+            survivor["comp_min"] = job.get("comp_min")
+            survivor["comp_max"] = job.get("comp_max")
+            survivor["comp_currency"] = survivor.get("comp_currency") or job.get("comp_currency")
+            survivor["comp_note"] = survivor.get("comp_note") or job.get("comp_note")
+            survivor["comp_source"] = job.get("source")
+    for field in ("workplace_type", "employment_type", "posted_at"):
+        if not survivor.get(field) and job.get(field):
+            survivor[field] = job[field]
+    if survivor.get("remote") is None and job.get("remote") is not None:
+        survivor["remote"] = job["remote"]
+
+
 def dedupe(jobs: list[dict]) -> list[dict]:
-    """De-duplicate in two passes.
+    """De-duplicate in three passes.
 
     1. **Exact** — drop a posting already seen at the same URL (or same ``source:external_id``).
-    2. **Cross-posting** — an aggregator (tier-B: HN/Adzuna and other open aggregation) repost of a
+    2. **Mirror** — a source that republishes a specific employer req verbatim
+       (``source_tiers.MIRROR_SOURCES``; today welcometothejungle) is not an independent listing,
+       so leaving it beside the direct row would show one job twice. Fold it into the direct row,
+       and let it ENRICH that row's blanks — see ``_fold_into``, and note this is the one fold that
+       gives something back rather than only dropping a duplicate.
+    3. **Cross-posting** — an aggregator (tier-B: HN/Adzuna and other open aggregation) repost of a
        role already carried by a direct/curated board (tier S/A) is the biggest noise vector. Drop it,
        but record its source on the surviving board row's ``also_sources`` so attribution still
        credits it with surfacing the role. Multiple aggregator reposts of one role collapse to one.
        Direct/curated rows are never merged with each other — two same-title reqs on one board are
        distinct jobs, kept apart.
+
+    A mirror with no direct row behind it **survives on its own** — that is the whole point of
+    watching companies whose own ATS can't be polled directly.
     """
     seen: set[str] = set()
     unique: list[dict] = []
@@ -640,9 +1004,33 @@ def dedupe(jobs: list[dict]) -> list[dict]:
         seen.add(key)
         unique.append(job)
 
+    # Direct (tier-S) rows are what a mirror folds into. Deliberately NOT tier A: folding one
+    # aggregator into another would make the outcome depend on fetch order.
+    direct_by_role: dict[tuple[str, str], dict] = {}
+    for job in unique:
+        if tier_rank(job.get("source")) >= 3 and job.get("source") not in MIRROR_SOURCES:
+            rk = _role_key(job)
+            if rk and rk not in direct_by_role:
+                direct_by_role[rk] = job
+
+    after_mirror: list[dict] = []
+    seen_mirror_roles: set[tuple[str, str]] = set()
+    for job in unique:
+        if job.get("source") in MIRROR_SOURCES:
+            rk = _role_key(job)
+            survivor = direct_by_role.get(rk) if rk else None
+            if survivor is not None:
+                _fold_into(survivor, job)
+                continue
+            if rk and rk in seen_mirror_roles:   # the same req on two WTTJ company profiles
+                continue
+            if rk:
+                seen_mirror_roles.add(rk)
+        after_mirror.append(job)
+
     # First direct/curated (tier S/A) row per role — the survivor an aggregator repost folds into.
     sa_by_role: dict[tuple[str, str], dict] = {}
-    for job in unique:
+    for job in after_mirror:
         if tier_rank(job.get("source")) >= 2:      # S or A
             rk = _role_key(job)
             if rk and rk not in sa_by_role:
@@ -650,7 +1038,7 @@ def dedupe(jobs: list[dict]) -> list[dict]:
 
     out: list[dict] = []
     seen_b_roles: set[tuple[str, str]] = set()
-    for job in unique:
+    for job in after_mirror:
         rk = _role_key(job)
         if rk and tier_rank(job.get("source")) <= 1:   # tier B (aggregator)
             survivor = sa_by_role.get(rk)

@@ -4,7 +4,8 @@
 Stdlib unittest only, no network, no real `claude`/Ollama calls. Covers: SCHEMA validation, tolerant
 load / strict save (incl. forward-compat unknown-key preservation), the owner-local day/week rollups
 (incl. the after-midnight-is-still-yesterday boundary, exercised through tz_common with a mocked
-fixed-offset owner zone), the fable_oneshot rail gate, the concurrency counter, and alert dedupe.
+fixed-offset owner zone), the fable_oneshot rail gate, the concurrency counter, alert dedupe, and the
+billable token basis (weight table, basis-aware rollups/alerts/gate, the turn_id join key).
 
 Run:  python -m unittest seneschal.scripts.test_governor   (or)   python test_governor.py
 """
@@ -219,6 +220,36 @@ class Ledger(unittest.TestCase):
     def test_missing_ledger_reads_empty(self):
         self.assertEqual(gv._read_ledger(self.dir), [])
 
+    def test_turn_id_is_recorded_when_given(self):
+        """The join key. Without it the ledger row and the metrics row for the same turn — written
+        moments apart by the same function — can only be paired by timestamp proximity, which is a
+        heuristic, not a key."""
+        gv.append_spend(self.dir, "tokens", model="claude-opus-5", tokens=100,
+                        turn_id="e1c31303253d")
+        self.assertEqual(gv._read_ledger(self.dir)[0]["turn_id"], "e1c31303253d")
+
+    def test_turn_id_is_OMITTED_not_zeroed_when_absent(self):
+        """A delegation or a job child is not a warm turn and has no turn to name. The
+        never-write-a-0 reasoning applies to a fabricated key just as much as to a fabricated count:
+        an empty-string or null `turn_id` would look like a turn that could be looked up."""
+        gv.append_spend(self.dir, "fable_oneshot", model="claude-fable-5", tokens=50)
+        row = gv._read_ledger(self.dir)[0]
+        self.assertNotIn("turn_id", row)
+
+    def test_an_empty_turn_id_is_treated_as_absent(self):
+        for empty in ("", None):
+            gv.append_spend(self.dir, "tokens", model="m", tokens=1, turn_id=empty)
+        for row in gv._read_ledger(self.dir):
+            self.assertNotIn("turn_id", row)
+
+    def test_adding_the_key_changes_nothing_else_about_the_row(self):
+        """`tokens` and `components` keep their meanings forever. Levers are purely additive."""
+        gv.append_spend(self.dir, "tokens", model="m", tokens=100)
+        gv.append_spend(self.dir, "tokens", model="m", tokens=100, turn_id="abc")
+        without, with_key = gv._read_ledger(self.dir)
+        self.assertEqual({k: v for k, v in with_key.items() if k not in ("ts", "turn_id")},
+                         {k: v for k, v in without.items() if k != "ts"})
+
     def test_corrupt_line_is_skipped_not_fatal(self):
         path = gv.ledger_path(self.dir)
         with open(path, "w", encoding="utf-8") as fh:
@@ -387,6 +418,299 @@ class Alerts(unittest.TestCase):
         gv.record_alert_sent(self.dir, alerts[0]["knob"])
         alerts_again = gv.due_alerts(self.dir, "claude-opus-4-8")  # seconds later — inside the 6h window
         self.assertEqual(alerts_again, [])
+
+
+class BillableBasis(unittest.TestCase):
+    """The weight table and its derivation — the arithmetic that makes the rail mean something.
+
+    The regression these guard is the ORIGINAL bug, restated: a flat sum over the usage block counts a
+    cache read like a fresh input token, so the number tracks conversation length instead of spend.
+    The fixture is a realistic long-session warm turn in the exact shape the claude CLI reports, so the
+    two bases are compared on the real usage-block layout, not on a shape invented to make the test
+    pass."""
+
+    # A cache-heavy warm turn in the CLI's usage-block shape: ~98.9% of its "tokens" are cache reads —
+    # which is the whole point.
+    REAL_USAGE = {
+        "input_tokens": 7,
+        "cache_creation_input_tokens": 3051,
+        "cache_read_input_tokens": 529573,
+        "output_tokens": 2647,
+        "cache_creation": {"ephemeral_1h_input_tokens": 3051, "ephemeral_5m_input_tokens": 0},
+        "service_tier": "standard",
+    }
+
+    def test_raw_tokens_is_the_flat_sum_it_has_always_been(self):
+        self.assertEqual(gv.raw_tokens(self.REAL_USAGE), 7 + 3051 + 529573 + 2647)
+
+    def test_raw_tokens_none_when_nothing_reported(self):
+        # "nothing reported" must stay distinguishable from "reported zero" — an unread usage block must never pass for a free one.
+        self.assertIsNone(gv.raw_tokens({"service_tier": "standard"}))
+        self.assertIsNone(gv.raw_tokens(None))
+        self.assertEqual(gv.raw_tokens({"input_tokens": 0}), 0)
+
+    def test_components_split_cache_writes_by_ttl(self):
+        comp = gv.usage_components(self.REAL_USAGE)
+        self.assertEqual(comp, {
+            "input": 7, "output": 2647, "cache_read": 529573,
+            "cache_write_5m": 0, "cache_write_1h": 3051, "cache_write_unspecified": 0,
+        })
+
+    def test_weight_table_applies_as_documented(self):
+        # input 7*1 + output 2647*1 + cache_read 529573*0.1 + 1h write 3051*2 = 61,713.3 -> 61,713
+        self.assertEqual(gv.billable_tokens(self.REAL_USAGE), 61713)
+
+    def test_billable_is_a_small_fraction_of_raw_on_a_cache_heavy_turn(self):
+        raw = gv.raw_tokens(self.REAL_USAGE)
+        billable = gv.billable_tokens(self.REAL_USAGE)
+        self.assertLess(billable, raw * 0.2)  # the rail was overstating by >5x on turns like this
+
+    def test_cache_write_without_a_ttl_breakdown_books_as_unspecified(self):
+        comp = gv.usage_components({"cache_creation_input_tokens": 1000})
+        self.assertEqual(comp["cache_write_unspecified"], 1000)
+        # priced at the 5m default TTL, 1.25x
+        self.assertEqual(gv.billable_tokens({"cache_creation_input_tokens": 1000}), 1250)
+
+    def test_partial_ttl_breakdown_books_the_remainder_rather_than_dropping_it(self):
+        comp = gv.usage_components({
+            "cache_creation_input_tokens": 1000,
+            "cache_creation": {"ephemeral_1h_input_tokens": 400},
+        })
+        self.assertEqual(comp["cache_write_1h"], 400)
+        self.assertEqual(comp["cache_write_unspecified"], 600)
+
+    def test_breakdown_exceeding_its_own_total_is_distrusted_not_double_counted(self):
+        comp = gv.usage_components({
+            "cache_creation_input_tokens": 100,
+            "cache_creation": {"ephemeral_1h_input_tokens": 900, "ephemeral_5m_input_tokens": 900},
+        })
+        self.assertEqual(comp["cache_write_1h"], 0)
+        self.assertEqual(comp["cache_write_5m"], 0)
+        self.assertEqual(comp["cache_write_unspecified"], 100)
+
+    def test_garbage_usage_reads_as_unmetered_rather_than_raising(self):
+        # A usage block is provider-shaped data this repo doesn't control; a shape change must degrade
+        # to "nothing metered", never take down a chat turn.
+        for bad in (None, [], "usage", 7, {"input_tokens": "lots"}, {"cache_creation": "nope"}):
+            self.assertIsNone(gv.raw_tokens(bad), bad)
+            self.assertIsNone(gv.billable_tokens(bad), bad)
+
+    def test_a_non_numeric_field_alongside_a_good_one_is_ignored_not_fatal(self):
+        usage = {"input_tokens": 10, "output_tokens": None, "cache_creation": "nope"}
+        self.assertEqual(gv.raw_tokens(usage), 10)
+        self.assertEqual(gv.billable_tokens(usage), 10)
+
+    def test_every_weight_key_is_a_component_key(self):
+        # The one guard against the table and the normalizer drifting apart: a typo'd weight key would
+        # otherwise just silently price its component at zero.
+        comp = gv.usage_components({"input_tokens": 1})
+        self.assertEqual(set(gv.TOKEN_WEIGHTS), set(comp))
+
+
+class LedgerBreakdown(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+
+    def test_append_spend_with_usage_records_both_bases(self):
+        usage = {"input_tokens": 100, "output_tokens": 100, "cache_read_input_tokens": 1000}
+        gv.append_spend(self.dir, "tokens", model="claude-opus-5", usage=usage)
+        rec = gv._read_ledger(self.dir)[0]
+        self.assertEqual(rec["tokens"], 1200)          # raw sum, unchanged meaning
+        self.assertEqual(rec["billable_tokens"], 300)  # 100 + 100 + 1000*0.1
+        self.assertEqual(rec["basis"], gv.BILLABLE_BASIS)
+        self.assertEqual(rec["components"]["cache_read"], 1000)
+
+    def test_explicit_tokens_scalar_still_writes_a_legacy_shaped_row(self):
+        gv.append_spend(self.dir, "tokens", model="m", tokens=42)
+        rec = gv._read_ledger(self.dir)[0]
+        self.assertEqual(rec["tokens"], 42)
+        self.assertNotIn("billable_tokens", rec)
+
+    def test_unmetered_row_carries_no_count_at_all(self):
+        # NEVER a 0: the fable gate trusts what it reads, and a 0 reads as "measured, and free".
+        gv.append_spend(self.dir, "fable_oneshot", model="claude-fable-5",
+                        metered=gv.METERED_UNAVAILABLE)
+        rec = gv._read_ledger(self.dir)[0]
+        self.assertEqual(rec["metered"], "unavailable")
+        self.assertNotIn("tokens", rec)
+        self.assertNotIn("billable_tokens", rec)
+
+
+class BasisAwareRollups(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.now = datetime(2026, 7, 18, 20, 0, tzinfo=timezone.utc)
+        self.ts = self.now.isoformat().replace("+00:00", "Z")
+
+    def _write(self, *rows):
+        # Every row stamped at the SAME instant the rollup queries with, so it lands on the query's
+        # owner-local day in any zone — no dependence on the runner's clock or timezone.
+        with open(gv.ledger_path(self.dir), "w", encoding="utf-8") as fh:
+            for row in rows:
+                fh.write(json.dumps({"ts": self.ts, **row}) + "\n")
+
+    def test_legacy_row_with_no_billable_still_rolls_up_via_the_raw_fallback(self):
+        # THE regression that would matter most: if the fallback broke, every pre-upgrade day would
+        # silently read as zero spend and the rails would go quiet on real usage.
+        self._write({"kind": "tokens", "model": "m", "tokens": 1000})
+        roll = gv.rollups(self.dir, now=self.now)
+        self.assertEqual(roll["billable_by_model"]["day"]["m"], 1000)
+        self.assertEqual(roll["tokens_by_model"]["day"]["m"], 1000)
+        self.assertEqual(roll["basis_by_model"]["day"]["m"], gv.BASIS_RAW)
+
+    def test_new_row_rolls_up_on_the_billable_basis(self):
+        self._write({"kind": "tokens", "model": "m", "tokens": 1000, "billable_tokens": 150,
+                     "basis": gv.BILLABLE_BASIS})
+        roll = gv.rollups(self.dir, now=self.now)
+        self.assertEqual(roll["billable_by_model"]["day"]["m"], 150)
+        self.assertEqual(roll["tokens_by_model"]["day"]["m"], 1000)  # raw preserved side by side
+        self.assertEqual(roll["basis_by_model"]["day"]["m"], gv.BASIS_BILLABLE)
+
+    def test_mixed_basis_day_is_reported_honestly_not_averaged_away(self):
+        self._write(
+            {"kind": "tokens", "model": "m", "tokens": 1000},                              # legacy
+            {"kind": "tokens", "model": "m", "tokens": 1000, "billable_tokens": 150},       # new
+        )
+        roll = gv.rollups(self.dir, now=self.now)
+        self.assertEqual(roll["basis_by_model"]["day"]["m"], gv.BASIS_MIXED)
+        self.assertEqual(roll["billable_by_model"]["day"]["m"], 1150)
+        self.assertIn("MIXED", gv.describe_basis(gv.BASIS_MIXED))
+        self.assertIn("not a single unit", gv.describe_basis(gv.BASIS_MIXED))
+
+    def test_fable_oneshot_row_tokens_are_counted_not_dropped(self):
+        # Tokens used to accrue ONLY from kind == "tokens", so a Fable delegation's own spend would
+        # have been ignored even once it started reporting usage.
+        self._write({"kind": "fable_oneshot", "model": "claude-fable-5", "tokens": 5000,
+                     "billable_tokens": 800})
+        roll = gv.rollups(self.dir, now=self.now)
+        self.assertEqual(roll["billable_by_model"]["day"]["claude-fable-5"], 800)
+        self.assertEqual(roll["fable_oneshots"]["day"], 1)  # still counted as a one-shot too
+
+    def test_pre_change_fable_row_counts_as_a_oneshot_but_contributes_no_tokens(self):
+        self._write({"kind": "fable_oneshot", "model": "claude-fable-5"})
+        roll = gv.rollups(self.dir, now=self.now)
+        self.assertEqual(roll["fable_oneshots"]["day"], 1)
+        self.assertNotIn("claude-fable-5", roll["billable_by_model"]["day"])
+        self.assertIsNone(roll["basis_by_model"]["day"].get("claude-fable-5"))
+
+    def test_unmetered_rows_are_surfaced_as_a_gap_not_folded_in_as_zero(self):
+        self._write(
+            {"kind": "fable_oneshot", "model": "claude-fable-5", "metered": "unavailable"},
+            {"kind": "fable_oneshot", "model": "claude-fable-5", "tokens": 100,
+             "billable_tokens": 40},
+        )
+        roll = gv.rollups(self.dir, now=self.now)
+        self.assertEqual(roll["unmetered_by_model"]["day"]["claude-fable-5"], 1)
+        self.assertEqual(roll["billable_by_model"]["day"]["claude-fable-5"], 40)
+        self.assertEqual(roll["basis_by_model"]["day"]["claude-fable-5"], gv.BASIS_BILLABLE)
+
+    def test_a_model_with_no_rows_has_no_basis(self):
+        roll = gv.rollups(self.dir, now=self.now)
+        self.assertIsNone(roll["basis_by_model"]["day"].get("nobody"))
+
+
+class BasisAwareAlerts(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.now = datetime(2026, 7, 18, 20, 0, tzinfo=timezone.utc)
+        self.ts = self.now.isoformat().replace("+00:00", "Z")
+
+    def _write(self, *rows):
+        with open(gv.ledger_path(self.dir), "w", encoding="utf-8") as fh:
+            for row in rows:
+                fh.write(json.dumps({"ts": self.ts, **row}) + "\n")
+
+    def test_alert_names_its_basis(self):
+        gv.save(self.dir, {"daily_token_budget_by_model": {"m": 100}})
+        self._write({"kind": "tokens", "model": "m", "tokens": 900, "billable_tokens": 90})
+        alerts = gv.due_alerts(self.dir, "m", now=self.now)
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("90/100", alerts[0]["text"])          # the BILLABLE figure, not the raw 900
+        self.assertIn("billable basis", alerts[0]["text"])
+        self.assertIn("cache reads discounted", alerts[0]["text"])
+
+    def test_mixed_basis_alert_says_so_rather_than_presenting_one_unit(self):
+        gv.save(self.dir, {"daily_token_budget_by_model": {"m": 100}})
+        self._write(
+            {"kind": "tokens", "model": "m", "tokens": 50},                            # legacy
+            {"kind": "tokens", "model": "m", "tokens": 400, "billable_tokens": 40},    # new
+        )
+        alerts = gv.due_alerts(self.dir, "m", now=self.now)
+        self.assertIn("MIXED basis", alerts[0]["text"])
+        self.assertIn("90/100", alerts[0]["text"])
+
+    def test_legacy_only_alert_warns_that_the_number_overstates(self):
+        gv.save(self.dir, {"daily_token_budget_by_model": {"m": 100}})
+        self._write({"kind": "tokens", "model": "m", "tokens": 90})
+        alerts = gv.due_alerts(self.dir, "m", now=self.now)
+        self.assertIn("legacy raw basis", alerts[0]["text"])
+        self.assertIn("overstates", alerts[0]["text"])
+
+    def test_alert_that_cannot_compute_its_basis_does_not_fire(self):
+        # Budget configured, model over threshold on nothing measurable — no unit, no alert.
+        gv.save(self.dir, {"daily_token_budget_by_model": {"claude-fable-5": 100}})
+        self._write({"kind": "fable_oneshot", "model": "claude-fable-5", "metered": "unavailable"})
+        self.assertEqual(gv.due_alerts(self.dir, "claude-fable-5", now=self.now), [])
+
+    def test_alert_discloses_unmetered_calls_alongside_the_figure(self):
+        gv.save(self.dir, {"daily_token_budget_by_model": {"claude-fable-5": 100}})
+        self._write(
+            {"kind": "fable_oneshot", "model": "claude-fable-5", "tokens": 90,
+             "billable_tokens": 90},
+            {"kind": "fable_oneshot", "model": "claude-fable-5", "metered": "unavailable"},
+        )
+        alerts = gv.due_alerts(self.dir, "claude-fable-5", now=self.now)
+        self.assertIn("could not be metered", alerts[0]["text"])
+
+    def test_a_cache_heavy_day_does_not_false_alarm(self):
+        """End-to-end on the real shape: a day of long warm turns against the shipped 30M budget.
+
+        The raw sum blows far past the budget; the billable basis is a small fraction of that and
+        stays quiet. If someone reinstates the flat sum, this test is what goes red."""
+        gv.save(self.dir, {"daily_token_budget_by_model": {"claude-opus-5": 30_000_000}})
+        turn = dict(BillableBasis.REAL_USAGE)
+        rows = []
+        for _ in range(190):
+            rows.append({"kind": "tokens", "model": "claude-opus-5",
+                         "tokens": gv.raw_tokens(turn), "billable_tokens": gv.billable_tokens(turn),
+                         "components": gv.usage_components(turn)})
+        self._write(*rows)
+        roll = gv.rollups(self.dir, now=self.now)
+        raw = roll["tokens_by_model"]["day"]["claude-opus-5"]
+        billable = roll["billable_by_model"]["day"]["claude-opus-5"]
+        self.assertGreater(raw, 100_000_000)      # the old basis: >3x the budget
+        self.assertLess(billable, 24_000_000)     # the honest one: under the 80% alert line
+        self.assertEqual(gv.due_alerts(self.dir, "claude-opus-5", now=self.now), [])
+
+
+class FableGateOnTheBillableBasis(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+
+    def test_hard_gate_still_refuses_on_a_genuine_quota(self):
+        # The rail must still BITE — the fix discounts cache reads, it does not defang the gate.
+        gv.save(self.dir, {"daily_token_budget_by_model": {"claude-fable-5": 100}})
+        gv.append_spend(self.dir, "fable_oneshot", model="claude-fable-5",
+                        usage={"input_tokens": 150, "output_tokens": 0})
+        v = gv.check("fable_oneshot", self.dir, conversation_id="c1")
+        self.assertFalse(v.allowed)
+        self.assertIn("daily token budget", v.reason)
+        self.assertIn("billable basis", v.reason)
+
+    def test_gate_reads_billable_not_raw_so_cache_reads_do_not_falsely_exhaust_it(self):
+        # 100k of cache reads is 10k billable — under a 50k budget. On the old basis this refused.
+        gv.save(self.dir, {"daily_token_budget_by_model": {"claude-fable-5": 50_000}})
+        gv.append_spend(self.dir, "fable_oneshot", model="claude-fable-5",
+                        usage={"cache_read_input_tokens": 100_000, "output_tokens": 500})
+        v = gv.check("fable_oneshot", self.dir, conversation_id="c1")
+        self.assertTrue(v.allowed)
+
+    def test_legacy_raw_rows_still_exhaust_the_gate_via_the_fallback(self):
+        gv.save(self.dir, {"daily_token_budget_by_model": {"claude-fable-5": 100}})
+        gv.append_spend(self.dir, "tokens", model="claude-fable-5", tokens=150)
+        v = gv.check("fable_oneshot", self.dir, conversation_id="c1")
+        self.assertFalse(v.allowed)
+        self.assertIn("legacy raw basis", v.reason)
 
 
 if __name__ == "__main__":

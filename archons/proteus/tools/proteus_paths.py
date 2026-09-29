@@ -22,12 +22,22 @@ is checked out — not only inside this repo's tree, where the root ignore file 
 to cover it.
 
 This module is the single source of truth for those paths so the tools
-(``hunt_cycle``, ``daily_digest``, ``fetch_jobs``, ``score_jobs``) can't drift apart.
+(``hunt_cycle``, ``daily_digest``, ``fetch_jobs``, ``score_jobs``, ``record_intel``,
+``promote_intel``, ``wttj_discover``) can't drift apart.
+
+It also owns **posting identity** (``norm_url``) and the **atomic writer** the tools share, for the
+same reason: ``hunt_cycle``'s alert and ``daily_digest``'s email both decide whether an apply link
+is "the same link" as the posting, and every tool that rewrites a ``state/`` file must do it the
+same crash-safe way.
 """
 from __future__ import annotations
 
+import json
+import re
 import shutil
+import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 TOOLS_DIR = Path(__file__).resolve().parent
@@ -45,14 +55,60 @@ PAUSED_FILE = STATE_DIR / "paused"                # sentinel: pause the hourly h
 LOGS_DIR = STATE_DIR / "logs"                     # deploy/delegate logs + pid files
 RUNS_DIR = STATE_DIR / "runs"                     # per-run raw boards: runs/<run-date>/{jobs,scored}.json
 LEDGER_FILE = STATE_DIR / "ledger.jsonl"          # demiurge's delegation ledger — see below
+INTEL_PENDING_FILE = STATE_DIR / "company-intel-pending.jsonl"  # proposed intel awaiting promotion
+WTTJ_DISCOVERY_FILE = STATE_DIR / "wttj-discovery.json"         # wttj_discover.py's last report
+
+# --- the atomic writer, re-exported so the tools share ONE ------------------------
+# `seneschal/scripts/memory_write.py` is the repo's atomic write, and there is deliberately no second
+# implementation of it. It lives here for the same reason the paths do: several tools writing
+# `state/` several ways is the drift this module exists to prevent, and `seen.json` (the dedup
+# ledger) has no copy anywhere — a torn write re-alerts every open role.
+_SCRIPTS_DIR = PROTEUS_DIR.parent.parent / "seneschal" / "scripts"
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+import memory_write as _memory_write  # noqa: E402
+
+#: Atomically replace `path`'s text: sibling temp file, fsync, `os.replace`. On any failure the
+#: target is untouched, because it was never opened. Line endings and a BOM are preserved.
+write_text = _memory_write.write_text
+
+
+def write_json(path, obj, **dumps_kwargs) -> None:
+    """`write_text` for a JSON payload. `ensure_ascii=False` by default: these files hold company and
+    role names, and escaping them to `\\uXXXX` makes the ledger unreadable to a human eye."""
+    dumps_kwargs.setdefault("ensure_ascii", False)
+    write_text(str(path), json.dumps(obj, **dumps_kwargs))
+
+
+def owner_today(now: datetime | None = None) -> str:
+    """The owner's local calendar date (``YYYY-MM-DD``) at ``now`` (default: the wall clock).
+
+    Resolved through ``seneschal/scripts/tz_common.py`` — the owner's configured zone, with its
+    documented fallback ladder — so an intel stamp's ``updated`` date agrees with every other date
+    the suite writes. Never raises: a host where the zone can't be resolved stamps the UTC date
+    rather than failing a recording. ``now`` is injectable so tests pin the instant.
+    """
+    instant = now or datetime.now(timezone.utc)
+    try:
+        import tz_common
+        return tz_common.to_local(instant).date().isoformat()
+    except Exception:  # noqa: BLE001 — a date stamp must never cost the write it labels
+        return instant.astimezone(timezone.utc).date().isoformat()
+
 
 # --- out/ : what a run produces -----------------------------------------------
 DIGEST_DIR = OUT_DIR / "digests"                  # daily digest markdown
 MANIFEST_FILE = OUT_DIR / "workups.json"          # index of drafted workups
 
-# --- tracked inputs ------------------------------------------------------------
+# --- curated inputs --------------------------------------------------------------
 PROFILE_FILE = PROTEUS_DIR / "profile.json"
 WATCHLIST_FILE = PROTEUS_DIR / "watchlist.json"
+# Proteus's durable company memory — a curated input the archon CONTRIBUTES to, so it is
+# deliberately NOT under state/. It is the owner's data and GITIGNORED (like profile.json). Proteus
+# never writes it directly: it appends proposals to INTEL_PENDING_FILE above (`record_intel.py`), and
+# `promote_intel.py` merges them here — locally by default, or by PR (`--via-pr`) for an owner who
+# keeps it in a private fork. See `seneschal/references/archons.md`.
+COMPANY_INTEL_FILE = PROTEUS_DIR / "company-intel.json"
 
 # Pre-state/ layout: runtime files used to sit in out/hourly/ and out/ alongside the
 # deliverables. (new, old) pairs — kept so an existing checkout self-heals instead of
@@ -112,6 +168,32 @@ def resolve_raw_artifact(path) -> Path:
 # drafted: a Tuesday work-up reviewed on Saturday would otherwise have had its board deleted before
 # anyone looked. The current board (`scored-latest.json`) is always live regardless.
 RUNS_RETENTION_DAYS = 7
+
+
+# ===================================================== posting identity
+# Every surface that mentions a job — the hourly Telegram alert and the daily digest — needs to
+# compare URLs the same way, so "is this apply link just the posting under another spelling?" gets
+# one answer everywhere.
+
+_TRACKING_PARAM = re.compile(r"^(utm_[^=]*|ref|referer|referrer|source|src|gclid|fbclid|mc_cid|mc_eid)=", re.I)
+
+
+def norm_url(url: str) -> str:
+    """Normalize a posting URL for identity comparison.
+
+    **Keeps the query string** — it carries the job id on a lot of boards (HN ``item?id=``,
+    Greenhouse ``?gh_jid=``, and plenty of employer careers pages put the id there). Dropping it
+    collapses many distinct postings per board into one key, which silently mass-flags unrelated
+    jobs. Only obvious tracking params are stripped; the remainder is sorted so param order
+    doesn't matter.
+    """
+    u = (url or "").strip().lower().split("#")[0]
+    if "?" not in u:
+        return u.rstrip("/")
+    base, _, query = u.partition("?")
+    keep = sorted(p for p in query.split("&") if p and not _TRACKING_PARAM.match(p))
+    base = base.rstrip("/")
+    return f"{base}?{'&'.join(keep)}" if keep else base
 
 
 def ensure_dirs() -> None:

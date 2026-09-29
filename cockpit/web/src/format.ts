@@ -11,9 +11,22 @@ export function relativeAge(seconds: number | null | undefined): string {
 
 export function formatTimestamp(value: string | null | undefined): string {
   if (!value) return '—'
+  // Runtime belt-and-braces: this function must NEVER return a non-string — handing a raw object
+  // back to JSX is exactly how one malformed field blanked the whole dashboard (React #31).
+  if (typeof value !== 'string') return '—'
   const d = new Date(value)
   if (Number.isNaN(d.getTime())) return value
   return d.toLocaleString()
+}
+
+/** Time-of-day only — for a log whose rows all belong to ONE session, where `toLocaleString()`'s
+ *  date half is the same on every row and costs the column three times the width it needs. Falls
+ *  back to the full string when the value isn't a parsable timestamp, so nothing is ever hidden. */
+export function formatClockTime(value: string | null | undefined): string {
+  if (!value || typeof value !== 'string') return '—'
+  const d = new Date(value)
+  if (Number.isNaN(d.getTime())) return value
+  return d.toLocaleTimeString(undefined, { hour12: false })
 }
 
 export function secondsUntil(value: string | null | undefined): number | null {
@@ -39,6 +52,20 @@ export function formatMinutes(minutes: number | null | undefined): string {
   const h = Math.floor(total / 60)
   const m = total % 60
   return h === 0 ? `${m}m` : `${h}h ${m}m`
+}
+
+/** Seconds -> a DURATION ("45s", "7m", "1h 12m") — how long something took/has been going, which is
+ * emphatically not `relativeAge`'s "…ago". Passing a duration to `relativeAge` renders "took 2
+ * minutes" as "2m ago", which reads as "finished 2 minutes back" — a different and wrong fact. Used
+ * by the Jobs panel (seneschal/docs/background-jobs-spec.md). */
+export function formatDuration(seconds: number | null | undefined): string {
+  if (seconds == null || Number.isNaN(seconds)) return ''
+  const total = Math.max(0, Math.round(seconds))
+  if (total < 60) return `${total}s`
+  if (total < 3600) return `${Math.round(total / 60)}m`
+  const h = Math.floor(total / 3600)
+  const m = Math.round((total % 3600) / 60)
+  return m === 0 ? `${h}h` : `${h}h ${m}m`
 }
 
 /** ISO-8601 week key ("2026-W29") for a calendar date — Monday-start weeks, week 1 contains the

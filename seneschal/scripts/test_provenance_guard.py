@@ -10,8 +10,10 @@ The second family, `NeverReadsContent`, pins the other half of the design: the g
 worse module wearing this one's name, and a test is the only thing that keeps it from drifting into
 one.
 
-The guard's wiring into `rag_index.index_records` / `mini_dream.py` lands with the RAG rework; these
-are the guard's own unit tests (the producer-stamp vocabulary is pinned by value here).
+`IndexIntegration` and `IngestJsonlForwardsProvenance` pin the WIRING: the guard has to hold at the
+real choke point (`rag_index.index_records`) and through the real `--ingest` / `--stats` CLI, not
+just in isolation. The producer-stamp vocabulary is pinned by value here and against `mini_dream.py`
+in `test_mini_dream.py`.
 
 Stdlib ``unittest`` only — no Ollama, no network, no DB except in-memory sqlite.
 Run:  python -m unittest seneschal.scripts.test_provenance_guard  (or)  python test_provenance_guard.py
@@ -104,8 +106,7 @@ class AttestedPathsStillWork(unittest.TestCase):
 
     def test_every_local_and_notion_source_is_persisted(self):
         g = pg.ProvenanceGuard()
-        for source in ("run-log", "carry-over", "context-digest", "journal", "notes",
-                       "chat", "project"):
+        for source in ("run-log", "carry-over", "journal", "notes", "chat", "project"):
             with self.subTest(source=source):
                 self.assertTrue(g.check(_rec(source)).allowed)
         self.assertEqual(g.refused, [])
@@ -116,6 +117,16 @@ class AttestedPathsStillWork(unittest.TestCase):
         for source in ri.LOCAL_SOURCES:
             with self.subTest(source=source):
                 self.assertEqual(pg.classify(source), pg.ATTESTED)
+
+    def test_the_retired_context_digest_is_no_longer_a_source(self):
+        """The digest is retired: nothing indexes it, so the registry refuses it like any stranger."""
+        import rag_index as ri
+        self.assertNotIn("context-digest", ri.LOCAL_SOURCES)
+        self.assertEqual(pg.classify("context-digest"), pg.UNATTESTED)
+
+    def test_the_chat_corpus_is_registered(self):
+        """`rag_index.py --chat` emits source `chat`; unregistered, it would silently index nothing."""
+        self.assertEqual(pg.classify("chat"), pg.ATTESTED)
 
     def test_rag_projects_source_is_registered(self):
         import rag_projects as rp
@@ -256,6 +267,166 @@ class RefusalIsVisible(unittest.TestCase):
     def test_override_is_scoped_to_the_named_source_only(self):
         g = pg.ProvenanceGuard(allow_unattested=["session-distillation"])
         self.assertFalse(g.check(_rec("something-else")).allowed)
+
+
+class IndexIntegration(unittest.TestCase):
+    """The guard has to hold at the real choke point, not just in isolation."""
+
+    CFG = {"CHUNK_CHARS": "800", "CHUNK_OVERLAP": "150"}
+
+    def setUp(self):
+        import rag_common as rc
+        import rag_index as ri
+        self.rc, self.ri = rc, ri
+        self.conn = rc.connect(":memory:")
+        self.addCleanup(self.conn.close)
+        real = rc.embed_texts
+        self.addCleanup(lambda: setattr(rc, "embed_texts", real))
+
+    def _quiet(self, fn, *a, **k):
+        err = io.StringIO()
+        real, sys.stderr = sys.stderr, err
+        try:
+            return fn(*a, **k)
+        finally:
+            sys.stderr = real
+
+    def test_index_records_refuses_before_it_embeds(self):
+        """If a refused record ever reached the embedder, the guard would be decoration."""
+        embedded = []
+
+        def boom(chunks, cfg=None, **_):
+            embedded.append(chunks)
+            raise AssertionError("a refused record must never reach the embedder")
+
+        self.rc.embed_texts = boom
+        guard = pg.ProvenanceGuard()
+        counts = self._quiet(self.ri.index_records, self.conn,
+                             [_rec("session-distillation", "a", provenance=STAMP_LLM),
+                              _rec("mystery", "b")], self.CFG, guard=guard)
+        self.assertEqual(counts, (0, 0, 0))
+        self.assertEqual(embedded, [])
+        self.assertEqual(guard.summary()["refused"], 2)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM docs").fetchone()[0], 0)
+        # ...and the refusal is durable, not just a return value — even on a connection opened
+        # with plain `rag_common.connect`, which does not create the ledger itself.
+        self.assertEqual({r[0] for r in pg.ledger_rows(self.conn)},
+                         {"session-distillation", "mystery"})
+
+    def test_index_records_defaults_to_a_guard_when_none_is_passed(self):
+        """rag_projects.py calls this without a guard; the default must still be fail-closed."""
+        def boom(*a, **k):
+            raise AssertionError("must not embed")
+
+        self.rc.embed_texts = boom
+        counts = self._quiet(self.ri.index_records, self.conn,
+                             [_rec("session-distillation", "a")], self.CFG)
+        self.assertEqual(counts, (0, 0, 0))
+        self.assertEqual(len(pg.ledger_rows(self.conn)), 1)
+
+    def test_a_dry_run_decides_but_writes_no_ledger(self):
+        """`--dry-run` has to be usable as 'what WOULD be turned away tonight?'."""
+        guard = pg.ProvenanceGuard()
+        self._quiet(self.ri.index_records, self.conn,
+                    [_rec("session-distillation", "a", provenance=STAMP_LLM)], self.CFG,
+                    dry_run=True, guard=guard)
+        self.assertEqual(guard.summary()["refused"], 1)
+        self.assertEqual(pg.ledger_rows(self.conn), [])
+
+    def test_attested_records_still_index_normally(self):
+        self.rc.embed_texts = lambda chunks, cfg=None, **_: [[0.1] * 8 for _ in chunks]
+        added, _, _ = self.ri.index_records(
+            self.conn, [_rec("run-log", "a", text="the assistant's own prose."),
+                        _rec("session-distillation", "b", provenance=STAMP_DETERMINISTIC)],
+            self.CFG)
+        self.assertEqual(added, 2)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM docs").fetchone()[0], 2)
+        self.assertEqual(pg.ledger_rows(self.conn), [])
+
+    def test_an_override_persists_and_is_still_counted(self):
+        self.rc.embed_texts = lambda chunks, cfg=None, **_: [[0.1] * 8 for _ in chunks]
+        guard = pg.ProvenanceGuard(allow_unattested=["session-distillation"])
+        added, _, _ = self._quiet(self.ri.index_records, self.conn,
+                                  [_rec("session-distillation", "a", provenance=STAMP_LLM)],
+                                  self.CFG, guard=guard)
+        self.assertEqual(added, 1)
+        rows = pg.ledger_rows(self.conn)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][2], 1)   # overridden, not refused
+
+
+class IngestJsonlForwardsProvenance(unittest.TestCase):
+    """Drives the REAL `rag_index.py --ingest` / `--stats` CLI, because a JSONL reader that rebuilds
+    each record from a fixed field list and forgets `provenance` turns every correctly-stamped
+    session-distillation into a `missing-provenance-stamp` refusal — invisible to any test that
+    calls `index_records` directly."""
+
+    def _main(self, argv):
+        import rag_common as rc
+        import rag_index as ri
+        real = rc.embed_texts
+        rc.embed_texts = lambda chunks, cfg=None, **_: [[0.1] * 8 for _ in chunks]
+        out, err = io.StringIO(), io.StringIO()
+        ro, re_ = sys.stdout, sys.stderr
+        sys.stdout, sys.stderr = out, err
+        try:
+            code = ri.main(argv)
+        finally:
+            sys.stdout, sys.stderr = ro, re_
+            rc.embed_texts = real
+        return code, out.getvalue(), err.getvalue()
+
+    def _ingest(self, d, rec):
+        jsonl = os.path.join(d, "session.jsonl")
+        with open(jsonl, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec) + "\n")
+        db = os.path.join(d, "i.sqlite")
+        code, _, _ = self._main(["--ingest", jsonl, "--db", db])
+        return code, db
+
+    def _count(self, db, doc_id):
+        conn = sqlite3.connect(db)
+        try:
+            return conn.execute("SELECT COUNT(*) FROM docs WHERE id = ?", (doc_id,)).fetchone()[0]
+        finally:
+            conn.close()   # Windows will not remove the tempdir while a handle is open
+
+    def test_a_deterministic_fields_record_survives_the_ingest_round_trip(self):
+        with tempfile.TemporaryDirectory() as d:
+            code, db = self._ingest(d, _rec("session-distillation", "sd-1",
+                                            provenance=STAMP_DETERMINISTIC))
+            self.assertEqual(code, 0)
+            self.assertEqual(self._count(db, "session-distillation:sd-1"), 1)
+
+    def test_an_llm_excerpt_record_is_refused_and_stats_show_the_ledger(self):
+        with tempfile.TemporaryDirectory() as d:
+            code, db = self._ingest(d, _rec("session-distillation", "sd-2", provenance=STAMP_LLM))
+            self.assertEqual(code, 0)          # the CLI itself still exits 0
+            self.assertEqual(self._count(db, "session-distillation:sd-2"), 0)
+            code, out, _ = self._main(["--stats", "--db", db])
+            self.assertEqual(code, 0)
+            self.assertIn("provenance refusals", out)
+            self.assertIn(f"session-distillation/{pg.REASON_UNATTESTED_WRITER}: 1 refused", out)
+            self.assertIn("last ref sd-2", out)
+
+    def test_opening_a_pre_existing_index_gains_the_ledger(self):
+        """An index that predates the table must gain it on open — no rebuild."""
+        with tempfile.TemporaryDirectory() as d:
+            db = os.path.join(d, "old.sqlite")
+            raw = sqlite3.connect(db)
+            raw.execute("CREATE TABLE docs (id TEXT PRIMARY KEY, source TEXT, ref TEXT, "
+                        "hash TEXT, updated_at TEXT)")
+            raw.commit()
+            raw.close()
+            code, _, _ = self._main(["--stats", "--db", db])
+            self.assertEqual(code, 0)
+            conn = sqlite3.connect(db)
+            try:
+                self.assertIsNotNone(conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name = 'provenance_refusals'").fetchone())
+                self.assertEqual(pg.ledger_rows(conn), [])   # present and empty, not missing
+            finally:
+                conn.close()
 
 
 class Cli(unittest.TestCase):

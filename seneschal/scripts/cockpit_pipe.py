@@ -28,6 +28,11 @@ Layering rules (mirrors discord_gateway.py's split):
 cockpit/server/ deliberately does NOT import this module (its own dependency world — cockpit-spec.md
 ruling 3); it duplicates the small set of frame-type constants it needs. Keep the two in sync by hand
 if the protocol changes.
+
+The transcript ring buffer below stays destructive ON PURPOSE — it is the WINDOW, and
+`transcript_archive.py` is the HISTORY. Don't "fix" `_maybe_trim` to stop trimming: the durable,
+never-rewritten record already lives in `transcript_archive.py`, and duplicating it here would be the
+mistake, not the feature.
 """
 from __future__ import annotations
 
@@ -43,13 +48,30 @@ try:  # a sanctioned daemon dependency (pyproject.toml); absent on a stale inter
 except ImportError:  # pragma: no cover - exercised via pipe_available() in tests
     websockets = None
 
+# Strips a leading channel-routing declaration from a turn's reply before it reaches `reply_preview`
+# (the marker is routing metadata, never text for the owner or the trace panel). Optional: without the
+# module the reply passes through unchanged — exactly the behaviour before channel declarations existed.
+try:
+    import channel_declare
+except ImportError:  # pragma: no cover — degrade to an unstripped preview
+    channel_declare = None
+
+# The durable archive this ring buffer is the volatile half of (transcript_archive.py). Stdlib-only
+# sibling, but guarded anyway: a missing archive must degrade to a plain trimming ring rather than take
+# the transcript tee, and with it every chat turn, down with it.
+try:
+    import transcript_archive
+except ImportError:  # pragma: no cover — defensive; both files ship together
+    transcript_archive = None
+
 # --------------------------------------------------------------------------------------- constants
 
 DEFAULT_PORT = 8471  # localhost-only; override via presence.py's --cockpit-port / cockpit.env
 
 PIPE_TOKEN_FILE = "cockpit-pipe-token"          # plain text, gitignored; auto-generated on first run
 TRANSCRIPT_FILE = "warm-transcript.jsonl"        # ring buffer backing GET /api/transcript backfill
-TRANSCRIPT_CAP = 2000                            # rewritten-tail cap (see _maybe_trim)
+TRANSCRIPT_CAP = 2000                            # hard row ceiling — the backstop, not the policy
+TRANSCRIPT_SESSION_CAP = 25                      # whole sessions kept (see _session_aware_tail)
 INBOX_FILE = "cockpit-inbox.jsonl"               # fallback queue when the pipe is down
 INBOX_SEEN_FILE = "cockpit-inbox-seen.json"      # small dedupe ledger for the fallback drain
 INBOX_SEEN_CAP = 500
@@ -171,8 +193,13 @@ def status_frame(**fields) -> dict:
 
 def chat_event(kind: str, **fields) -> dict:
     """One digestible transcript event — a turn start/output/tool-use/turn-done marker. `kind` in use:
-    turn_started | assistant_output | tool_use | turn_done. None-valued fields are dropped so frames
-    stay small; ts is always stamped here so every producer gets it for free."""
+    turn_started | assistant_output | tool_use | turn_done | interleaved. None-valued fields are
+    dropped so frames stay small; ts is always stamped here so every producer gets it for free.
+
+    `interleaved` is emitted by the daemon when a message arriving mid-turn is folded into the turn
+    already in flight — it carries the SAME `turn_id` as the exchange it folded into, never a new
+    `turn_started`, so a tolerant cockpit reader appends it to the existing turn card as an extra
+    block rather than rendering a duplicate turn."""
     ev = {"type": TYPE_CHAT_EVENT, "kind": kind,
           "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
     for k, v in fields.items():
@@ -221,15 +248,27 @@ def build_chat_event_from_stream(ev: dict, source: str, model: str | None = None
                           text=_preview("\n".join(text_parts), 4000) if text_parts else None,
                           tool_uses=tools or None)
     if t == "result":
+        # A leading channel declaration must never reach the owner, and the trace panel is a consumer
+        # of the same `reply` text — strip it here too, before it becomes a preview. A no-op on the
+        # vast majority of events (nothing matches the pattern), and idempotent on a turn whose
+        # "result" is just the bare marker line — stripped, its preview is simply empty.
+        result_text = ev.get("result") or ""
+        if channel_declare is not None:
+            _, result_text = channel_declare.extract_channel_declaration(result_text)
         return chat_event("turn_done", source=source, model=model,
                           is_error=bool(ev.get("is_error")),
-                          reply_preview=_preview(ev.get("result") or "", 400) or None,
+                          reply_preview=_preview(result_text, 400) or None,
                           duration_ms=ev.get("duration_ms"), num_turns=ev.get("num_turns"),
                           total_cost_usd=ev.get("total_cost_usd"), usage=ev.get("usage"))
     return None
 
 
 # --------------------------------------------------------------------------------- transcript ring buffer
+#
+# This half is VOLATILE by design and stays that way: capped, session-aware, destructively rewritten by
+# `_maybe_trim`. What makes that acceptable is that `append_transcript_event` also tees every event to
+# `transcript_archive`, a dated append-only file that is never rewritten — so the ring is a window and
+# the archive is the history. Do not "fix" the trimming here; the durability lives next door.
 
 _transcript_lock = threading.Lock()  # append can come from a worker thread (the warm session's stdout
                                      # reader, via broadcast_threadsafe's sibling call site in
@@ -240,9 +279,57 @@ def transcript_path(state_dir: str) -> str:
     return os.path.join(state_dir, TRANSCRIPT_FILE)
 
 
+def _session_aware_tail(lines: list) -> list:
+    """The last `TRANSCRIPT_SESSION_CAP` WHOLE sessions, bounded by `TRANSCRIPT_CAP` rows.
+
+    **The retention unit is the session, because the trace view's unit is the session.** A pure row cap
+    evicts mid-session, so an old session could be *present but truncated* — which reads as "not much
+    happened" rather than "we dropped most of it", the worse of the two failures. It also lets one busy
+    day evict a quiet week.
+
+    The row cap stays as a **backstop, not the policy**: a single pathological session must not be
+    able to grow the file without bound. When it bites we keep whole sessions from the newest
+    backwards until the next one would not fit, and always at least one — a session bigger than the
+    entire cap is kept truncated rather than dropped, because a truncated newest session is still the
+    thing you opened the trace to look at.
+
+    Rows without a `session_id` (written before events carried one) group under a single `None` bucket
+    and are aged out together, which is correct: they are not attributable to any session anyway."""
+    groups: list = []            # [(session_id, [lines])], in file order
+    for ln in lines:
+        sid = None
+        try:
+            obj = json.loads(ln)
+            if isinstance(obj, dict):
+                sid = obj.get("session_id")
+        except (TypeError, ValueError):
+            pass                  # a corrupt line rides with its neighbours rather than splitting them
+        if groups and groups[-1][0] == sid:
+            groups[-1][1].append(ln)
+        else:
+            groups.append((sid, [ln]))
+
+    kept: list = []
+    sessions = 0
+    for sid, chunk in reversed(groups):
+        if sessions >= TRANSCRIPT_SESSION_CAP:
+            break
+        if kept and len(kept) + len(chunk) > TRANSCRIPT_CAP:
+            break
+        kept = chunk + kept
+        sessions += 1
+    # The backstop has to actually stop. The first chunk is taken whole so that a single session
+    # bigger than the entire cap is kept truncated rather than dropped — but "truncated" has to mean
+    # truncated, so the row ceiling is enforced here unconditionally afterwards. Without this line a
+    # pathological session (or the session-less legacy rows, which all share one `None` bucket) grows
+    # the file without bound, which is a backstop that backstops nothing.
+    return kept[-TRANSCRIPT_CAP:] if len(kept) > TRANSCRIPT_CAP else kept
+
+
 def _maybe_trim(path: str, slack: int = 200) -> None:
-    """Rewrite the file to its last TRANSCRIPT_CAP lines once it has grown TRANSCRIPT_CAP + slack past
-    the cap — amortizes the rewrite cost instead of paying it on every single append."""
+    """Rewrite the file to its retained tail once it has grown TRANSCRIPT_CAP + slack past the cap —
+    amortizes the rewrite cost instead of paying it on every single append. What "retained" means is
+    `_session_aware_tail`'s job."""
     try:
         with open(path, "r", encoding="utf-8") as fh:
             lines = fh.readlines()
@@ -250,7 +337,7 @@ def _maybe_trim(path: str, slack: int = 200) -> None:
         return
     if len(lines) <= TRANSCRIPT_CAP + slack:
         return
-    tail = lines[-TRANSCRIPT_CAP:]
+    tail = _session_aware_tail(lines)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         fh.writelines(tail)
@@ -258,14 +345,24 @@ def _maybe_trim(path: str, slack: int = 200) -> None:
 
 
 def append_transcript_event(state_dir: str, event: dict) -> None:
-    """Append one digestible event to the ring buffer. Callers (presence.py) wrap this in a broad
-    try/except — a tee failure (disk full, bad permissions) must never break a chat turn."""
+    """Append one digestible event to the ring buffer, AND to the durable archive beside it. Callers
+    (presence.py) wrap this in a broad try/except — a tee failure (disk full, bad permissions) must
+    never break a chat turn.
+
+    **The archive call lives here rather than at the call sites**, so that "everything in the ring is
+    also in the archive" is structural instead of remembered: a future caller of this function cannot
+    bypass it. The ring keeps its cap, its session-aware trim and its readers exactly as they were; the
+    archive is purely additive, appends the same event to a dated file that is never rewritten, and
+    `archive_event` never raises (see transcript_archive.py). It runs OUTSIDE the ring's lock so it can
+    neither lengthen that critical section nor wedge the write that backs the live pane."""
     path = transcript_path(state_dir)
     os.makedirs(state_dir, exist_ok=True)
     with _transcript_lock:
         with open(path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(event, ensure_ascii=False) + "\n")
         _maybe_trim(path)
+    if transcript_archive is not None:
+        transcript_archive.archive_event(state_dir, event)
 
 
 def read_transcript_tail(state_dir: str, limit: int = 200) -> list:

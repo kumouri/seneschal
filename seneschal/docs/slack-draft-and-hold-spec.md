@@ -1,6 +1,6 @@
 # Slack draft-and-hold — reply drafting design
 
-**Status:** `BUILT(phase 1 is the whole feature)` — Phase 1 shipped (owner sign-off; SSOT seeded + Q4 revised during sign-off). ·
+**Status:** `BUILT(phase 1 is the whole feature; phase 2 deferred)` — Phase 1 shipped (owner sign-off; SSOT seeded + Q4 revised during sign-off). ·
 **Owner:** the assistant · **Scope:** `subagents/slack-triage/SKILL.md`, `seneschal/references/` (a new
 pinned SSOT reference + small edits to `comms-mapping.md` / `memory.md` / `advisor-chain.md` /
 `autonomy-policy.md`), additive fields on `seneschal/state/pending-approvals.json`, and the daemon
@@ -397,3 +397,13 @@ loop pointers), `seneschal/references/memory.md` + `seneschal/state/README.md` (
 10. **Volume guard.** ≤ 3 auto-drafts per triage pass (proposed) — right number?
 11. **Scheduled sends.** Is `slack_schedule_message` in scope ("send this at 9am") — same hold loop,
     send-time freshness re-check at the *scheduled* moment is impossible, so propose: out of scope v1?
+
+## Router entry
+
+**Status:** BUILT (phase 1 is the whole feature; phase 2 deferred).
+
+**What it decides:** **Nothing Slack-outbound sends itself.** The assistant drafts a reply from a
+pinned SSOT (`../references/slack-ssot.md`) and HOLDS it; the send is ask-high, every time. Phase 1 is
+the whole feature by decision — phase 2's code rail earns itself only with the broader advisor-rails
+work. Carries the **derivation contract** (a fact not derivable from the SSOT may not be asserted), the
+**restricted-facts tier**, and the ≤3 auto-draft volume guard.

@@ -135,13 +135,34 @@ class NotAnAlarmThatGetsMuted(_Case):
         self.assertIn("2c", shown)
         self.assertFalse(self._row("2c")["measured"])
 
-    def test_every_declared_owner_exists_in_this_directory(self):
+    def test_every_declared_owner_exists(self):
         """An `owner` is a claim that a script calls `record`. A name that points at nothing can
-        never stamp, so the step would read `never` forever — the false alarm this guards."""
+        never stamp, so the step would read `never` forever — the false alarm this guards. Owners
+        live in this directory unless the step names a repo-relative `owner_dir`."""
         for step, meta in ds.STEPS.items():
             if meta["owner"]:
-                self.assertTrue(os.path.isfile(os.path.join(SCRIPT_DIR, meta["owner"])),
+                where = (os.path.join(ds.REPO_ROOT, meta["owner_dir"]) if meta.get("owner_dir")
+                         else SCRIPT_DIR)
+                self.assertTrue(os.path.isfile(os.path.join(where, meta["owner"])),
                                 f"{step}: owner {meta['owner']} missing")
+
+    def test_an_only_if_step_is_listed_but_never_alarmed_when_its_component_is_absent(self):
+        """2e belongs to the shipped Proteus archon; an install that never deployed it must not be
+        nudged nightly that the archon's promotion "stopped running"."""
+        with tempfile.TemporaryDirectory() as root, mock.patch.object(ds, "REPO_ROOT", root):
+            ds.ensure_ledger(self.d, now=FOUND_ON - timedelta(days=365))
+            self.assertIn("2e", {r["step"] for r in ds.report(self.d, FOUND_ON)})
+            self.assertFalse(self._row("2e")["measured"])
+            self.assertNotIn("2e", {r["step"] for r in ds.stale(self.d, FOUND_ON)})
+
+    def test_an_only_if_step_alarms_once_its_component_is_deployed(self):
+        with tempfile.TemporaryDirectory() as root, mock.patch.object(ds, "REPO_ROOT", root):
+            marker = os.path.join(root, ds.STEPS["2e"]["only_if"])
+            os.makedirs(os.path.dirname(marker))
+            with open(marker, "w", encoding="utf-8") as fh:
+                fh.write("{}")
+            ds.ensure_ledger(self.d, now=FOUND_ON - timedelta(days=365))
+            self.assertIn("2e", {r["step"] for r in ds.stale(self.d, FOUND_ON)})
 
     def test_the_nudge_is_once_per_day(self):
         self.assertIsNone(ds.last_nudged(self.d))

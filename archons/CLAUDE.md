@@ -1,10 +1,12 @@
 # archons/ — the assistant's Archon staff
 
-**The one rule that exists nowhere else in this repo: an archon never writes a tracked file
+**The one rule that exists nowhere else in this repo: an archon never writes its curated inputs
 directly.** It appends to a gitignored pending queue under its own `state/` and Dream promotes it
-by PR (the shipped example: `archons/proteus/tools/record_intel.py` → `promote_intel.py`), so the
-live checkout never goes permanently dirty — a dirty checkout blocks the daemon's ff-pull and arms
-the pull-failed reload bug.
+(the shipped example: `archons/proteus/tools/record_intel.py` → `promote_intel.py`). Owner data such
+as Proteus's `company-intel.json` is gitignored, so the default promotion is a LOCAL merge — no git.
+`--via-pr` (private forks only; it publishes the file to the checkout's remote) opens a PR instead.
+Either way a tracked file never changes under the live checkout — a dirty checkout blocks the
+daemon's ff-pull and arms the pull-failed reload bug.
 
 **The gitignore trap:** an archon that tracks an `out/README.md` must spell `out/*` plus
 `!out/README.md` in BOTH gitignores — `archons/<id>/`'s own, and the repo root's net; git never
@@ -31,8 +33,8 @@ tracked inputs + `tools/` (only if it HAS tools — an empty dir is scaffolding 
 its OWN `.gitignore`; **`state/`** = runtime churn (ledgers, latest-caches, queues, sentinels, logs —
 gitignored except `README.md` and `*.example.*`) and **`out/`** = deliverables (drafts, digests,
 generated views — gitignored; they carry the owner's personal data), except a README where one
-exists (mind the trap above). Private inputs (`profile.json`, `watchlist.json`, `voice-profile.md`)
-are gitignored; only their `*.example.*` twins are tracked.
+exists (mind the trap above). Private inputs (`profile.json`, `watchlist.json`, `voice-profile.md`,
+Proteus's `company-intel.json`) are gitignored; only their `*.example.*` twins are tracked.
 
 The shipped example is **`proteus/`** (a job-application archon): `profile.example.json`, `tools/`
 (stdlib tools — `tools/proteus_paths.py` is the single source of truth for its paths), and a

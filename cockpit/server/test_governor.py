@@ -150,5 +150,61 @@ class Rollups(unittest.TestCase):
         self.assertEqual(roll["fable_oneshots"]["week"], 1)
 
 
+class BasisAwareRollups(unittest.TestCase):
+    """The two-basis split, mirrored from seneschal/scripts/governor.py. The cockpit reads
+    figures already derived on disk — it must NOT re-derive weights (there is no third copy of the
+    ratios), but it does have to agree on the fallback and on naming the basis."""
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        self.now = datetime(2026, 7, 18, 20, 0, tzinfo=timezone.utc)
+
+    def _write_ledger(self, lines):
+        with open(gv.ledger_path(self.dir), "w", encoding="utf-8") as fh:
+            for line in lines:
+                fh.write(json.dumps({"ts": "2026-07-18T20:00:00Z", **line}) + "\n")
+
+    def test_legacy_row_falls_back_to_raw(self):
+        self._write_ledger([{"kind": "tokens", "model": "m", "tokens": 1000}])
+        roll = gv.rollups(self.dir, now=self.now)
+        self.assertEqual(roll["billable_by_model"]["day"]["m"], 1000)
+        self.assertEqual(roll["basis_by_model"]["day"]["m"], gv.BASIS_RAW)
+
+    def test_billable_row_uses_the_breakdown(self):
+        self._write_ledger([{"kind": "tokens", "model": "m", "tokens": 1000,
+                             "billable_tokens": 150}])
+        roll = gv.rollups(self.dir, now=self.now)
+        self.assertEqual(roll["billable_by_model"]["day"]["m"], 150)
+        self.assertEqual(roll["tokens_by_model"]["day"]["m"], 1000)
+        self.assertEqual(roll["basis_by_model"]["day"]["m"], gv.BASIS_BILLABLE)
+
+    def test_mixed_day_is_labelled_mixed(self):
+        self._write_ledger([
+            {"kind": "tokens", "model": "m", "tokens": 1000},
+            {"kind": "tokens", "model": "m", "tokens": 1000, "billable_tokens": 150},
+        ])
+        roll = gv.rollups(self.dir, now=self.now)
+        self.assertEqual(roll["basis_by_model"]["day"]["m"], gv.BASIS_MIXED)
+
+    def test_fable_oneshot_tokens_are_counted(self):
+        self._write_ledger([{"kind": "fable_oneshot", "model": "claude-fable-5", "tokens": 900,
+                             "billable_tokens": 120}])
+        roll = gv.rollups(self.dir, now=self.now)
+        self.assertEqual(roll["billable_by_model"]["day"]["claude-fable-5"], 120)
+        self.assertEqual(roll["fable_oneshots"]["day"], 1)
+
+    def test_unmetered_rows_are_counted_separately_not_as_zero_spend(self):
+        self._write_ledger([{"kind": "fable_oneshot", "model": "claude-fable-5",
+                             "metered": "unavailable"}])
+        roll = gv.rollups(self.dir, now=self.now)
+        self.assertEqual(roll["unmetered_by_model"]["day"]["claude-fable-5"], 1)
+        self.assertNotIn("claude-fable-5", roll["billable_by_model"]["day"])
+
+    def test_empty_ledger_still_carries_every_key(self):
+        roll = gv.rollups(self.dir, now=self.now)
+        for key in ("tokens_by_model", "billable_by_model", "basis_by_model", "unmetered_by_model"):
+            self.assertEqual(roll[key], {"day": {}, "week": {}}, key)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -17,8 +17,21 @@ A dealbreaker keyword caps the total at 25 and flags the job.
 
 Post-band adjustments nudge the total before decay: `preferences` keyword boosts (SATURATED —
 positives flatten toward a +10 cap, skills-map words excluded as already counted; see
-`preference_boost`) and a small west-is-better timezone tilt for remote roles (`timezone_tilt` —
-never a penalty).
+`preference_boost`), a graded company-intel adjustment (`company-intel.json` — durable employer
+facts the archon's work-ups learned: layoffs, benefits, culture; company-field match, clamped ±20,
+with not-yet-promoted proposals from `state/company-intel-pending.jsonl` layered on top — see
+`load_company_intel`), a small west-is-better timezone tilt for remote roles (`timezone_tilt` —
+never a penalty), and two ghost filters that ask the same question of different fields: the
+**company** one ("is this employer name a staffing front?", `AGGREGATOR_PENALTY`) and the **source**
+one ("did this posting arrive as somebody else's copy?", `SOURCE_GHOST_PENALTY` over
+`source_tiers.ghost_risk`). Both flag; only the larger of the two is ever charged.
+
+Ahead of the company one sits a third thing that only ever FLAGS: an employer already corrected
+upstream from the req's own ATS apply URL (`fetch_jobs.attribute_employers`) is announced as
+corrected, with what the feed had originally claimed. The company filter then reads the CORRECTED
+name, so proving a real employer behind a reposter's byline lifts that dock — which is the dock's own
+flag ("verify the real company") being satisfied rather than evaded. The source filter asks a
+different question and is unaffected.
 
 Then **age decay multiplies the total** (`age_decay`, applied last — after preference boosts,
 so a dead posting's boosts can't rescue it). A filled role is worth nothing however well it
@@ -39,8 +52,10 @@ import re
 import sys
 import time
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 from proteus_comp import comp_from_text
+from source_tiers import ghost_risk
 
 
 def _word_hit(text: str, keyword: str) -> bool:
@@ -348,26 +363,109 @@ def _location_claims_remote(job: dict) -> bool:
     return _word_hit((job.get("location") or "").lower(), "remote")
 
 
+# --- "Remote" meaning "not at OUR office" ---------------------------------------------------------
+# A consultancy's *Onsite … Client Partner* req can arrive from an aggregator with remote=True and
+# location "Anywhere", because the employer's "remote" meant *you won't sit at our office — you'll sit
+# at our CLIENTS' sites*. Its own title says ONSITE, and `classify_remote` never looked: a structured
+# remote flag short-circuited to "remote" before any onsite evidence was consulted.
+#
+# A title is a label the employer chose, not prose we're interpreting, so an ONSITE word in it carries
+# the same authority as Ashby's workplace-type dropdown — and outranks the structured flag.
+#
+# Deliberately NOT extended to client-site / travel language in the BODY. Measured over a live
+# multi-thousand-posting board, "at client sites" and "N% travel" each hit hundreds of rows —
+# including product-company Forward-Deployed / Solutions-Architect field roles that are exactly the
+# kind of target a profile wants, not the trick. That is the same over-firing that made the first cut
+# of `legal_risk_flags` useless. An employer that IS a body shop is a durable fact about the employer —
+# it belongs in company-intel.json, not in a regex over every JD that mentions a customer.
+_TITLE_ONSITE = re.compile(r"\bon[\s-]?site\b|\bin[\s-]?office\b", re.I)
+
+
+def title_onsite(job: dict) -> str | None:
+    """An ONSITE / in-office word in the job TITLE — authoritative, like `structured_onsite`.
+
+    Suppressed when the title also says "remote" ("Engineer (Remote or Onsite)"): there the employer
+    is naming a real remote option, the same carve-out `structured_onsite` makes for the location
+    field. Most title-onsite postings carry no such alternative.
+    """
+    title = job.get("title") or ""
+    match = _TITLE_ONSITE.search(title)
+    if not match or re.search(r"\bremote\b", title, re.I):
+        return None
+    if _negated(title.lower(), match.start()):
+        return None
+    return match.group(0).lower().replace(" ", "-")
+
+
+_SRC_ATS = "its own ATS data"
+_SRC_TITLE = "its own title"
+
+
+def authoritative_onsite(job: dict) -> tuple[str, str] | None:
+    """The strongest onsite signal the *employer itself* stated, as (what, where-we-read-it), or None.
+
+    Structured field first (Ashby's dropdown / the type Greenhouse bakes into the location), then the
+    title label. Both outrank prose; neither is us interpreting a stray word. Both source phrases are
+    grammatically singular so one "…says…" sentence reads correctly whichever fired.
+    """
+    structured = structured_onsite(job)
+    if structured:
+        return structured, _SRC_ATS
+    titled = title_onsite(job)
+    if titled:
+        return titled, _SRC_TITLE
+    return None
+
+
 def remote_contradiction(job: dict) -> str | None:
-    """A one-line indictment when a posting's own fields contradict its 'Remote' billing, else None.
+    """A one-line indictment when a posting's own data contradicts its 'Remote' billing, else None.
 
     Not a judgement about whether the job is good — a report that its structured data and its
     marketing disagree, so the owner can see who is doing it.
+
+    Two ways a posting bills itself remote: the word in the location field ("San Francisco, Remote"),
+    or the board's structured ``remote`` flag. Both are checked, because the trick arrives either way.
     """
-    if not _location_claims_remote(job):
+    claims_remote = _location_claims_remote(job) or job.get("remote") is True
+    if not claims_remote:
         return None
-    onsite_type = structured_onsite(job)
+    onsite = authoritative_onsite(job)
     explicit_not_remote = job.get("remote") is False
-    if not onsite_type and not explicit_not_remote:
+    if not onsite and not explicit_not_remote:
         return None
     says = []
     if explicit_not_remote:
         says.append("remote=false")
-    if onsite_type:
-        says.append(f"workplace_type={onsite_type}")
-    return (f"misleading: the posting bills itself '{job.get('location')}' while its own ATS fields say "
-            f"{' and '.join(says)}. The board data contradicts the listing — treat 'Remote' here as a "
+    if onsite:
+        # A structured field is quoted as the field it is; a title label is quoted as the word the
+        # employer actually printed ("ONSITE"), because that is what the owner would see on the listing.
+        says.append(f"workplace type {onsite[0]}" if onsite[1] == _SRC_ATS else onsite[0].upper())
+    where = onsite[1] if onsite else _SRC_ATS
+    billing = job.get("location") if _location_claims_remote(job) else "Remote"
+    return (f"misleading: the posting bills itself '{billing}' while {where} says "
+            f"{' and '.join(says)}. Its own data contradicts the listing — treat 'Remote' here as a "
             f"claim, not a fact, and verify at source before spending anything on it.")
+
+
+def commutable_office(job: dict, profile: dict) -> bool:
+    """True when any location the posting names is inside the profile's commute zone.
+
+    Extracted from `classify_remote` so the onsite-cap exemption (`location_conflict_flags`) asks the
+    geography question through the SAME code the verdict does. Two copies of "is this drivable?" that
+    disagree is how an exemption meant to skip the days cap quietly starts skipping the commute
+    ceiling too.
+
+    Deliberately a SUBSTRING match, unlike `_word_hit` everywhere else: `commutable_locations` holds
+    town names to find *inside* a location string ("Greater Springfield Area"), and the list carries
+    state suffixes on the ambiguous ones for the precision `_word_hit` would otherwise supply.
+
+    Note what this does NOT consult: `max_commute_minutes_one_way`. That field is the stated ceiling
+    and the number the relocation flag quotes, but the curated town list is what actually screens —
+    so when the ceiling changes, the list is what has to be re-derived.
+    """
+    commutable_list = profile.get("commutable_locations", [])
+    locs = [loc.lower() for loc in effective_locations(job)]
+    return any(c in loc for loc in locs for c in commutable_list)
 
 
 def classify_remote(job: dict, profile: dict, text: str) -> str:
@@ -376,21 +474,28 @@ def classify_remote(job: dict, profile: dict, text: str) -> str:
 
       remote      structured remote flag / 'remote' in a location token, no onsite contradiction
       remote?     remote only *mentioned* in the text — verify before trusting
-      commutable  an office inside the profile's commute zone (profile commutable_locations)
+      commutable  an office inside the profile's commute zone (profile `commutable_locations`; the
+                  stated ceiling is `max_commute_minutes_one_way`)
       relocation  explicitly onsite / too many onsite days / a real non-commutable city, no clean remote
       unknown     no location information at all to judge
+
+    UNTOUCHED by the onsite-cap exemption, on purpose: the `onsite_days_conflict` branch below only
+    decides anything when the office is NOT commutable, so it is the *geography* screen wearing a
+    days-shaped mask. An exempt title must not buy a role past geography. The exemption lives in
+    `location_conflict_flags`, which is where the days cap actually screens an in-range role.
     """
-    commutable_list = profile.get("commutable_locations", [])
     locs = [loc.lower() for loc in effective_locations(job)]
-    commutable = any(c in loc for loc in locs for c in commutable_list)
+    commutable = commutable_office(job, profile)
     has_location = bool(locs)
 
     onsite = onsite_days_from_text(text)
     max_onsite = profile.get("max_onsite_days_per_week")
     onsite_days_conflict = bool(onsite and max_onsite is not None and onsite[0] > max_onsite)
     # A structured workplace_type of Hybrid/Onsite (Ashby et al.) is an authoritative onsite signal —
-    # it means some days in the named office, so a non-commutable one is relocation.
-    wt_onsite = bool(structured_onsite(job))
+    # it means some days in the named office, so a non-commutable one is relocation. An ONSITE word
+    # in the TITLE counts the same (`title_onsite`): it is a label the employer chose, not prose, so
+    # it outranks the structured remote flag rather than losing to it.
+    wt_onsite = bool(authoritative_onsite(job))
     explicit_onsite = _explicit_onsite(text) or wt_onsite
 
     # Only a hard DAYS conflict ("3 days/week onsite") overrides a real remote flag — a stray
@@ -433,8 +538,16 @@ _US_STATE_ABBR = ("al","ak","az","ar","ca","co","ct","de","fl","ga","hi","id","i
     "ky","la","me","md","ma","mi","mn","ms","mo","mt","ne","nv","nh","nj","nm","ny","nc","nd","oh",
     "ok","or","pa","ri","sc","sd","tn","tx","ut","vt","va","wa","wv","wi","wy","dc")
 _US_POSITIVE = re.compile(
-    r"\bunited states\b|\bu\.?s\.?a\.?\b|\bu\.?s\.?\b|\bamericas\b|north america|\bworldwide\b"
+    # `amer` is the standard abbreviation for Americas and shows up paired with the foreign region
+    # abbreviations in multi-region billings ("… (EMEA/AMER)"). Without it, the EMEA half tripped the
+    # foreign check while the AMER half — the part that makes the role reachable — went unread.
+    # `\bamer\b` can't match "American"/"America" (no word boundary mid-word), so it adds no other reach.
+    r"\bunited states\b|\bu\.?s\.?a\.?\b|\bu\.?s\.?\b|\bamericas\b|\bamer\b|north america|\bworldwide\b"
     r"|\banywhere\b|\bglobal(?:ly)?\b|\bnationwide\b|remote[\s,\-]*(?:us\b|u\.s\.|united states|usa)", re.I)
+# Content-free locations an aggregator stamps on anything remote. Not evidence of US eligibility —
+# see the "SPECIFIC BEATS VAGUE" note in us_work_eligible.
+_VAGUE_LOCATION = re.compile(
+    r"\s*(?:anywhere|remote|worldwide|global(?:ly)?|various|multiple locations|n/?a|-{1,2})\s*", re.I)
 _FOREIGN_MARK = re.compile(
     r"\b(?:india|canada|united kingdom|\buk\b|england|scotland|germany|deutschland|france|spain|italy"
     r"|netherlands|ireland|poland|romania|portugal|sweden|norway|denmark|finland|switzerland|austria"
@@ -548,19 +661,138 @@ def remote_region_claim(job: dict) -> str | None:
     return None
 
 
+# --- location buried in a pipe-delimited TITLE ------------------------------------------------------
+# Some aggregators syndicate ATS postings with `location: ""` and the location piped INTO the title:
+# "Software Engineer - Synthetic Monitoring | Germany | Remote". Every region check in this file reads
+# job['location'], got "", took the no-location benefit of the doubt, and a German req alerted as a
+# strong US match. Same shape as the HN "REMOTE (Europe)" miss — the truth is in the text and the
+# structured field misleads — so it gets the same treatment.
+#
+# Consulted ONLY when the structured location is empty, and only on pipe-delimited segments (a
+# deliberate convention on both feeds), so it cannot misread a title that merely mentions a place.
+# The length cap keeps it to a segment that IS a location rather than one that contains a country
+# name in passing.
+_TITLE_SEGMENT_MAX = 30
+
+
+def title_location_segments(job: dict) -> list[str]:
+    """Pipe-delimited title segments after the first — the convention arbeitnow and HN both use to
+    carry location / comp / employment type. Empty when the posting has a real structured location."""
+    if (job.get("location") or "").strip():
+        return []
+    return [seg.strip() for seg in (job.get("title") or "").split("|")[1:] if seg.strip()][:6]
+
+
+def foreign_title_segment(job: dict) -> str | None:
+    """The title segment naming a place the owner can't work from, or None. A US-positive segment
+    wins outright — "| Remote (US) |" is eligible however many other places the title lists."""
+    for segment in title_location_segments(job):
+        if _US_POSITIVE.search(segment):
+            return None
+        if len(segment) <= _TITLE_SEGMENT_MAX and _FOREIGN_MARK.search(segment.lower()):
+            return segment
+    return None
+
+
+# --- where the posting was PUBLISHED ----------------------------------------------------------------
+# A job URL's country domain is a cheap origin signal nothing was reading. The rule: a .co.uk posting
+# is LIKELY (but not necessarily) unworkable — so this SCRUTINISES. It flags every time, it breaks a
+# tie where there was nothing else to go on, and it NEVER overrides a posting that states a US
+# location. A UK-domiciled board can carry a real US remote req.
+#
+# The vanity TLDs are absent BY CONSTRUCTION, and that is the entire design of this list. Audited over
+# a live multi-thousand-posting board, a naive "foreign ccTLD" rule flags about a third of the board —
+# because `.io` is Greenhouse's own domain, `.co` is Lever's, and `.ai` is half the AI industry's.
+# Anguilla, Colombia and the British Indian Ocean Territory sell their TLDs to tech companies; the
+# countries below do not. Validate every addition against the hostnames on a live board before
+# adding it: the list must keep matching country boards and nothing else.
+_FOREIGN_DOMAIN_SUFFIXES = (
+    # multi-part first in spirit; the lookup sorts by length so ".co.uk" wins over ".uk"
+    "co.uk", "org.uk", "ac.uk", "com.au", "co.nz", "co.in", "co.jp", "co.za", "com.br",
+    "com.mx", "com.sg", "co.il",
+    # single-label country domains with no established vanity use (contrast .io/.ai/.co/.app/.me/.tv)
+    "uk", "de", "fr", "nl", "es", "it", "pl", "se", "no", "dk", "fi", "ie", "pt", "cz", "ro",
+    "gr", "ch", "at", "be", "hu", "sk", "bg", "hr", "si", "lt", "lv", "ee", "ru", "ua", "tr",
+    "jp", "kr", "cn", "tw", "hk", "br", "mx", "ar", "cl", "za", "il", "ae", "sa", "ph", "vn",
+    "th", "id", "my", "ng", "ke", "eg", "au", "nz", "in", "sg", "ca",
+)
+_FOREIGN_DOMAINS_BY_LENGTH = tuple(sorted(_FOREIGN_DOMAIN_SUFFIXES, key=len, reverse=True))
+
+
+def posting_hostname(job: dict) -> str:
+    """The job URL's hostname, lowercased and de-``www``'d, or '' when there isn't a usable one."""
+    try:
+        hostname = (urlparse(job.get("url") or "").hostname or "").lower().strip(".")
+    except ValueError:
+        return ""
+    return hostname[4:] if hostname.startswith("www.") else hostname
+
+
+def foreign_domain(job: dict) -> str | None:
+    """The country-specific domain a posting is published on ('.co.uk'), or None.
+
+    Longest suffix wins, so an arbeitnow.co.uk URL reports '.co.uk' rather than the less specific
+    '.uk'. Returns None for every vanity TLD — see the note above for why that is load-bearing.
+    """
+    hostname = posting_hostname(job)
+    if not hostname:
+        return None
+    for suffix in _FOREIGN_DOMAINS_BY_LENGTH:
+        if hostname.endswith("." + suffix):
+            return "." + suffix
+    return None
+
+
+def foreign_domain_flags(job: dict) -> list[str]:
+    """A visible note when a posting is published on a country board but still reads as US-eligible.
+
+    Informational ONLY — no score effect. Scrutinise hard, but a stated US location wins, because a
+    foreign-domiciled board can and does carry real US remote reqs. The case where the domain
+    actually *changes* the verdict is the no-location tie-break, and that one is reported by
+    `us_eligibility_flags` as a proper dealbreaker.
+    """
+    domain = foreign_domain(job)
+    if not domain or not us_work_eligible(job):
+        return []
+    return [f"origin: published on a {domain} board ({posting_hostname(job)}) — most roles there are "
+            f"not US-workable, but this one names a location that reads as US-eligible "
+            f"('{job.get('location')}'). Verify at source before investing."]
+
+
 def us_work_eligible(job: dict) -> bool:
     """False only when the posting clearly belongs to a foreign place with no US option."""
     loc = (job.get("location") or "")
     if posting_language_foreign(job):
         return False                                  # written in another language → not a US role
     if not loc.strip():
-        # No structured location — but an HN-style title may still name the region. Only a REMOTE(X)
-        # billing counts, and only when X is positively foreign: silence still means benefit of the
-        # doubt, so a genuinely-unlocated US post is unaffected.
+        # No structured location — but the title may still name the region, two ways: a pipe-delimited
+        # location segment ("… | Germany | Remote"), or an HN-style REMOTE(X) billing. Only a
+        # positively foreign name counts; silence still means benefit of the doubt, so a genuinely
+        # unlocated US post is unaffected.
+        if foreign_title_segment(job):
+            return False
         claim = remote_region_claim(job)
         if claim and not _US_POSITIVE.search(claim) and _FOREIGN_MARK.search(claim.lower()):
             return False
+        # Tie-break. With NO location anywhere, the benefit of the doubt below is a pure guess — and
+        # a country domain is evidence. Weak evidence, but strictly better than nothing, so it decides
+        # the coin-flip rather than overriding anything: a posting that states a location never
+        # reaches this branch at all.
+        if foreign_domain(job):
+            return False
         return True                                   # no location → assume US-remote (benefit of the doubt)
+    # SPECIFIC BEATS VAGUE. An aggregator that stamps every remote posting "Anywhere" otherwise
+    # laundered a plainly-stated foreign lock: "Staff AI Engineer | Ireland | Remote" with
+    # location="Anywhere" matches _US_POSITIVE on the very next line, so the "ireland" _FOREIGN_MARK
+    # already knows was never consulted. (Employers that do this often post a SEPARATE "| US | Remote"
+    # listing for the same role.) When the location is one of these content-free catch-alls, believe
+    # the title instead: a country named there is real information, "Anywhere" is not. Only fires when
+    # the title names a foreign region AND makes no US claim of its own, so a genuine "Anywhere" post —
+    # or one billed "| US | Remote" — is untouched.
+    if _VAGUE_LOCATION.fullmatch(loc.strip()):
+        title = (job.get("title") or "").lower()
+        if _FOREIGN_MARK.search(title) and not _US_POSITIVE.search(title):
+            return False
     if _US_POSITIVE.search(loc):
         return True                                   # US / worldwide / anywhere present (checked first so a
         #                                               multi-site "London; …; Remote-Friendly, United States"
@@ -596,26 +828,135 @@ def us_eligibility_flags(job: dict, profile: dict) -> list[str]:
     if lang:
         return [f"dealbreaker: not US work-eligible — posting is written in {lang} "
                 f"(location says '{job.get('location')}'); you're US-based and can't relocate"]
+    # The domain tie-break deserves its own sentence: "region-locked to 'an unstated non-US region'"
+    # would be true but useless, when what we actually know is *which board published it*.
+    domain = foreign_domain(job)
+    if domain and not (job.get("location") or "").strip():
+        return [f"dealbreaker: not US work-eligible — published on a {domain} board "
+                f"({posting_hostname(job)}) and states no location at all; you're US-based and "
+                "can't relocate. Verify at source if the employer looks worth it."]
     # Name the region from wherever we actually found it. Printing job['location'] read
     # "region-locked to 'None'" on exactly the postings this is for — HN posts have no location field,
     # which is why they slipped through in the first place.
-    where = job.get("location") or remote_region_claim(job) or "an unstated non-US region"
+    where = (job.get("location") or foreign_title_segment(job) or remote_region_claim(job)
+             or "an unstated non-US region")
     return [f"dealbreaker: not US work-eligible — role is region-locked to '{where}' "
             "(you're US-based and can't relocate)"]
 
 
+# --- The onsite-cap exemption (profile `onsite_cap_exempt_title_words`) -----------------------------
+# A profile may name a family of roles (e.g. robotics) for which Proteus stops enforcing
+# `max_onsite_days_per_week` and instead surfaces the role WITH ITS DAYS-PER-WEEK STATED, so the owner
+# judges each one. Empty/absent list = no exemption, which is the default.
+#
+# Read carefully what this is. It is a decision about PROTEUS'S AUTHORITY — *do not decide for the owner* —
+# and NOT a change in what the owner wants. So the exemption may only ever REMOVE a screen: it never
+# awards a point, a 5-day role is never ranked above a 2-day one for being 5-day, and Proteus must
+# NEVER assert on the owner's behalf — in a cover letter, an email, or anywhere — that they are open
+# to fully onsite work. Surfacing only. The flag text says so in as many words because Proteus reads
+# its own flags back when it drafts.
+#
+# UNCHANGED by the exemption, each one load-bearing:
+#   * **Relocation stays a hard no.** An exempt role in a non-commutable city is still a no.
+#   * **The commute ceiling still applies.** The exemption is gated on `commutable_office(...)`, so a
+#     role only reaches it once it is ALREADY in geographic range. It exempts the days cap ONLY.
+#   * Comp floor, non-compete and every other dealbreaker are untouched.
+#
+# THE TRAP, and why the match is narrow: an over-broad read turns this into *no onsite filter at
+# all*. The concrete case for a robotics-family list is RPA — "Robotic Process Automation" —
+# enterprise workflow software, roughly the opposite of a robotics role. Two guards, both
+# load-bearing:
+#   1. The signal is read from the **title**, never the description prose. "we work across robotics,
+#      healthcare and fintech" in a boilerplate paragraph is not a robotics role; a title is a label
+#      the employer chose — the same principle `title_onsite` already rests on.
+#   2. An explicit **RPA veto over the whole posting**, because some vendors do write "Robotics
+#      Process Automation", and that spelling defeats guard 1 on its own. "Robot Framework" — the
+#      Python TEST-automation tool — rides along in the same veto for the same reason: it is a QA
+#      req wearing the word.
+# `_word_hit` anchors on (?<![a-z0-9])...(?![a-z0-9]), so "robotics" genuinely cannot match
+# "robotic": list singular/plural variants explicitly. Under-matching is the safe direction — it
+# simply falls back to the cap being enforced.
+_EXEMPT_VETO = re.compile(r"\brobotics?\s+process\s+automation\b|\brpa\b|\buipath\b"
+                          r"|\bautomation\s+anywhere\b|\bblue\s+prism\b|\brobot\s+framework\b", re.I)
+
+
+def onsite_exempt_role(job: dict, profile: dict) -> str | None:
+    """The exempt title word when the posting's own TITLE names one — the narrow gate on the
+    onsite-cap exemption — else None.
+
+    The veto reads the title AND the description, not just the title: a req titled "Robotics
+    Developer" that spends its description on UiPath bots is exactly the collision this must lose.
+    A wrong veto costs nothing (the cap is enforced); a wrong exemption costs the screen entirely.
+    """
+    words = [str(w).lower() for w in (profile.get("onsite_cap_exempt_title_words") or []) if w]
+    if not words:
+        return None
+    title = (job.get("title") or "").lower()
+    hit = next((word for word in words if _word_hit(title, word)), None)
+    if not hit:
+        return None
+    if _EXEMPT_VETO.search(f"{job.get('title') or ''}\n{job.get('description') or ''}"):
+        return None
+    return hit
+
+
+def onsite_days_statement(text: str) -> str:
+    """How many days/week onsite the POSTING says — or "not stated". Never inferred.
+
+    A surfaced exempt role carries its days-per-week so the owner can judge it, and a posting that
+    gives no number renders "not stated" rather than a guess. An unstated value must never read as
+    compliant — silence about the schedule is the thing the owner needs to SEE, not a reason to
+    assume the cap is met.
+    """
+    onsite = onsite_days_from_text(text)
+    if not onsite:
+        return "onsite days/week: not stated"
+    return f"onsite days/week: {onsite[0]} (posting says '{onsite[1]}')"
+
+
 def location_conflict_flags(text: str, job: dict, profile: dict, bands: dict) -> list[str]:
-    """Cross-check the posting text against the structured location read; may dock the band."""
+    """Cross-check the posting text against the structured location read; may dock the band.
+
+    This is where `max_onsite_days_per_week` screens a role the owner could actually commute to, and
+    so it is where the onsite-cap exemption lives — see the block comment above `onsite_exempt_role`.
+    """
     flags = []
     max_onsite = profile.get("max_onsite_days_per_week")
     onsite = onsite_days_from_text(text)
+    # The exemption covers the DAYS cap, and only for a role already inside the commute zone.
+    exempt_word = onsite_exempt_role(job, profile) if commutable_office(job, profile) else None
+    contradicted = "; structured remote flag contradicted by posting text" if job.get("remote") is True else ""
     if onsite and max_onsite is not None and onsite[0] > max_onsite:
-        contradicted = "; structured remote flag contradicted by posting text" if job.get("remote") is True else ""
+        if exempt_word:
+            # Surfaced, NOT docked, and NOT sold as acceptable. The contradiction half of the note
+            # survives the exemption: "billed remote, actually N days onsite" is a misrepresentation
+            # the owner still needs to see, and it is not what the exemption waived.
+            flags.append(
+                f"onsite-cap exemption: {onsite_days_statement(text)} — over the "
+                f"{max_onsite}-day max, surfaced anyway for YOUR call, because the title says "
+                f"'{exempt_word}' and the office is inside your commute zone{contradicted}. NOT a "
+                "sign-off: the owner has not said they are open to this many onsite days, so never "
+                "represent them as open to it.")
+        else:
+            flags.append(
+                f"location: ~{onsite[0]} days/week onsite per posting text ('{onsite[1]}') — "
+                f"over the {max_onsite}-day max{contradicted}"
+            )
+            bands["location"] = min(bands["location"], 3.0)
+    elif exempt_word and not onsite and (_ONSITE_ANCHOR.search(text) or authoritative_onsite(job)):
+        # An in-range exempt role that wants the owner in an office but never says how often. Say so
+        # out loud: with the cap not being enforced here, silence would otherwise read as compliant,
+        # and nobody is checking.
+        #
+        # The office signal here is `_ONSITE_ANCHOR` — the same anchor `onsite_days_from_text` scans
+        # around, so this branch fires exactly where that one looked and found no number. It is
+        # looser than `_explicit_onsite` (it takes a bare "hybrid", and runs no negation check) on
+        # purpose: this branch only ever ADDS A SENTENCE and never docks a band, so a false positive
+        # costs one line of text while a false negative costs the precise silence this is about.
         flags.append(
-            f"location: ~{onsite[0]} days/week onsite per posting text ('{onsite[1]}') — "
-            f"over the {max_onsite}-day max{contradicted}"
-        )
-        bands["location"] = min(bands["location"], 3.0)
+            "onsite-cap exemption: onsite days/week not stated — this posting requires time in the "
+            "office and never says how much. Surfaced for YOUR call; find out before applying. An "
+            "unstated schedule is not a compliant one.")
     if (profile.get("relocation") or "").lower() == "no":
         match = re.search(r"must relocate|relocat(?:e|ion)(?: to [^.;\n]{0,40})? (?:is )?required"
                           r"|willing(?:ness)? to relocate", text)
@@ -824,8 +1165,9 @@ def score_location(job: dict, profile: dict) -> tuple[float, list[str]]:
     if contradiction:
         # Half credit: a remote option might be real, but nothing here establishes it. The flag on the
         # job carries the detail; this note is why the band isn't full.
-        onsite_type = structured_onsite(job) or "not remote"
-        return 6.0, [f"'Remote' in the location but the ATS says {onsite_type} — unverified, see flags"]
+        onsite = authoritative_onsite(job)
+        says = f"{onsite[1]} says {onsite[0]}" if onsite else f"{_SRC_ATS} says not remote"
+        return 6.0, [f"billed remote but {says} — unverified, see flags"]
     if remote is True:
         if remote_pref in ("required", "preferred"):
             # Remote-but-region-locked postings only count if the region fits. `location` alone missed
@@ -866,8 +1208,13 @@ def timezone_tilt(text: str, remote_verdict: str) -> tuple[float, list[str]]:
     return 0.0, []
 
 
-def job_age_days(job: dict) -> float | None:
-    """Age of a posting in days, or None when the date is missing/unparseable."""
+def job_age_days(job: dict, now: float | None = None) -> float | None:
+    """Age of a posting in days, or None when the date is missing/unparseable.
+
+    ``now`` (epoch seconds) defaults to the wall clock but is injectable — same convention as
+    ``proteus_paths.prune_runs`` — so a test can pin the instant instead of letting the real clock
+    walk a fixture's age across a decay boundary between one run and the next.
+    """
     posted = job.get("posted_at") or ""
     match = re.match(r"(\d{4})-(\d{2})-(\d{2})", str(posted))
     if not match:
@@ -876,17 +1223,18 @@ def job_age_days(job: dict) -> float | None:
         posted_epoch = time.mktime(time.strptime(match.group(0), "%Y-%m-%d"))
     except (ValueError, OverflowError):
         return None
-    return max(0.0, (time.time() - posted_epoch) / 86400)
+    now = time.time() if now is None else now
+    return max(0.0, (now - posted_epoch) / 86400)
 
 
-def score_recency(job: dict) -> tuple[float, list[str]]:
+def score_recency(job: dict, now: float | None = None) -> tuple[float, list[str]]:
     """The small additive freshness bonus (0-5).
 
     This only separates *fresh* postings from each other; it deliberately cannot sink an
     old one (1 point vs 5 is noise against a 100-point total). Killing dead postings is
     ``age_decay``'s job — see there.
     """
-    age_days = job_age_days(job)
+    age_days = job_age_days(job, now)
     if age_days is None:
         return 2.0, ["post date unknown"]
     if age_days <= 7:
@@ -926,13 +1274,13 @@ def age_tier(age_days: float | None) -> str:
     return "ancient"
 
 
-def age_decay(job: dict) -> tuple[float, str, list[str], list[str]]:
+def age_decay(job: dict, now: float | None = None) -> tuple[float, str, list[str], list[str]]:
     """Return (multiplier, tier, notes, flags) for how likely this posting is still open.
 
     Unknown dates are left alone (multiplier 1.0) rather than punished — guessing against a
     missing field would silently bury roles.
     """
-    age_days = job_age_days(job)
+    age_days = job_age_days(job, now)
     tier = age_tier(age_days)
     if age_days is None or age_days <= AGE_GRACE_DAYS:
         return 1.0, tier, [], []
@@ -996,10 +1344,180 @@ def preference_boost(text: str, profile: dict) -> tuple[float, list[str]]:
     return saturated + negative, notes
 
 
+# --- company intel -------------------------------------------------------------------------------
+# Proteus's durable company memory: facts its work-up research learns about EMPLOYERS (layoff
+# history, benefits quality, RTO reversals, culture) persist in company-intel.json and tilt every
+# future score, instead of evaporating when the work-up ends. Matched against the job's COMPANY field
+# with word boundaries, never JD prose: a posting that mentions a competitor isn't a job there.
+# Adjustments are clamped to ±20 so accumulated grudges (or enthusiasm) can never outvote the actual
+# job, and a negative entry raises a flag so a docked score explains itself. Negativity bias is the
+# correct prior here: companies volunteer their perks in the JD; nobody volunteers their layoffs. The
+# ledger's job is remembering what the marketing omits.
+INTEL_ADJUST_MAX = 20.0
+
+
+def _load_pending_intel_overlay(path: str) -> list[dict]:
+    """Read the pending-intel queue (JSONL, one proposal per line — see record_intel.py). Tolerant by
+    design, matching load_company_intel's own contract: a missing file returns [], and one malformed
+    line is SKIPPED rather than sinking every proposal recorded after it (the queue is append-only, so
+    a truncated trailing line from a crash-mid-write is exactly the failure this must survive)."""
+    if not path or not os.path.exists(path):
+        return []
+    try:
+        with open(path, encoding="utf-8") as fh:
+            raw_lines = fh.readlines()
+    except OSError:
+        return []
+    entries = []
+    for line in raw_lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue  # one bad line must not cost every other proposal in the queue
+        if isinstance(obj, dict) and str(obj.get("company") or "").strip():
+            entries.append(obj)
+    return entries
+
+
+def load_company_intel(path: str, overlay_path: str | None = None) -> dict:
+    """The company-intel ledger — the curated, owner-audited file — with Proteus's not-yet-promoted
+    proposals layered on top, so a work-up's finding tilts scoring the very same cycle it's recorded
+    instead of waiting on the nightly promotion. Durability, not visibility, is what promotion adds.
+
+    ``overlay_path=None`` (the default) resolves to ``proteus_paths.INTEL_PENDING_FILE`` — looked up
+    lazily inside the function body, not as a parameter default, because ``proteus_paths`` isn't
+    imported yet at the point this function is DEFINED (see the late import below); pass ``""`` to
+    disable the overlay outright (e.g. from a test that wants the curated ledger alone).
+
+    Best-effort and non-fatal on BOTH sources, like _annotate_days_listed: a missing or broken
+    ledger, or a missing/corrupt pending queue, costs only the tilt it would have added — never the
+    board.
+    """
+    tracked: dict = {}
+    if path and os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                tracked = json.load(fh)
+        except (OSError, ValueError):
+            tracked = {}
+        if not isinstance(tracked, dict):
+            tracked = {}
+
+    if overlay_path is None:
+        overlay_path = str(proteus_paths.INTEL_PENDING_FILE)
+    pending = _load_pending_intel_overlay(overlay_path)
+    if not pending:
+        return tracked
+
+    tracked_companies = dict(tracked.get("companies") or {})
+
+    # Build the overlay. REPLACE, never sum: company_intel_adjustment returns on the FIRST matching
+    # company and clamps ±INTEL_ADJUST_MAX per entry — so if a company's ledger entry and its pending
+    # entry were BOTH kept as separate dict entries, both would independently match the same job and
+    # (depending which the scorer met first) the effective ceiling could reach ±2×INTEL_ADJUST_MAX,
+    # silently doubling the cap the whole scoring design assumes. `{**tracked, **overlay}` below keeps
+    # exactly one entry per company: the overlay's value wins, and — because dict-merge preserves a
+    # key's ORIGINAL position when only its value is replaced — first-match-wins iteration order is
+    # unaffected by promotion status.
+    #
+    # Company keys are matched case-insensitively onto the ledger's existing spelling (same rule
+    # promote_intel.merge_intel uses), so a pending "acme corp" overlays "Acme Corp" IN PLACE rather
+    # than sitting beside it as a second, differently-cased entry that a plain dict-merge could never
+    # actually replace. Later lines in the pending queue supersede earlier ones for the same company
+    # (last-write-wins — a later work-up saw more).
+    #
+    # The owner's decisions are protected in the LIVE score too, not only at promotion. Without this, a
+    # pending proposal that weakens one of the owner's entries would override it in the shortlist
+    # immediately (replace-wins) — and since promote_intel REFUSES to weaken the owner's, that proposal
+    # stays in the queue forever and re-tilts every cycle, permanently degrading the owner's judgement
+    # in the live score while never being promoted. Reuse promote_intel's definitions of "owner's" and
+    # "weakens" so the overlay and the promoter can never disagree on what counts.
+    import promote_intel  # local proteus tool; late import keeps the hot scoring path's top clean
+
+    overlay_companies: dict[str, dict] = {}
+    for entry in pending:
+        name = str(entry.get("company", "")).strip()
+        if not name:
+            continue
+        key = next((k for k in tracked_companies if k.lower() == name.lower()), None)
+        if key is None:
+            key = next((k for k in overlay_companies if k.lower() == name.lower()), name)
+        else:
+            tracked_entry = tracked_companies.get(key) or {}
+            if promote_intel._is_owners(tracked_entry) and promote_intel._weakens(tracked_entry, entry):
+                # Would soften one of the owner's decisions — keep theirs in the live score, exactly as
+                # promotion will keep it in the ledger. The proposal still sits in the queue for review.
+                continue
+        overlay_companies[key] = {
+            "adjust": entry.get("adjust", 0),
+            "tags": list(entry.get("tags") or []),
+            "note": entry.get("note", ""),
+            "source": entry.get("source", ""),
+            "updated": entry.get("updated", ""),
+            # Not a real ledger field — a synthetic marker read only by company_intel_adjustment, so
+            # its flag/notes can say a shortlist tilt hasn't been reviewed yet. Never written back to
+            # company-intel.json (promote_intel.py builds its own entries from scratch).
+            "_intel_pending": True,
+        }
+
+    merged = dict(tracked)  # preserve _comment + any other sibling keys untouched
+    merged["companies"] = {**tracked_companies, **overlay_companies}
+    return merged
+
+
+def company_intel_adjustment(company_l: str, intel: dict) -> tuple[float, list[str], list[str]]:
+    """(clamped adjustment, notes, flags) for the first intel entry matching the company field."""
+    for name, entry in (intel.get("companies") or {}).items():
+        if name.startswith("_") or not isinstance(entry, dict):
+            continue
+        if not _word_hit(company_l, name.lower()):
+            continue
+        try:
+            adjust = float(entry.get("adjust", 0))
+        except (TypeError, ValueError):
+            adjust = 0.0
+        adjust = max(-INTEL_ADJUST_MAX, min(INTEL_ADJUST_MAX, adjust))
+        tags = ", ".join(entry.get("tags") or []) or "untagged"
+        note = str(entry.get("note") or "").strip()
+        # Overlay-sourced (not yet promoted into the ledger) — say so everywhere this surfaces,
+        # so a shortlist never implies an adjustment has been reviewed when it hasn't.
+        pending_suffix = " [pending review]" if entry.get("_intel_pending") else ""
+        notes = [f"company intel ({name}): {adjust:+g} [{tags}]{pending_suffix}"]
+        flags = []
+        if adjust < 0:
+            flags.append(f"company-intel: {name} — {tags}: {note or 'see company-intel.json'} "
+                         f"(docked {abs(adjust):g}){pending_suffix} — verify current state before investing")
+        return adjust, notes, flags
+    return 0.0, [], []
+
+
 # Ghost-filter knobs — aggregator/recruiter + evergreen down-ranks. Down-rank, never hide.
 AGGREGATOR_PENALTY = 14.0
 EVERGREEN_DAYS = 50.0
 EVERGREEN_PENALTY = 6.0
+
+# --- source ghost-risk ------------------------------------------------------------------------------
+# The missing axis. AGGREGATOR_PENALTY below asks of the *company field*: "is the employer name a
+# staffing front?" This asks of the *source field*: "did this posting arrive as somebody else's
+# copy?" They are different questions: a real-sounding employer arriving through an aggregator pipe
+# can top the whole board at a clean 100 and be dead at source, and the company regex has nothing to
+# object to.
+#
+# Sized to the record, not to an anecdote. In a batch of work-ups verified at the employer's own
+# source, high-risk sources were dead far more often than direct ATS boards — but a direct board can
+# die too (an Ashby req delisted), so "ATS-native is always clean" is false and this penalty must not
+# pretend otherwise. A real gap, on a sample far too small to justify a crater. The direct board's
+# death is also a different *shape*: its ATS API answers "closed" in one request, whereas a mirror
+# gives no reliable route back to the req at all.
+#
+# 8.0 is deliberately *under* AGGREGATOR_PENALTY: "this employer is a staffing front" is a stronger
+# claim than "this arrived via a mirror". Measured against a live board it flags well under 1% of
+# postings and leaves the relative order of everything else untouched. That is a ghost filter, not a
+# re-weighting of the board. The flag, not the points, is the product here.
+SOURCE_GHOST_PENALTY = 8.0
 
 # Employer-name shapes that mean "not the hiring company" — job-board reposts ("… Jobs"), staffing/
 # recruiting firms, known aggregators. High-precision on purpose: must NOT hit real employers (CVS
@@ -1014,7 +1532,9 @@ _AGGREGATOR_RE = re.compile(
     re.I)
 
 
-def score_job(job: dict, profile: dict) -> dict:
+def score_job(job: dict, profile: dict, intel: dict | None = None, now: float | None = None) -> dict:
+    """Score one job. ``intel`` is ``load_company_intel``'s ledger (None = no company tilt);
+    ``now`` (epoch seconds) pins the age math for tests and defaults to the wall clock."""
     text = f"{job.get('title') or ''}\n{job.get('description') or ''}".lower()
     bands = {}
     notes: list[str] = []
@@ -1023,7 +1543,7 @@ def score_job(job: dict, profile: dict) -> dict:
         ("skills", score_skills(job, profile)),
         ("comp", score_comp(job, profile)),
         ("location", score_location(job, profile)),
-        ("recency", score_recency(job)),
+        ("recency", score_recency(job, now)),
     ):
         bands[band] = round(points, 1)
         notes.extend(band_notes)
@@ -1031,6 +1551,7 @@ def score_job(job: dict, profile: dict) -> dict:
     flags = dealbreaker_flags(text, profile)
     flags += clearance_flags(text, profile)
     flags += us_eligibility_flags(job, profile)
+    flags += foreign_domain_flags(job)             # published on a country board = scrutinise, no dock
     flags += location_conflict_flags(text, job, profile, bands)  # may dock the location band
     flags += experience_gap_flags(text, profile)
     flags += title_avoid_flags(job, profile)      # avoid-word in the title = dealbreaker (caps at 25)
@@ -1042,9 +1563,12 @@ def score_job(job: dict, profile: dict) -> dict:
     remote_verdict = classify_remote(job, profile, text)
     if remote_verdict == "relocation" and profile.get("commutable_locations"):
         where = job.get("location") or (effective_locations(job) or ["location unstated"])[0]
-        onsite_type = structured_onsite(job)
-        onsite_note = (f" (structured {onsite_type} at source)" if onsite_type
+        onsite = authoritative_onsite(job)
+        onsite_note = (f" ({onsite[0]} per {onsite[1]})" if onsite
                        else " (posting says ONSITE/in-office)" if _explicit_onsite(text) else "")
+        # The minutes figure is QUOTED here, not enforced here: `commutable_locations` is what
+        # actually screens (see `commutable_office`). Changing the ceiling therefore changes this
+        # sentence and not the screen — re-deriving the town list is separate work.
         flags.append(
             f"dealbreaker: relocation implied — '{where}'{onsite_note} is beyond the "
             f"~{profile.get('max_commute_minutes_one_way', 90)}-min commute zone with no credible "
@@ -1057,16 +1581,71 @@ def score_job(job: dict, profile: dict) -> dict:
     total += pref_points
     notes.extend(pref_notes)
 
+    # Company-intel adjustment: durable employer facts from Proteus's work-ups (layoff history,
+    # benefits, culture — company-intel.json + the pending overlay) tilt the score, graded and
+    # company-field-matched. Lowers/raises rank, never hides. Pre-decay like the preference boosts,
+    # so a stale posting can't dodge a dock. See company_intel_adjustment.
+    company_l = (job.get("company") or "").lower()
+    if company_l and intel:
+        intel_points, intel_notes, intel_flags = company_intel_adjustment(company_l, intel)
+        total += intel_points
+        notes.extend(intel_notes)
+        flags.extend(intel_flags)
+
+    # Employer corrected from the apply URL's ATS org (fetch_jobs.attribute_employers). MARKED, NOT
+    # LAUNDERED — the same rule as the source-risk flag below. The feed said one company, the req's
+    # own ATS says another; the owner gets to know that happened, because it says something the
+    # corrected name alone doesn't: this posting arrived through somebody who put their name on it.
+    #
+    # Flag only, no score change — deliberately, and there IS a score consequence anyway, one line
+    # down. `company_l` is the CORRECTED name, so a posting that arrived under a staffing agency's
+    # name and was proved to be a real employer no longer trips the aggregator/recruiter dock. That
+    # is the dock working, not being dodged: its flag says "verify the real company before
+    # investing", and the ATS URL has now done exactly that verification. The source-risk dock, which
+    # asks the different question of whether the req is still open where it really lives, is
+    # untouched and still fires.
+    if job.get("company_source") == "apply-url":
+        reported = job.get("company_reported")
+        flags.append(
+            f"employer corrected: the feed said '{reported or 'no employer'}', but this req is "
+            f"published at {job.get('apply_ats') or 'an ATS'} under '{job.get('apply_org')}' — "
+            f"reading it as {job.get('company')}. Apply at the link, not through the reposter")
+
     # Aggregator / recruiter down-rank (ghost filter): a posting fronted by a job-board aggregator or
     # a staffing/recruiting firm (mostly via open-aggregation sources) is lower-signal and often
     # ghost/repost noise. Graded, company-field penalty + flag. Down-ranks, never hides — the source
     # filter and a "show all" view still surface it.
-    company_l = (job.get("company") or "").lower()
-    if company_l and _AGGREGATOR_RE.search(company_l):
+    aggregator_fronted = bool(company_l and _AGGREGATOR_RE.search(company_l))
+    if aggregator_fronted:
         total -= AGGREGATOR_PENALTY
         notes.append(f"aggregator/recruiter source ({job.get('company')}): -{AGGREGATOR_PENALTY:g}")
         flags.append(f"aggregator/recruiter: '{job.get('company')}' looks like a job-board or staffing "
                      "front, not the hiring employer — verify the real company before investing")
+
+    # Source ghost-risk down-rank (see SOURCE_GHOST_PENALTY): the posting arrived through open
+    # aggregation, so what the owner is looking at is a *copy* of a req that lives somewhere else —
+    # and may not still be open there, or may name only the recruiter and never the actual end
+    # employer (which also makes it unscreenable against the profile's employer gates). Down-ranks
+    # and flags; never hides — a hidden posting is deleted evidence for judging the source itself.
+    #
+    # NOT stacked on the company-name penalty. Many of the postings the company regex catches are ALSO
+    # high-risk-source, so summing would crater them for what is one finding wearing two hats ("this
+    # is not the employer's own req"). The larger penalty is charged, once — the same double-count
+    # lesson as the preference boosts above. The FLAG still fires either way: "verify the real
+    # company" and "verify this req is still open at that company's own board" are two different
+    # next actions, and both are needed.
+    risk = ghost_risk(job.get("source"))
+    if risk == "high":
+        source_name = job.get("source") or "an unnamed source"
+        if aggregator_fronted:
+            notes.append(f"source ghost-risk ({source_name}): high — penalty absorbed by the "
+                         f"aggregator/recruiter dock (not stacked)")
+        else:
+            total -= SOURCE_GHOST_PENALTY
+            notes.append(f"source ghost-risk ({source_name}): high — -{SOURCE_GHOST_PENALTY:g}")
+        flags.append(f"source-risk: arrived via {source_name} (open aggregation) — this is a mirror of "
+                     "a req hosted elsewhere; confirm it's still open on the employer's own board "
+                     "before spending a work-up slot")
 
     # Evergreen down-rank (ghost filter): a role LISTED for months (first_seen age, fed in as
     # `days_listed` from seen.json via `score_jobs --seen`) is likely an always-open / perpetual req
@@ -1087,7 +1666,7 @@ def score_job(job: dict, profile: dict) -> dict:
 
     # Age decay multiplies the finished assessment — applied last, after preference
     # boosts, so a dead posting's boosts can't rescue it.
-    decay, tier, decay_notes, decay_flags = age_decay(job)
+    decay, tier, decay_notes, decay_flags = age_decay(job, now)
     total *= decay
     notes.extend(decay_notes)
     flags += decay_flags
@@ -1102,7 +1681,7 @@ def score_job(job: dict, profile: dict) -> dict:
     if total >= COMP_WARN_FLOOR:
         flags += comp_unknown_flags(job, profile)
 
-    days = job_age_days(job)
+    days = job_age_days(job, now)
     scored = dict(job)
     scored.update({
         "match_percent": round(total, 1),
@@ -1111,6 +1690,7 @@ def score_job(job: dict, profile: dict) -> dict:
         "flags": flags,
         "age_days": None if days is None else int(days),
         "age_tier": tier,
+        "ghost_risk": risk,
         "remote_verdict": remote_verdict,
         "target_title": strong_target_title(job, profile),
     })
@@ -1162,6 +1742,11 @@ def main(argv=None) -> int:
     parser.add_argument("--min-score", type=float, default=0.0)
     parser.add_argument("--seen", default=None,
                         help="path to seen.json (first_seen per url) — enables evergreen flagging")
+    parser.add_argument("--intel", default=None,
+                        help="path to company-intel.json (default: the one next to --profile)")
+    parser.add_argument("--intel-overlay", default=None,
+                        help="path to the pending intel queue layered over --intel (default: "
+                             "proteus_paths.INTEL_PENDING_FILE; pass '' to disable the overlay)")
     args = parser.parse_args(argv)
 
     with open(args.profile, encoding="utf-8") as fh:
@@ -1174,8 +1759,12 @@ def main(argv=None) -> int:
     with open(jobs_path, encoding="utf-8") as fh:
         jobs_doc = json.load(fh)
 
+    intel_path = args.intel or os.path.join(os.path.dirname(os.path.abspath(args.profile)),
+                                            "company-intel.json")
+    intel = load_company_intel(intel_path, args.intel_overlay)
+
     _annotate_days_listed(jobs_doc.get("jobs", []), args.seen)
-    scored = [score_job(job, profile) for job in jobs_doc.get("jobs", [])]
+    scored = [score_job(job, profile, intel) for job in jobs_doc.get("jobs", [])]
     scored.sort(key=lambda j: j["match_percent"], reverse=True)
     if args.min_score:
         scored = [j for j in scored if j["match_percent"] >= args.min_score]

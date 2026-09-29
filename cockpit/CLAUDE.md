@@ -28,8 +28,8 @@ Directories: `server/` (FastAPI/uvicorn, the `cockpit` extras) + `web/` (Vite/Ty
 `zitadel/` (the self-hosted IdP compose stack + `ZITADEL_SETUP.md`) + `decoy/` (the isolated public
 honeypot chat — separate process, zero tools/data/secrets, same extras) + `breakglass/` (DELIBERATELY
 stdlib-only — survives a broken venv/daemon/backend; `assertion.py` is the one module it shares with
-`server/`). **Supervised by the daemon** (`seneschal/scripts/cockpit_site.py` — spawn/health-check/
-build/deploy-bounce on :8760); the README's "Running it locally" steps are the DEV path.
+`server/`). **Supervision** (`seneschal/scripts/cockpit_site.py`) ships unwired — no daemon task
+runs it yet, so the README's "Running it locally" steps start the backend.
 
 The panel decisions a future edit could silently undo, which is why they are here rather than only
 in the spec: the **Jobs panel is read-only with NO cancel route BY DECISION**; it alarms only on
@@ -37,7 +37,7 @@ in the spec: the **Jobs panel is read-only with NO cancel route BY DECISION**; i
 truncated by `limit` and finished ones sort by when they ENDED; and `outbox_*` renders **only when
 non-zero** (Notion backend only — filesystem backends have no outbox).
 
-**`web/` tests are stdlib `node --test`, never a framework** (a hand-written
+**`web/` tests are stdlib `node --test`, never a framework** (Node ≥ 22.18; a hand-written
 `web/src/node-test-shim.d.ts` stands in for Node's types). Testable logic gets extracted into a
 DOM-free module beside its component — `jobsCollapse.ts` (never hide an undelivered push),
 `routerRow.ts` (the arm never reads as a verdict), `collapseStorage.ts` (tolerant collapsed/expanded

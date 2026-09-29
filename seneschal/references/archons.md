@@ -77,8 +77,8 @@ Rules:
    self-healing). Scheduled tasks race a manual move, and dropping a dedup ledger re-alerts
    everything.
 5. **An archon NEVER writes a tracked file directly.** `state/` and `out/` are gitignored and free to
-   write. Anything **tracked** — a curated input the archon *contributes to* — is written by a
-   **promotion step that goes through a PR**, never by the archon at runtime.
+   write. A curated input the archon *contributes to* is written by a **promotion step** (a local
+   merge for gitignored owner data, a PR for anything tracked), never by the archon at runtime.
 
    **Why it's a rule and not a preference:** the archon runs in the **live daemon's checkout**. A
    tracked file it mutates leaves that checkout permanently dirty, and the first incoming merge that
@@ -87,12 +87,19 @@ Rules:
    existing file is unreliable, so a finding the archon "recorded" can simply never land.
 
    **The shape:** the archon appends a proposal to a gitignored queue via a small Bash helper
-   (Proteus: `tools/record_intel.py`) → whatever consumes it reads queue-over-tracked so the finding
+   (Proteus: `tools/record_intel.py`) → whatever consumes it reads queue-over-ledger so the finding
    takes effect *immediately* → a promotion step (Proteus: `tools/promote_intel.py`, nightly in Dream)
-   merges it into the tracked file via a reviewed PR, enforcing the data's invariants **in code**
-   rather than in charter prose.
+   merges it into the curated file, enforcing the data's invariants **in code** rather than in
+   charter prose.
 
-   Corollary: any invariant the charter states about a tracked file ("never weaken an entry the owner
+   **Owner data stays gitignored.** Proteus's ledger (`company-intel.json`) holds the owner's
+   judgements about real employers, so in this public framework it is gitignored like
+   `profile.json`, and the default promotion (`--apply`) is a **local merge — no git, no commit, no
+   PR**. The PR path is explicit opt-in (`--apply --via-pr`) for an owner who keeps the ledger in a
+   **private fork**: it stages with `git add -f` in a transient worktree and publishes the file to
+   whatever remote the checkout pushes to — never point it at a public remote.
+
+   Corollary: any invariant the charter states about a curated file ("never weaken an entry the owner
    sourced", clamps, update-don't-duplicate) belongs in the promotion step. Prose in a charter is a
    hope; a check in the promoter is a guarantee.
 6. **The charter can route churn into `out/` too — check it, not just the tools.** Proteus's own
