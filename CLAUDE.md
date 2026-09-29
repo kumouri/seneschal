@@ -4,7 +4,7 @@ Operating guide for Claude Code working in the **seneschal** repo.
 
 ## What this repo is
 
-Seneschal is a **local-first chief-of-staff assistant framework** — a Claude Skill suite
+Seneschal is a **local-first chief-of-staff assistant framework** — an agent skill suite
 (orchestrator + subagent skills, mostly Markdown) plus a modest amount of stdlib-first
 Python (presence daemon, comms bridges, local RAG). It is the open-source, de-personalized
 framework: the assistant ships with a default personality, a persona wizard builds a custom
@@ -146,12 +146,14 @@ Linux; launchd agents, zero elevation, on macOS) and merges the §5 session hook
 user's `~/.claude/settings.json` (`settings_merge.py` — diff-first, append-only,
 backup-first, refuses corrupt JSON). Standalone
 `/setup-persona` and `/setup-store` still work and update the same ledger. The framework runs
-on the shipped defaults (default-Claude persona, no store) until any of it is run.
+on the shipped defaults (the default persona, no store) until any of it is run.
 
 ## The daemon, briefly
 
 `seneschal/scripts/presence.py` is the always-on nerve center: a reactive asyncio core holding a
-warm `claude` CLI chat session (subscription-billed; it scrubs `ANTHROPIC_API_KEY`), firing
+warm chat session behind a pluggable backend (`backends/`: the `claude` CLI by default, or the
+`codex` CLI on a ChatGPT subscription — subscription-billed either way; it scrubs `ANTHROPIC_API_KEY`
+/ `OPENAI_API_KEY`), firing
 reminders from the local queue, and running a cheap Watch comms-peek on cadence. Reminder compute is a
 **once-per-owner-local-day seed** (`maybe_seed_day`, a date-rollover trigger — the four fixed reminder
 slots are retired): the seed run queues each ⏰ row's exact-time nudges via `reminders_seed.py` and the

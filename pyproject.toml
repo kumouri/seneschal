@@ -20,7 +20,7 @@
 # working on the cockpit server (`uv sync --extra cockpit`).
 [project]
 name = "seneschal-daemon"
-version = "0.1.0"
+version = "1.0.0"
 description = "Runtime env for the seneschal presence daemon (seneschal/scripts/presence.py)"
 requires-python = ">=3.11"
 dependencies = [
