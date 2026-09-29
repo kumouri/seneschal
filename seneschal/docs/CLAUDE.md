@@ -36,8 +36,8 @@ specs and carry no status.
   steps, and what not to do.
 - `hung-turn-deadline-spec.md` — **PARTIAL(P1+P2 BUILT; §4 decided)** — a hang is a gap between
   stream events, never a cap.
-- `seneschald-revive-spec.md` — **PARTIAL(BUILT + §8/§9)** — revives a dead daemon; §9 catches it
-  alive on the wrong account.
+- `seneschald-revive-spec.md` — **PARTIAL(watchdog side BUILT; the presence.py halves of §8/§9
+  pending)** — revives a dead daemon; §9 catches it alive on the wrong account.
 - `stacked-pr-branch-deletion-spec.md` — **BUILT** — deleting a branch used to close every PR stacked
   on it.
 - `mid-turn-interleave-spec.md` — **PARTIAL(phases 0+1 BUILT; phase 2 BUILT behind
