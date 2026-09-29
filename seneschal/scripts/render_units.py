@@ -375,11 +375,21 @@ sync_deps() {
     log "WARN: uv not found - skipping dependency sync (install uv to enable the daemon venv)."
     return 0
   fi
-  if ! uv sync --frozen >/dev/null 2>&1; then
-    log "DEPS FAILED: uv sync --frozen exited non-zero - holding the restart."
+  # `uv sync` makes the venv MATCH the requested set, so a plain --frozen would uninstall the
+  # cockpit extras on every deploy. state/cockpit-enabled is the durable opt-in (the ps1's
+  # Get-DaemonSyncArgs reads the same file): present -> keep the extras. --frozen is unconditional.
+  sync_desc="uv sync --frozen"
+  if [ -f "$STATE_DIR/cockpit-enabled" ]; then
+    sync_desc="uv sync --frozen --extra cockpit"
+    sync_ok() { uv sync --frozen --extra cockpit >/dev/null 2>&1; }
+  else
+    sync_ok() { uv sync --frozen >/dev/null 2>&1; }
+  fi
+  if ! sync_ok; then
+    log "DEPS FAILED: $sync_desc exited non-zero - holding the restart."
     return 1
   fi
-  log "deps synced (uv sync --frozen)"
+  log "deps synced ($sync_desc)"
   return 0
 }
 

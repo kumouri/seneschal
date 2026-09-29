@@ -152,9 +152,9 @@ It is **auto-on whenever the `cockpit` extras are importable** — installing th
 dropping `discord.env` is. On a venv without them it logs one line, sends the owner **one Telegram
 nudge per boot**, and stops. **Caveat:** `uv sync` makes the venv **match** the requested set, so the
 updater's plain `uv sync --frozen` on a deploy would prune the extras back out — so create the empty
-opt-in file `seneschal/state/cockpit-enabled` (the `/setup` cockpit chapter does) and the Windows updater
-runs `uv sync --frozen --extra cockpit` instead. (The POSIX updater `render_units.py` generates does not
-honour the opt-in yet: re-run the extras sync after a deploy there if the cockpit went dark.) `--no-cockpit-app` opts out entirely, `--cockpit-app-port` moves it,
+opt-in file `seneschal/state/cockpit-enabled` (the `/setup` cockpit chapter does) and both updaters — the
+Windows `seneschald-control.ps1` and the POSIX script `render_units.py` generates — run
+`uv sync --frozen --extra cockpit` instead. `--no-cockpit-app` opts out entirely, `--cockpit-app-port` moves it,
 and `--no-cockpit-web-build` serves whatever `dist` already exists without ever invoking npm. Auth: it
 passes `cockpit/server/cockpit.env` through when that file exists (real OIDC always wins) and otherwise
 sets `COCKPIT_DEV_NO_AUTH=1`, so an unprovisioned box gets a working localhost dashboard instead of a
