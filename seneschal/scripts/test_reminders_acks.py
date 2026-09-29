@@ -10,6 +10,7 @@ or a snapshot baked at 08:00. Same drop-not-defer contract as the quiet gate.
 Run:  python -m unittest seneschal.scripts.test_reminders_acks   (or)   python test_reminders_acks.py
 """
 import io
+import json
 import os
 import sys
 import tempfile
@@ -119,7 +120,7 @@ class CheckRemindersAckGate(unittest.TestCase):
         self.dir = tempfile.mkdtemp()
         self._orig = sn.send_telegram
         self.sent = []
-        sn.send_telegram = lambda text, env: (self.sent.append(text) or {"ok": True})
+        sn.send_telegram = lambda text, env, **kw: (self.sent.append(text) or {"ok": True})
 
     def tearDown(self):
         sn.send_telegram = self._orig
@@ -215,6 +216,30 @@ class DequeueRecordsAck(unittest.TestCase):
         rc, _ = self._run(["--reminder-id", RID, "--no-ack-record"])
         self.assertEqual(rc, 0)
         self.assertEqual(ra.load_acks(self.dir), {})
+
+    def test_ack_stamps_last_ack_at_into_the_stagger_file(self):
+        # The ack-advance signal: the same call that records the ack stamps WHEN it landed, merged into
+        # nudge-stagger.json without disturbing the fire clock already there.
+        ra.save_stagger_state(self.dir, last_nonpiercing_fire="2026-09-11T22:00:00Z")
+        before = datetime.now(timezone.utc)
+        rc, out = self._run(["--reminder-id", RID, "--ack-date", TODAY])
+        self.assertEqual(rc, 0)
+        state = ra.load_stagger_state(self.dir)
+        self.assertEqual(state["last_nonpiercing_fire"], "2026-09-11T22:00:00Z")
+        stamped = sn.parse_iso(state["last_ack_at"])
+        self.assertGreaterEqual(stamped + timedelta(seconds=1), before)
+        self.assertEqual(json.loads(out)["ack_at"], state["last_ack_at"])
+
+    def test_no_ack_record_does_not_stamp_last_ack_at(self):
+        rc, out = self._run(["--reminder-id", RID, "--no-ack-record"])
+        self.assertEqual(rc, 0)
+        self.assertNotIn("last_ack_at", ra.load_stagger_state(self.dir))
+        self.assertIsNone(json.loads(out)["ack_at"])
+
+    def test_dry_run_does_not_stamp_last_ack_at(self):
+        rc, _ = self._run(["--reminder-id", RID, "--dry-run"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(ra.load_stagger_state(self.dir), {})
 
 
 class QueueLock(unittest.TestCase):

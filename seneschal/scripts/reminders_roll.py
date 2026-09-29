@@ -21,6 +21,9 @@ Design notes:
     function is deterministic and testable off any host clock — CI runs on UTC). The only imperfection
     is the single day a DST transition lands *between* now and a next-day slot, where a nudge can be an
     hour off — negligible for a "check messages" ping, and it self-corrects the following day.
+  * **Fire-time ack gate opted OFF.** A roll's entries carry ``"ack_gate": False``, so a single ack
+    (e.g. "checked messages") does not hush the rest of that day's same-day-recurring slots — unlike a
+    seed (``reminders_seed.py``), where the ack gate stays on.
 
 Stdlib only. Times in ``reminders.json`` are UTC ISO-8601 with a trailing ``Z`` (the daemon never
 converts zones). See ``seneschal/state/README.md`` for the entry schema and ``reminders-policy.md`` for
@@ -45,19 +48,16 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_STATE_DIR = os.path.normpath(os.path.join(SCRIPT_DIR, "..", "state"))
 
 # The standing rolls. Each is a custom intraday cadence keyed to a ⏰ Reminders row (reminder_id =
-# the Notion page id, so an ack's reminders_dequeue can still cancel a queued nudge). Add a dict here
-# to give another reminder an every-N-hours roll.
-ROLLS = [
-    {
-        "id_prefix": "alex",
-        "text": "Check messages from Alex.",
-        "reminder_id": "00000000-0000-0000-0000-000000000042",
-        "start_hour": 9,     # first nudge, local hour (inclusive)
-        "end_hour": 23,      # last nudge, local hour (inclusive)
-        "interval_hours": 2,
-        "channel": "telegram",
-    },
-]
+# the store row's page id, so an ack's reminders_dequeue can still cancel a queued nudge). Add a dict
+# here to give another reminder an every-N-hours roll — shaped like:
+#
+#     {"id_prefix": "messages", "text": "Check messages.", "reminder_id": "<⏰ row id>",
+#      "start_hour": 9, "end_hour": 23, "interval_hours": 2, "channel": "telegram"}
+#
+# (start/end are local hours, inclusive). A row-status check is intentionally NOT done here, so a roll
+# must be REMOVED from this list when its reminder is retired — a finished row alone does not stop the
+# seeder. Ships empty: which reminders deserve an intraday roll is the owner's call, not a default.
+ROLLS: list = []
 
 
 def roll_entries(roll: dict, now_local: datetime, horizon_days: int = 2) -> list:

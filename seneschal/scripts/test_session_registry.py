@@ -187,7 +187,7 @@ class FireGateUnit(unittest.TestCase):
         self.dir = tempfile.mkdtemp()
         self._orig = sn.send_telegram
         self.sent = []
-        sn.send_telegram = lambda text, env: (self.sent.append(text) or {"ok": True})
+        sn.send_telegram = lambda text, env, **kw: (self.sent.append(text) or {"ok": True})
 
     def tearDown(self):
         sn.send_telegram = self._orig

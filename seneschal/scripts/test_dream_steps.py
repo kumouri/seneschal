@@ -122,11 +122,11 @@ class NotAnAlarmThatGetsMuted(_Case):
         self.assertIn("2b", steps)
 
     def test_an_unowned_step_is_never_alarmed_on(self):
-        """2, 2c and 2d have no owning script, so nothing can ever clear them. Alarming would mean
+        """2c and 2d have no owning script, so nothing can ever clear them. Alarming would mean
         a permanent daily nudge nobody can act on."""
         ds.ensure_ledger(self.d, now=FOUND_ON - timedelta(days=365))
         alarmed = {r["step"] for r in ds.stale(self.d, FOUND_ON)}
-        for step in ("2", "2c", "2d"):
+        for step in ("2c", "2d"):
             self.assertNotIn(step, alarmed)
 
     def test_but_an_unowned_step_is_still_VISIBLE(self):

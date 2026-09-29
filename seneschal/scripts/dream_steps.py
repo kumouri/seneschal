@@ -83,8 +83,8 @@ CREATED_KEY = "_created"   # first-ever write; the grace window for a never-run 
 STEPS = {
     # 3 days: the risk of a stale reconcile is queue bloat, not a safety miss — the fire-time ack
     # gate and staleness cutoff already stop a stale entry from buzzing, so this window is generous.
-    # Un-owned until a reconcile script stamps it.
-    "2": {"label": "reminders queue reconcile", "owner": None, "max_age_days": 3},
+    # Owned by reminders_reconcile.py, which stamps it every run (a quiet night included).
+    "2": {"label": "reminders queue reconcile", "owner": "reminders_reconcile.py", "max_age_days": 3},
     "2b": {"label": "RAG index ingest", "owner": "rag_index.py", "max_age_days": 2},
     "2c": {"label": "sentiment cross-check", "owner": None, "max_age_days": 14},
     "2d": {"label": "meal-plan staging", "owner": None, "max_age_days": 7},

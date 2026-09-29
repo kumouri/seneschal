@@ -11,9 +11,12 @@ Telegram inbound is owned by `presence.py` (it consumes + commits the offset). T
 touch Telegram, to avoid contending with the daemon over the update offset.
 
 Times are compared as UTC instants; the brain writes reminder `due_at` as UTC ISO (e.g.
-"2026-06-29T20:00:00Z") when it interprets "remind me at 3pm" in the owner's timezone. This stays
-timezone-dumb on purpose (only the fire-time ack date consults the owner zone, via
-reminders_acks.local_today → tz_common).
+"2026-06-29T20:00:00Z") when it interprets "remind me at 3pm" in the owner's timezone. Scheduling stays
+timezone-dumb on purpose — `due_at` comparison is pure UTC arithmetic — with exactly two owner-zone
+readings: the fire-time ack date (reminders_acks.local_today → tz_common) and the **night curfew**
+(`in_night_curfew`), which asks what the CLOCK ON THE OWNER'S WALL reads, a question UTC cannot answer.
+It converts through `clock.to_local` (tz_common: the configured owner zone, DST-correct; machine-local
+when unconfigured) and reads its window from `owner.nightCurfew` in persona/identity.json.
 
 USAGE:
   python sentinel.py                                   # fire due reminders + report
@@ -23,6 +26,71 @@ USAGE:
 
 Prints a one-line JSON verdict; also writes it to state/last-signal.json. Exit 0 on success (with or
 without a peek due), 10 if a comms peek fired, 1 on error.
+
+This module is a helper library and one-shot, and it is also THE SINGLE DELIVERY CHOKEPOINT via
+`check_reminders`. Invariants worth knowing before an edit:
+
+THE GATE ORDER IS THE INVARIANT, AND IT IS THE PART THAT IS EASY TO BREAK LATER:
+
+    acked -> quiet -> CURFEW -> presence -> live-session -> STALENESS -> stagger
+
+Four DROP (acked/quiet/curfew/staleness — stamp the entry, consumed, never re-delivered), three DEFER
+(presence/live-session/stagger — the entry stays pending and re-checks next tick). The POSITIONS are
+load-bearing: curfew sits under quiet so an EXPLICIT request keeps naming itself when both apply, and
+staleness sits AFTER the live-session defer — a nudge held three hours by a live session SHOULD die
+there — while being UNREACHABLE from a presence hold, which `continue`s above it. Moving either is a
+behaviour change, not a refactor.
+
+WHY CURFEW AND STALENESS EXIST: THE STAGGER IS A RATE LIMIT, NOT A LATENESS BOUND. A live session can
+hold everything for hours (defer, never drop); an unacked Reminders row re-enqueues at every later slot;
+and 26 waiting nudges at 4/hour is 6 h 30 m of drain — so the tail of a released backlog lands at 04:00
+by arithmetic, with every gate behaving correctly. Nothing in the path asked whether a nudge was still
+worth sending; the curfew ("is NOW a reasonable hour?") and the staleness cutoff ("is this still about
+NOW?") are that question.
+
+AN ACK ADVANCES THE STAGGER, AFTER A 2-MIN DEBOUNCE. `reminders_dequeue` stamps `last_ack_at` into
+`nudge-stagger.json` on every ack; the stagger gate releases its 15-min hold once that ack is NEWER than
+the last non-piercing fire and `ACK_ADVANCE_DEBOUNCE_SEC` old. It releases the STAGGER ONLY — it is the
+last gate, `acked` is the first, and nothing between them reads the stamp. A missing or unparseable
+`last_ack_at` means NO advance — the one value in that file that fails SAFE rather than open.
+
+THE CURFEW PREDICATE IS A CONJUNCTION — `now` inside the owner's night window AND `due_at` before that
+window occurrence started. Gating on `due_at` alone misses the actual case (due 22:50, released 01:20);
+dropping the second half would retire late slots the owner seeds ON PURPOSE. The window is owner config
+(`owner.nightCurfew`, default 01:00-07:00 owner-local); the default starts at 01:00 rather than 23:00
+because plenty of owners are up past 23:00 and still want those nudges — that stretch is covered by the
+staleness cutoff, not by nothing. `from datetime import time` WOULD SHADOW THE `time` MODULE this file
+sleeps on — hence `clock_time`.
+
+PRESENCE-HELD AND STAGGER-HELD TIME ARE SUBTRACTED FROM LATENESS. `presence_rules.should_defer` has TWO
+rules and only the place one carries a per-entry marker, so a nudge held through a >2 h DRIVE would
+otherwise arrive at the cutoff with nothing on it to exempt it and be consumed, straight through the
+presence gate's NO DROPS contract. So the defer branch accumulates (`presence_deferred_since` ->
+`presence_held_sec`) and the stagger stamps `stagger_deferred_since` the first tick it holds a row;
+lateness measures TIME THE OWNER COULD HAVE ACTED ON IT. The curfew is deliberately NOT exempted the
+same way: whether 2 AM is a reasonable hour does not depend on why we are late.
+
+THE DRAIN ORDER IS IMPORTANCE FIRST on a `due_at` tie (`_due_sort_key`, `reminder_importance`), so a
+High row can't queue behind a Low one seeded earlier into the same slot; and every staleness
+suppression is also a `reminder-suppressions.jsonl` row (`reminder_suppressions.py`) the EOD Wrap
+reads — a silent kill with no durable trace is the failure, not a side effect of one.
+
+`send_telegram`'s 60 s SUBPROCESS TIMEOUT IS `ambiguous: true` — the child was demonstrably still
+running with the request very probably on the wire. A delivery attempt that comes back `ambiguous` is
+HELD (`ambiguous_send_at`), never re-fired blind: under-sending is recoverable, double-sending is not.
+An UNPARSEABLE stdout is deliberately NOT flagged — that is a child that died abnormally, usually before
+sending. Real send failures (and ambiguous ones) are also `failures.jsonl` rows (`failures.py`).
+
+A TELEGRAM NUDGE CAN LAND IN ITS OWN TOPIC (the optional `telegram_topics` module). `_deliver_reminder`
+takes `pierces` — `entry_pierces_quiet`'s ANSWER, PASSED DOWN, NEVER RECOMPUTED — and
+`reminder_topic_purpose` collapses the main chat to None, i.e. NO FLAG AT ALL, so a main-chat nudge's
+argv is byte-identical to the pre-topics one. The import is lazy and total: a `telegram_topics` that
+cannot be reached (or is not installed) costs the topic, never the nudge. The `reminder_fired` signal
+carries `message_thread_id` read off the SEND RESULT, not off the purpose asked for. Discord and `call`
+are untouched.
+
+See also: ../references/reminders-policy.md -> "Night curfew + staleness cutoff", "Catch-up stagger"
+and "Delivery".
 """
 from __future__ import annotations
 
@@ -32,9 +100,23 @@ import os
 import subprocess
 import sys
 import threading
-from datetime import datetime, timezone
+import time
+# `time` (the module) is imported above and used for sleeps; the datetime class of the same name is
+# aliased rather than imported bare, because shadowing it silently breaks load_json's retry backoff.
+from datetime import datetime, timedelta, timezone
+from datetime import time as clock_time
 
+import clock  # the owner's wall clock (a facade over tz_common) — the curfew's one zone conversion
+import failures  # a durable row for a send failure that used to vanish silently
+import identity_common  # owner.nightCurfew — the curfew window is owner config, never a constant
+import reminder_importance  # canonical importance levels — the drain order's tie-break
+import reminder_suppressions  # the staleness-suppression ledger the EOD Wrap reads (sibling, stdlib)
 import reminders_acks as ra  # durable ack ledger — the fire-time "already did it" gate (sibling, stdlib)
+
+try:  # the assertions log (what the assistant has actually said) — lands in a later port; optional
+    import mouth as _mouth
+except ImportError:  # pragma: no cover — absent until then; a fire simply isn't recorded there
+    _mouth = None
 
 try:  # owner-timezone rendering for session-registry stamps (guarded — presence.py house style;
     # already a transitive dependency via reminders_acks, so this can only fail on a broken install)
@@ -64,15 +146,58 @@ TELEGRAM_INBOX_DIR = "inbox"
 # retired (reminders-stagger-not-batch — bunching overwhelms an Autistic+ADHD brain). So a NON-piercing
 # nudge fires only when at least this long has elapsed since the last non-piercing fire (and at most one
 # per pass); the rest stay pending and drip out one at a time on later ticks. Piercing items (Call Me /
-# Critical / meds `pierce_quiet`) bypass the gate — they can't slide. Fresh nudges are already spaced
+# Critical `pierce_quiet`) bypass the gate — they can't slide. Fresh nudges are already spaced
 # 15-30 min apart at creation (the slots stagger due_at), so normal-day timing is untouched; this only
-# reshapes a bunched-up *release*. Held = stamped with nothing → re-checked next loop (defer, never drop).
-STAGGER_STATE_FILE = "nudge-stagger.json"
+# reshapes a bunched-up *release*. Held = re-checked next loop (defer, never drop).
+#
+# **THE STAGGER IS A RATE LIMIT, NOT A LATENESS BOUND.** 15 min/nudge is 4/hour, so a long hold (a live
+# session, a presence defer) followed by a release can take hours to drain — the tail of that queue lands
+# in the small hours by arithmetic. The night curfew and the staleness cutoff below are the missing
+# question in its two forms: "is NOW a reasonable hour?" and "is this still about NOW?".
+STAGGER_STATE_FILE = ra.STAGGER_STATE_FILE  # "nudge-stagger.json" — shared with the ack path
 CATCHUP_STAGGER_SEC = 15 * 60
+
+# **An ack ADVANCES the stagger, after a debounce.** The 15-min hold exists to space a *release* the
+# owner has not caught up on; an ack IS the owner catching up, so making the next pending nudge wait out
+# the rest of the window is the rate limit punishing the behaviour it wants. `reminders_dequeue` (every
+# ack route ends there) stamps `last_ack_at` into the same file as the drip clock, and the gate below also
+# releases when that ack is NEWER than the last non-piercing fire AND at least this many seconds old. The
+# debounce is for a burst: three delivered nudges 👍'd within seconds — WRONG is firing the second one
+# (already acked) next; RIGHT is realising all three are acked and sending only the next still-pending
+# one. The `acked` gate (first in the order) makes the acked rows drop; the debounce makes sure the
+# dequeue for the burst's last 👍 has landed before the advance fires anything. Every ack overwrites the
+# stamp, so a burst measures from its LAST ack; a fire re-stamps `last_nonpiercing_fire` past the ack, so
+# one burst opens the window ONCE. It releases the STAGGER only: quiet / curfew / presence / live-session /
+# staleness all sit ahead of it and are not consulted about acks at all.
+ACK_ADVANCE_DEBOUNCE_SEC = 2 * 60
+
+# ------------------------------------------------------------------ Night curfew + staleness cutoff
+# **Night curfew (owner config `owner.nightCurfew`, default 01:00-07:00 owner-local).** A NON-piercing
+# nudge that LEAKED into the night is CONSUMED, not delivered — drop-not-defer, stamped `suppressed_at`
+# exactly like the quiet gate, so the EOD wrap and Consecutive Misses count it identically and it can
+# never re-fire at breakfast. The window is read through `identity_common.night_curfew_window` (a start
+# after the end wraps midnight; start == end disables the curfew). These are only the defaults, kept as
+# names for readers and tests.
+CURFEW_START_LOCAL = clock_time(*identity_common.DEFAULT_NIGHT_CURFEW[0])
+CURFEW_END_LOCAL = clock_time(*identity_common.DEFAULT_NIGHT_CURFEW[1])
+
+# **Staleness cutoff.** A NON-piercing nudge more than this far past due has stopped being a reminder and
+# become an interruption, whatever hour it is. Same drop-not-defer stamping. NO grace period, and no grace
+# on the curfew either: due-before-curfew + firing-inside-curfew = consumed even 5 minutes late. That
+# aggressiveness is deliberate and is the knob to soften first.
+MAX_LATENESS_SEC = 2 * 3600
 
 
 def parse_iso(s: str) -> datetime:
-    """Parse an ISO 8601 instant, accepting a trailing 'Z'. Returns an aware UTC datetime."""
+    """Parse an ISO 8601 instant, accepting a trailing 'Z'. Returns an aware UTC datetime.
+
+    Raises ``TypeError`` on a non-string argument (e.g. a JSON object/array read back from a cache
+    file the warm session clobbered) instead of the raw ``AttributeError`` a ``str`` method would
+    throw. Every caller that parses a cache value already guards ``(ValueError, TypeError)`` and fails
+    open, so a garbled ``last-peek`` / ``last_nonpiercing_fire`` degrades to "treat as due" rather than
+    crashing the scheduler task and taking the whole daemon down."""
+    if not isinstance(s, str):
+        raise TypeError(f"parse_iso expected an ISO 8601 string, got {type(s).__name__}")
     s = s.strip()
     if s.endswith("Z"):
         s = s[:-1] + "+00:00"
@@ -82,48 +207,125 @@ def parse_iso(s: str) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
-def _load_last_nudge_fire(state_dir: str) -> datetime | None:
-    """Instant we last delivered a NON-piercing nudge (the catch-up stagger clock). Absent/unparseable →
-    None: fail-open, so the next non-piercing nudge fires immediately rather than hanging on a bad file."""
-    data = load_json(os.path.join(state_dir, STAGGER_STATE_FILE), None)
-    if isinstance(data, dict) and data.get("last_nonpiercing_fire"):
+def _load_stagger_instant(state_dir: str, field: str) -> datetime | None:
+    """One ISO instant out of `nudge-stagger.json`, or None when absent/unparseable. Both readers below
+    want None on a bad value; what None MEANS differs per field and is documented on each."""
+    data = ra.load_stagger_state(state_dir)
+    if data.get(field):
         try:
-            return parse_iso(data["last_nonpiercing_fire"])
+            return parse_iso(data[field])
         except (ValueError, TypeError):
             return None
     return None
 
 
+def _load_last_nudge_fire(state_dir: str) -> datetime | None:
+    """Instant we last delivered a NON-piercing nudge (the catch-up stagger clock). Absent/unparseable →
+    None: fail-open, so the next non-piercing nudge fires immediately rather than hanging on a bad file."""
+    return _load_stagger_instant(state_dir, "last_nonpiercing_fire")
+
+
+def _load_last_ack_at(state_dir: str) -> datetime | None:
+    """Instant of the owner's most recent ack (`reminders_dequeue` stamps it). Absent/unparseable →
+    None, which the gate reads as NO ADVANCE — fail-safe in the opposite direction from the fire clock,
+    because the advance is a privilege the ack earns and a garbled stamp has earned nothing; the ordinary
+    15-min drip still applies, so the cost of a bad value is the old behaviour, never a wall."""
+    return _load_stagger_instant(state_dir, "last_ack_at")
+
+
+def _ack_advances_stagger(now: datetime, last_nudge_fire: datetime, last_ack_at: datetime | None) -> bool:
+    """The ack-advance predicate: a hold inside `CATCHUP_STAGGER_SEC` is released iff an ack landed
+    AFTER the last non-piercing fire and is at least `ACK_ADVANCE_DEBOUNCE_SEC` old (so a batch of 👍s
+    has finished landing and the `acked` gate has already consumed everything acked). An ack older than
+    the last fire is one this window has already spent — it advances nothing."""
+    if last_ack_at is None or last_ack_at <= last_nudge_fire:
+        return False
+    return (now - last_ack_at).total_seconds() >= ACK_ADVANCE_DEBOUNCE_SEC
+
+
 def _save_last_nudge_fire(state_dir: str, now: datetime) -> None:
-    save_json(os.path.join(state_dir, STAGGER_STATE_FILE),
-              {"last_nonpiercing_fire": now.isoformat().replace("+00:00", "Z")})
+    # MERGE (keeps `last_ack_at` standing) — `reminders_acks.save_stagger_state` is tmp + os.replace.
+    ra.save_stagger_state(state_dir, last_nonpiercing_fire=now.isoformat().replace("+00:00", "Z"))
 
 
-def _due_sort_key(r: dict) -> float:
-    """Fire order = oldest-due first, so a released backlog drips out in the order it came due (and the
-    single nudge that fires each pass is the most overdue one). Missing/bad due_at sorts last."""
+# Catch-up-drain order, when several rows share a `due_at` (a morning batch, a released backlog):
+# importance decides who goes first, never raw seed/insertion order alone — a High Today Todo seeded
+# deep into a large batch otherwise drains one row per CATCHUP_STAGGER_SEC and can go stale before its
+# turn ever comes. `{canonical key: rank}` (0 = most important), the order
+# `references/reminders-policy.md` defines; an entry's `importance` may be ANY backend's spelling (the
+# Notion emoji label or the canonical key) and is folded through `reminder_importance.normalize`.
+IMPORTANCE_RANK = dict(reminder_importance.RANK)
+# Missing/unrecognized importance — an ad-hoc `reminders_enqueue.py` nudge, a standing roll — is
+# NEUTRAL: the same rank as `notable`, so it can neither jump a High row nor get starved behind an
+# explicit Low one just for lacking the field.
+DEFAULT_IMPORTANCE_RANK = reminder_importance.DEFAULT_RANK
+
+
+def _importance_rank(r: dict) -> int:
+    return reminder_importance.rank((r or {}).get("importance"))
+
+
+def _due_sort_key(r: dict) -> tuple[float, int]:
+    """Fire order = oldest-due first, ties broken by importance (`IMPORTANCE_RANK`) so a High row
+    never queues behind a Low one just because it was seeded later in the same slot. Missing/bad
+    due_at sorts last. `sorted()` is stable, so two entries tied on BOTH keys keep their original —
+    i.e. seed — order, which is the fallback `references/reminders-policy.md` asks for."""
     if not isinstance(r, dict) or not r.get("due_at"):
-        return float("inf")
+        return (float("inf"), DEFAULT_IMPORTANCE_RANK)
     try:
-        return parse_iso(r["due_at"]).timestamp()
+        return (parse_iso(r["due_at"]).timestamp(), _importance_rank(r))
     except (ValueError, TypeError):
-        return float("inf")
+        return (float("inf"), DEFAULT_IMPORTANCE_RANK)
+
+
+# save_json's atomic-replace retry budget: ~0.6s total (0.1 + 0.2 + 0.3) across 4 attempts. Sized to
+# outlast a reader that just opens, reads and closes a small JSON file, without stalling the ~5s
+# scheduler beat that is save_json's most frequent caller.
+_REPLACE_ATTEMPTS = 4
+_REPLACE_BACKOFF_SEC = 0.1
 
 
 def load_json(path: str, default):
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            return json.load(fh)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return default
+    """A concurrent writer (e.g. the machine-wide session_stamp.py hook) can hold this exact path open
+    for write at the instant we open it for read; on Windows that raises PermissionError where POSIX
+    would just allow it, and an unhandled one kills the daemon's scheduler task. One short retry clears
+    the transient collision; if it's still locked after that, treat it the same as absent/corrupt rather
+    than propagate and crash the caller."""
+    for attempt in range(2):
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                return json.load(fh)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return default
+        except PermissionError:
+            if attempt == 0:
+                time.sleep(0.05)
+                continue
+            return default
+    return default
 
 
 def save_json(path: str, data) -> None:
+    """The write-side twin of load_json's retry, and for the same Windows reason. `os.replace` onto a
+    destination another process currently holds OPEN — seneschald-control.ps1's liveness check reading
+    `presence.lock` on its cycle, the cockpit's readers, a sibling script — fails with
+    PermissionError/WinError 5 where POSIX would rename straight through, and an unhandled one takes the
+    daemon down until it is restarted by hand.
+
+    Retry with a short backoff, then let it raise — a persistent failure is a real one (disk full, a
+    genuinely stuck handle) and must not be swallowed into a silently-not-saved file."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=2)
-    os.replace(tmp, path)
+    for attempt in range(_REPLACE_ATTEMPTS):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == _REPLACE_ATTEMPTS - 1:
+                raise
+            time.sleep(_REPLACE_BACKOFF_SEC * (attempt + 1))
 
 
 # ---------------------------------------------------------------- quiet window (do-not-disturb)
@@ -169,6 +371,96 @@ def entry_pierces_quiet(entry: dict) -> bool:
         return False
     channel = (entry.get("channel") or "telegram").lower()
     return channel == "call" or bool(entry.get("escalate")) or bool(entry.get("pierce_quiet"))
+
+
+def curfew_window() -> tuple:
+    """The owner's night-curfew window as ``(start, end)`` ``datetime.time`` values, read fresh from
+    ``owner.nightCurfew`` (``identity_common.night_curfew_window``; default 01:00-07:00). Never raises —
+    ``load_identity`` falls back to defaults on any problem. ``check_reminders`` reads it once per pass."""
+    (sh, sm), (eh, em) = identity_common.night_curfew_window(identity_common.load_identity())
+    return clock_time(sh, sm), clock_time(eh, em)
+
+
+def in_night_curfew(now: datetime, due: datetime, window: tuple | None = None) -> bool:
+    """True if a nudge due at ``due`` would be firing at ``now`` **inside the night curfew, having
+    leaked in from earlier** — i.e. it must be consumed rather than delivered. Pure predicate given
+    ``window``; the caller owns the piercing exemption and the stamping.
+
+    Two conditions, and BOTH are load-bearing:
+
+    1. **``now`` is inside the window** (``start <= local < end``). Gating on ``due`` alone would miss
+       the actual failure mode: an item due 22:50 that the stagger only releases at 01:20. What
+       matters is when the buzz *lands*, not when it was scheduled.
+    2. **``due`` is BEFORE that window occurrence started.** This gate consumes what leaked in from
+       the evening; it must NOT touch a nudge genuinely scheduled *inside* the small hours.
+
+    Both readings are the owner's wall clock (``clock.to_local`` → ``tz_common``: the configured owner
+    zone, DST-correct; machine-local when unconfigured), never a frozen offset. ``window`` is
+    ``(start, end)`` as ``datetime.time`` (default: :func:`curfew_window`, the owner's config). A window
+    whose start is after its end wraps midnight (e.g. 23:00-07:00): the occurrence containing ``now``
+    then began at ``start`` on the previous local date when ``now`` is past midnight. ``start == end``
+    disables the curfew."""
+    start, end = window if window is not None else curfew_window()
+    if start == end:
+        return False
+    local_now = clock.to_local(now)
+    t = local_now.time()
+    if start < end:
+        if not (start <= t < end):
+            return False
+        window_start = datetime.combine(local_now.date(), start)
+    else:  # wraps midnight
+        if t >= start:
+            window_start = datetime.combine(local_now.date(), start)
+        elif t < end:
+            window_start = datetime.combine(local_now.date() - timedelta(days=1), start)
+        else:
+            return False
+    return clock.to_local(due) < window_start
+
+
+def _stagger_held_sec(entry: dict, now: datetime) -> float:
+    """How long this entry has been waiting its turn behind the catch-up stagger's one-per-
+    ``CATCHUP_STAGGER_SEC`` drip, right now — or 0.0 if it isn't (this pass) and never has been.
+
+    Unlike ``presence_held_sec`` this is never folded into a running total on release: the wait is
+    continuous from the first tick the stagger gate actually holds the row (``stagger_deferred_since``,
+    stamped in ``_check_reminders_locked``) until it fires, so this always reads the length of the
+    CURRENT segment rather than a historical sum. That is also why it can never retroactively erase
+    lateness the row already had *before* it started waiting — see ``entry_lateness_sec``."""
+    since = entry.get("stagger_deferred_since")
+    if not since:
+        return 0.0
+    try:
+        return max(0.0, (now - parse_iso(since)).total_seconds())
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def entry_lateness_sec(entry: dict, due: datetime, now: datetime) -> float:
+    """How late this nudge is **in time the owner could actually have acted on it** — raw lateness
+    minus any accumulated presence-hold time (``presence_held_sec``; see the presence gate in
+    ``_check_reminders_locked``) and minus any time it has spent waiting its turn behind the catch-up
+    stagger (``_stagger_held_sec``).
+
+    Subtracting the presence hold is what keeps the staleness cutoff off a collision course with the
+    presence gate's **NO DROPS** contract. A ``require_place`` check alone would NOT have been enough:
+    ``presence_rules.should_defer`` has two rules, and only the place one carries a per-entry marker.
+    The **driving** rule holds any non-piercing nudge while ``activity == in_vehicle`` and leaves nothing
+    on the entry, so a nudge held through a >2 h drive would arrive at the cutoff hours late with no way
+    to tell it apart from one that was simply ignored. Measuring *actionable* lateness covers both rules
+    uniformly, with no special case for either.
+
+    **Subtracting the stagger wait is the same idea applied to the drip itself.** A nudge stuck behind
+    several others in the same due-time slot is not being ignored — it is mechanically unable to fire
+    any faster than one-per-``CATCHUP_STAGGER_SEC``. It does NOT make a row immune to staleness: the
+    segment only opens the first tick the stagger gate actually holds the row, so any lateness it already
+    carried at that instant is still counted in full ("stale beats stagger"). Only the *incremental*
+    wait from that point on stops compounding."""
+    held = entry.get("presence_held_sec")
+    held = float(held) if isinstance(held, (int, float)) and held > 0 else 0.0
+    held += _stagger_held_sec(entry, now)
+    return (now - due).total_seconds() - held
 
 
 def _presence_context_fresh(ctx: dict, now: datetime, max_age_sec: int = 6 * 3600) -> bool:
@@ -238,6 +530,11 @@ SESSION_TTL_SEC = 120  # gate: an interactive entry older than this = no longer 
 SESSION_VISIBLE_TTL_SEC = 3600  # awareness: entries older than this drop out of "who's live" listings
 SESSION_PRUNE_SEC = 24 * 3600  # hygiene: entries older than this are deleted opportunistically on write
 GATING_SOURCES = frozenset({"daemon", "desktop"})  # only interactive /assistant surfaces defer delivery
+# The interactive surfaces the owner is present at — never demoted to `build` by a hook stamp (see
+# write_session_heartbeat). Kept in step with `jobs.ASSISTANT_SURFACES`, and deliberately duplicated
+# rather than imported: `jobs` imports `sentinel` (deferred, inside a function) and an import back the
+# other way at module level would be a cycle. Two names, one meaning.
+ASSISTANT_SURFACES = frozenset({"daemon", "desktop"})
 
 
 def _session_stamp(now: datetime | None) -> str:
@@ -316,6 +613,16 @@ def write_session_heartbeat(state_dir: str, source: str, pid: int | None = None,
         if prev.get("started_at") and prev.get("pid") == pid and prev.get("source") == source:
             started_at = prev["started_at"]
         carried = {k: prev[k] for k in ("working_on", "cwd", "branch", "phase") if prev.get(k) is not None}
+    # An assistant surface is NEVER demoted to `build` by a later hook stamp
+    # (docs/cancel-attribution-spec.md). The machine-wide session_stamp.py hook fires on
+    # UserPromptSubmit and Stop — twice a turn — so without this rule it would overwrite an
+    # `/assistant` desktop chat's own marker within seconds of the chat setting it, every turn, and
+    # `desktop` would be indistinguishable from a delegated build session. A session that ran
+    # `/assistant` IS an assistant surface for as long as it lives (the entry is deleted on SessionEnd).
+    # Narrow on purpose: only a `build` stamp is refused; any other source is an honest update.
+    if (isinstance(prev, dict) and source == "build"
+            and prev.get("source") in ASSISTANT_SURFACES):
+        source = prev["source"]
     state = {"session_id": sid, "pid": pid, "source": source,
              "started_at": started_at, "last_seen": stamp}
     for key, val in (("working_on", working_on), ("cwd", cwd), ("branch", branch), ("phase", phase)):
@@ -452,18 +759,59 @@ def branch_is_claimed(state_dir: str, branch: str, now: datetime | None = None,
     return False
 
 
-def send_telegram(text: str, telegram_env: str) -> dict:
+def send_telegram(text: str, telegram_env: str, message_thread_id=None, topic=None,
+                  state_dir: str | None = None) -> dict:
     """Push a message via the sibling telegram_send.py. Returns its parsed JSON result.
-    Always returns a dict (never raises) so the daemon can act on {"ok": False} instead of crashing."""
+    Always returns a dict (never raises) so the daemon can act on {"ok": False} instead of crashing.
+
+    **`message_thread_id` is the private-chat TOPIC to send into, and it defaults to OFF.** `None` adds
+    no argument at all, so the argv this builds — and therefore the Bot API payload it produces — is
+    byte-identical to the one it built before this parameter existed. A caller replying into a thread
+    passes one.
+
+    **`topic` NAMES A PURPOSE INSTEAD OF A THREAD** (how reminder nudges can get their own channel).
+    This function reaches Telegram by RUNNING `telegram_send.py`, so it holds no token and no chat id and
+    cannot resolve a thread id itself; `--topic` is that resolution on the far side of the subprocess,
+    fail-open in every direction (a `telegram_send.py` without topic support is a later port's concern —
+    `reminder_topic_purpose` only ever asks for a topic when the optional `telegram_topics` module is
+    importable). `None` adds no argument.
+
+    **`state_dir` RIDES ONLY WHEN `topic` DOES, AND THAT IS DELIBERATE.** The state dir is what makes a
+    purpose resolvable (the topic map lives there), and adding it unconditionally would change the argv
+    of every send in the tree — including the main-chat nudges, whose claim is that they are
+    byte-identical to before this existed. In a test it names the temp dir, keeping topic state out of
+    the live file.
+
+    **A TIMEOUT HERE IS `ambiguous`.** When the 60 s ceiling fires, the child was still alive with the
+    request very probably on the wire — Telegram may have accepted it, and the reason we cannot say is
+    that we killed the process that knew. `telegram_send` classifies its own failures and can put
+    `ambiguous: true` in its result JSON, but a timeout produces no JSON at all, so this dict must carry
+    the flag itself or the failure reaches a retry loop with no phase on it and gets re-sent blind.
+
+    **The residual, named rather than papered over:** an UNPARSEABLE stdout (below) is deliberately
+    NOT flagged. That is a child that died abnormally, most often before it sent anything — a missing
+    env file, an import error — and flagging it would permanently retire the retry for every ordinary
+    misconfiguration. The timeout is flagged because the child was demonstrably still running."""
+    argv = [sys.executable, os.path.join(SCRIPT_DIR, "telegram_send.py"),
+            "--text", text, "--env-file", telegram_env]
+    if message_thread_id is not None:
+        # ABSENT, not an empty value: the assertion the tests make is an equality between two whole
+        # argv lists, which only holds if there is no extra flag to ignore.
+        argv += ["--message-thread-id", str(int(message_thread_id))]
+    if topic is not None:
+        argv += ["--topic", str(topic)]
+        if state_dir:
+            argv += ["--state-dir", state_dir]
     try:
         proc = subprocess.run(
-            [sys.executable, os.path.join(SCRIPT_DIR, "telegram_send.py"),
-             "--text", text, "--env-file", telegram_env],
+            argv,
             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
             creationflags=NO_WINDOW,
         )
     except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "telegram_send.py timed out"}
+        return {"ok": False, "ambiguous": True, "error": "telegram_send.py timed out",
+                "note": ("the request was still in flight when we killed it, so Telegram may "
+                         "already have delivered it — do NOT automatically re-send this text")}
     try:
         return json.loads(proc.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):
@@ -604,28 +952,82 @@ def poll_discord(discord_env: str, state_dir: str, commit: bool = True) -> dict:
         return {"ok": False, "error": "discord_poll.py timed out"}
 
 
+def reminder_topic_purpose(pierces: bool):
+    """Which `telegram_topics` purpose a nudge belongs to, or **`None` meaning "name no topic at
+    all"** — the main chat, with the argv byte-identical to the one this file built before topics
+    existed.
+
+    A thin wrapper over the OPTIONAL `telegram_topics.reminder_topic`, and the wrapper is the fail-open
+    layer: that module is imported HERE, lazily, so an install without it (or an import that fails)
+    costs the topic and never the nudge.
+
+    **The main-chat purpose COLLAPSES TO `None` RATHER THAN BEING PASSED THROUGH.** It would resolve to
+    the main chat anyway, but passing it would still put two extra flags on the argv — so the claim
+    *"a main-chat nudge sends exactly what it sent before"* would be an argument about a downstream
+    branch instead of an equality between two argv lists. Here it is the latter, and a test asserts
+    it."""
+    try:
+        import telegram_topics as tt  # noqa: PLC0415 — lazy + optional: an import may never cost a nudge
+        purpose = tt.reminder_topic(bool(pierces))
+        return None if purpose == tt.TOPIC_MAIN_CHAT else purpose
+    except Exception:  # noqa: BLE001 — no topic this time; the nudge goes to the main chat
+        return None
+
+
 def _deliver_reminder(channel: str, raw: str, telegram_env: str,
                       call_env: str | None, discord_env: str | None,
                       escalate: bool = False, interval_sec: int | None = None,
-                      max_attempts: int | None = None):
+                      max_attempts: int | None = None, pierces: bool = False,
+                      state_dir: str | None = None):
     """Route a due reminder to its channel. Returns (result_dict, effective_channel).
 
     A `call` speaks the raw line (no ⏰ prefix — TTS would read the emoji aloud); Telegram/Discord get
     the ⏰-prefixed text. An escalating `call` keeps ringing until the owner presses a digit (Worker-side).
     Any channel that isn't configured (or is unknown) falls back to Telegram so a critical nudge is
-    never silently dropped."""
+    never silently dropped.
+
+    **`pierces` PICKS THE TELEGRAM TOPIC AND NOTHING ELSE.** It is :func:`entry_pierces_quiet`'s answer
+    for this entry, passed down rather than recomputed here — the gate order already asked the question,
+    and a second definition of *piercing* is a second thing that can drift from the gates it is named
+    after. It changes no channel, no wording, no ordering and nothing about the call or Discord branches
+    (Telegram-only by scope)."""
     if channel == "call" and call_env:
         return send_call(raw, call_env, escalate=escalate,
                          interval_sec=interval_sec, max_attempts=max_attempts), "call"
     if channel == "discord" and discord_env:
         return send_discord(f"⏰ Reminder: {raw}", discord_env), "discord"
-    return send_telegram(f"⏰ Reminder: {raw}", telegram_env), "telegram"
+    purpose = reminder_topic_purpose(pierces)
+    if purpose is None:
+        # The two-argument call, byte-for-byte what this line has always been. It is also why the
+        # `send_telegram` test doubles that take exactly two arguments keep working on this path.
+        return send_telegram(f"⏰ Reminder: {raw}", telegram_env), "telegram"
+    return send_telegram(f"⏰ Reminder: {raw}", telegram_env, topic=purpose,
+                         state_dir=state_dir), "telegram"
 
 
 def check_reminders(state_dir: str, now: datetime, fire: bool, telegram_env: str,
                     call_env: str | None = None, discord_env: str | None = None) -> list:
     """Fire any due, unfired reminders (act-low). Routes each to its `channel`
     (telegram | call | discord; default telegram). Returns signal dicts describing what happened.
+
+    **THE GATE ORDER, which is the part that is easy to break later:**
+
+        acked -> quiet -> CURFEW -> presence -> live-session -> STALENESS -> stagger
+
+    Four of those DROP (consume the entry, stamping it) and three DEFER (stamp nothing that changes its
+    pending-ness, re-check next tick): acked/quiet/curfew/staleness drop; presence/live-session/stagger
+    defer. Curfew sits under quiet so an explicit request still names itself, and staleness sits after
+    the live-session defer (so a session-held nudge dies there) but is unreachable from a presence hold
+    (so a presence-held one never can). Moving either one is a behaviour change, not a refactor.
+
+    **A delivery attempt that comes back `ambiguous` is ALSO consumed, not left due.**
+    `_deliver_reminder`/`send_telegram` set `res["ambiguous"] = True` precisely when the request may
+    already have reached the owner — a killed-mid-flight subprocess, a rate-limit (429) that outran its
+    own retry ceiling — and a loop checking only `res.get("ok")` would leave that row exactly as due as
+    before and fire it again, blind, next tick. It is stamped `ambiguous_send_at` (skipped at the top of
+    the loop like `fired_at`/`suppressed_at`/`acked_at`) and reported as `reminder_send_ambiguous`, never
+    `reminder_fired` or `reminder_send_failed` — a human has to look, because this loop cannot tell
+    "delivered" from "lost" any better than `telegram_send` could.
 
     The whole load→deliver→save section holds the cross-process queue lock (ra.queue_lock): since the
     asyncio daemon, this runs in a worker thread WHILE a chat turn's reminders_dequeue.py (or a slot's
@@ -671,14 +1073,22 @@ def _check_reminders_locked(state_dir: str, now: datetime, fire: bool, telegram_
     # one-fire flag. Together they turn a bunched release into a drip. Iterate oldest-due first so the one
     # nudge that fires each pass is the most overdue, and a backlog drains in the order it came due.
     last_nudge_fire = _load_last_nudge_fire(state_dir)
+    # Ack-advance: the owner's most recent ack instant, read once per pass. Only consulted when the
+    # stagger would otherwise hold, and only ever to RELEASE the stagger — never any gate above it.
+    last_ack_at = _load_last_ack_at(state_dir)
+    # The owner's night-curfew window (owner.nightCurfew), read once per pass.
+    curfew = curfew_window()
     fired_nonpiercing = False
     signals, changed = [], False
     for r in sorted(reminders, key=_due_sort_key):
-        if r.get("fired_at") or r.get("suppressed_at") or r.get("acked_at") or not r.get("due_at"):
+        if not isinstance(r, dict):
+            continue
+        if (r.get("fired_at") or r.get("suppressed_at") or r.get("acked_at")
+                or r.get("ambiguous_send_at") or not r.get("due_at")):
             continue
         try:
             due = parse_iso(r["due_at"])
-        except ValueError:
+        except (ValueError, TypeError):
             signals.append({"kind": "reminder_error", "id": r.get("id"), "detail": f"bad due_at {r.get('due_at')!r}"})
             continue
         if due > now:
@@ -701,17 +1111,52 @@ def _check_reminders_locked(state_dir: str, now: datetime, fire: bool, telegram_
             changed = True
             signals.append({"kind": "reminder_suppressed_quiet", "id": r.get("id"), "text": r.get("text")})
             continue
+        # Night curfew: a non-piercing nudge that LEAKED into the owner's night window is consumed, not
+        # delivered. Drop-not-defer with the same `suppressed_at` stamping as quiet, so downstream counting
+        # (EOD wrap, Consecutive Misses) treats the two identically. Piercing entries are exempt —
+        # Critical and Super-Critical still come through at 3 AM, which is the entire point of the pierce
+        # set. Placed AFTER quiet (the explicit request keeps naming itself when both apply) and BEFORE
+        # presence; NOT exempted by presence-hold time the way staleness is — whether 2 AM is a
+        # reasonable moment to buzz does not depend on why we're late.
+        if fire and not pierces and in_night_curfew(now, due, curfew):
+            r["suppressed_at"] = now.isoformat().replace("+00:00", "Z")
+            changed = True
+            signals.append({"kind": "reminder_suppressed_curfew", "id": r.get("id"),
+                            "reminder_id": r.get("reminder_id"), "text": r.get("text"),
+                            "due_at": r.get("due_at")})
+            continue
         # Presence defer: hold — never drop — a nudge until presence conditions clear (Phase 1 place-gate;
-        # Phase 2 driving). Stamp NOTHING, so it stays pending and re-checks next loop (fires late, never
-        # never). Fail-open: only defer when the context is FRESH; absent/stale/unavailable presence fires.
-        # Piercing items (Call Me / Critical) are never held by the driving rule.
-        if (fire and _presence_defer is not None
-                and _presence_context_fresh(presence_ctx, now)
-                and _presence_defer(r, presence_ctx, pierces)):
+        # Phase 2 driving). Fail-open: only defer when the context is FRESH; absent/stale/unavailable
+        # presence fires. Piercing items (Call Me / Critical) are never held by the driving rule.
+        presence_holds = (fire and _presence_defer is not None
+                          and _presence_context_fresh(presence_ctx, now)
+                          and _presence_defer(r, presence_ctx, pierces))
+        if presence_holds:
+            # AMENDS the old "stamp NOTHING" defer contract, deliberately: that contract exists so a
+            # deferred entry stays PENDING rather than being consumed, and an accumulator does not
+            # consume it. `fired_at`/`suppressed_at`/`acked_at` are still untouched, so the entry
+            # re-checks next loop exactly as before — the only new bytes are a bookkeeping stamp the
+            # staleness cutoff below needs in order to not eat presence-held nudges.
+            if not r.get("presence_deferred_since"):
+                r["presence_deferred_since"] = now.isoformat().replace("+00:00", "Z")
+                changed = True
             signals.append({"kind": "reminder_deferred_presence", "id": r.get("id"),
                             "require_place": r.get("require_place"),
                             "activity": presence_ctx.get("activity"), "text": r.get("text")})
             continue
+        # Released from a presence hold: close the open segment into the accumulator. Runs for BOTH
+        # presence rules (place and driving) because it keys off the stamp, not off `require_place` —
+        # the driving rule has no per-entry marker to key off. A re-hold later just opens a new segment.
+        if fire and r.get("presence_deferred_since"):
+            try:
+                held_sec = (now - parse_iso(r["presence_deferred_since"])).total_seconds()
+            except (ValueError, TypeError):
+                held_sec = 0.0  # a garbled stamp costs the exemption, never the nudge
+            prior = r.get("presence_held_sec")
+            prior = float(prior) if isinstance(prior, (int, float)) and prior > 0 else 0.0
+            r["presence_held_sec"] = round(prior + max(0.0, held_sec), 3)
+            r.pop("presence_deferred_since", None)
+            changed = True
         # Live-session defer: HOLD a non-piercing nudge (stamp NOTHING → re-checked next loop, defer-not-
         # drop) while an interactive /assistant session is live, so it doesn't buzz into a live
         # conversation; it fires naturally once the session ages out of the TTL. Piercing items (Call Me /
@@ -720,15 +1165,58 @@ def _check_reminders_locked(state_dir: str, now: datetime, fire: bool, telegram_
         if fire and session_live and not pierces:
             signals.append({"kind": "reminder_deferred_session", "id": r.get("id"), "text": r.get("text")})
             continue
+        # Staleness cutoff: a non-piercing nudge more than MAX_LATENESS_SEC past due has stopped being a
+        # reminder. Consumed, same stamping as quiet/curfew. Piercing entries are exempt, and so is any
+        # time the presence gate held it OR the catch-up stagger has — entry_lateness_sec subtracts both
+        # `presence_held_sec` and the running `stagger_deferred_since` segment the gate below maintains.
+        #
+        # Placed AFTER the live-session defer and BEFORE the stagger, and the order is the fix: a nudge
+        # held three hours by a live session SHOULD die here, while a nudge held by presence never
+        # reaches this gate at all (it `continue`d above), and one released from a presence hold arrives
+        # with its held time already netted out. A nudge merely waiting its turn in the drip must not go
+        # stale for that alone — but an entry ALREADY stale the first tick it reaches the stagger gate
+        # still dies right here (the segment only opens then): the drip is never a hiding place.
+        if fire and not pierces:
+            late_sec = entry_lateness_sec(r, due, now)
+            if late_sec > MAX_LATENESS_SEC:
+                r["suppressed_at"] = now.isoformat().replace("+00:00", "Z")
+                changed = True
+                stale_signal = {"kind": "reminder_suppressed_stale", "id": r.get("id"),
+                                "reminder_id": r.get("reminder_id"), "text": r.get("text"),
+                                "due_at": r.get("due_at"), "late_sec": int(late_sec),
+                                "presence_held_sec": int(r.get("presence_held_sec") or 0),
+                                "stagger_held_sec": int(_stagger_held_sec(r, now))}
+                signals.append(stale_signal)
+                # A silent kill IS the failure, not a side effect of one — `presence.log` is a
+                # daemon-internal log nobody reads day to day. Durable + fail-open: a broken ledger
+                # costs the breadcrumb, never this pass. The EOD Wrap reads
+                # `reminder_suppressions.count_today`.
+                reminder_suppressions.record(state_dir, stale_signal, now=now)
+                continue
         # Catch-up stagger gate: a released backlog must drip, not wall. A non-piercing nudge is HELD
-        # (stamped nothing → re-checked next loop, defer-not-drop) if we already fired one this pass, or if
-        # the last non-piercing fire was under CATCHUP_STAGGER_SEC ago. Piercing items skip the gate.
-        if (fire and not pierces
-                and (fired_nonpiercing
-                     or (last_nudge_fire is not None
-                         and (now - last_nudge_fire).total_seconds() < CATCHUP_STAGGER_SEC))):
+        # (re-checked next loop, defer-not-drop) if we already fired one this pass, or if the last
+        # non-piercing fire was under CATCHUP_STAGGER_SEC ago — UNLESS an ack newer than that fire has
+        # aged past ACK_ADVANCE_DEBOUNCE_SEC (`_ack_advances_stagger`), in which case the window is
+        # released early: the owner has caught up, so the next pending nudge follows the ack, not the
+        # clock. The one-per-pass half is untouched by acks. Piercing items skip the gate.
+        #
+        # `stagger_deferred_since` is stamped the first tick this predicate holds a row (never reset
+        # while it keeps holding) — the segment `entry_lateness_sec`/`_stagger_held_sec` read above so
+        # the staleness gate stops counting this wait as lateness once it starts. Cleared once the row
+        # is no longer held (about to fire) — bookkeeping only.
+        stagger_holds = (fire and not pierces
+                         and (fired_nonpiercing
+                              or (last_nudge_fire is not None
+                                  and (now - last_nudge_fire).total_seconds() < CATCHUP_STAGGER_SEC
+                                  and not _ack_advances_stagger(now, last_nudge_fire, last_ack_at))))
+        if stagger_holds:
+            if not r.get("stagger_deferred_since"):
+                r["stagger_deferred_since"] = now.isoformat().replace("+00:00", "Z")
+                changed = True
             signals.append({"kind": "reminder_stagger_held", "id": r.get("id"), "text": r.get("text")})
             continue
+        if r.pop("stagger_deferred_since", None) is not None:
+            changed = True
         # Due now. Reminders are act-low (the owner's own content) — the daemon delivers directly.
         if fire:
             raw = r.get("text", "(no text)")
@@ -736,7 +1224,11 @@ def _check_reminders_locked(state_dir: str, now: datetime, fire: bool, telegram_
             res, used = _deliver_reminder(
                 channel, raw, telegram_env, call_env, discord_env,
                 escalate=bool(r.get("escalate")),
-                interval_sec=r.get("interval_sec"), max_attempts=r.get("max_attempts"))
+                interval_sec=r.get("interval_sec"), max_attempts=r.get("max_attempts"),
+                # `pierces` was computed at the top of this iteration by the SAME predicate the quiet,
+                # curfew, session and staleness gates all read, so the topic split and the pierce set
+                # cannot disagree about one entry.
+                pierces=pierces, state_dir=state_dir)
             if channel != "telegram" and used == "telegram":
                 signals.append({"kind": "reminder_channel_fallback", "id": r.get("id"), "requested": channel})
             if res.get("ok"):
@@ -747,14 +1239,48 @@ def _check_reminders_locked(state_dir: str, now: datetime, fire: bool, telegram_
                 if used == "telegram":
                     record_sent_message(state_dir, res, "nudge", f"⏰ Reminder: {raw}",
                                         reminder_id=r.get("reminder_id"), now=now)
+                # The assertions log (optional `mouth` module, a later port): record what the owner was
+                # actually told, in the wording they got it in. Recorded HERE rather than inside the
+                # send helpers because this is the frame that knows the `kind` and has already confirmed
+                # the send landed. `record_assertion` never raises; absent module = no record.
+                if _mouth is not None:
+                    _mouth.record_assertion(
+                        state_dir, surface=used, kind="reminder", speaker="sentinel",
+                        text=raw if used == "call" else f"⏰ Reminder: {raw}", now=now)
                 # A non-piercing fire opens the stagger window (and spends this pass's one slot); piercing
                 # items are a separate lane — they neither consume nor reset the drip clock.
                 if not pierces:
                     fired_nonpiercing = True
                     last_nudge_fire = now
                     _save_last_nudge_fire(state_dir, now)
-                signals.append({"kind": "reminder_fired", "id": r.get("id"), "channel": used, "text": raw})
+                fired = {"kind": "reminder_fired", "id": r.get("id"), "channel": used, "text": raw}
+                # **WHICH THREAD IT LANDED IN, WHEN IT LANDED IN ONE** — read off the send result rather
+                # than off the purpose we asked for, because the two differ on exactly the cases that
+                # matter (topics off, a failed detect, a stale id that fell back). Additive and
+                # absent-not-null, so a main-chat fire emits the signal it always did.
+                thread = res.get("message_thread_id")
+                if isinstance(thread, int) and not isinstance(thread, bool) and thread > 0:
+                    fired["message_thread_id"] = thread
+                signals.append(fired)
+            elif res.get("ambiguous"):
+                # The send helpers classify a failure `ambiguous` precisely when the request may already
+                # have been delivered (it went out and the answer was lost, a 429 outran its own retry
+                # ceiling, or the subprocess timed out with the child still on the wire). HOLD, never
+                # re-arm: stamp it so it is never retried automatically — under-sending is recoverable;
+                # double-sending is not — and surface it distinctly so a human can check whether it
+                # actually landed.
+                r["ambiguous_send_at"] = now.isoformat().replace("+00:00", "Z")
+                changed = True
+                failures.record(state_dir, "sentinel.check_reminders", "reminder_send_ambiguous",
+                                detail=f"id={r.get('id')} channel={used} error={res.get('error')}", now=now)
+                signals.append({"kind": "reminder_send_ambiguous", "id": r.get("id"), "channel": used,
+                                "error": res.get("error")})
             else:
+                # A nudge that was supposed to fire and didn't — the send itself failed, not a Python
+                # exception, so `failures.record` is called here rather than from an except handler.
+                # Never raises; a failed append costs the row, never the signal below it.
+                failures.record(state_dir, "sentinel.check_reminders", "reminder_send_failed",
+                                detail=f"id={r.get('id')} channel={used} error={res.get('error')}", now=now)
                 signals.append({"kind": "reminder_send_failed", "id": r.get("id"), "channel": used, "error": res.get("error")})
         else:
             signals.append({"kind": "reminder_due", "id": r.get("id"), "text": r.get("text")})
