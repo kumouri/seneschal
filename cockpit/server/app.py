@@ -63,6 +63,7 @@ Run (dev): see ../README.md. Serves the built frontend (cockpit/web/dist) as sta
 from __future__ import annotations
 
 import json
+import urllib.parse
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -159,6 +160,44 @@ app = FastAPI(title="Seneschal Cockpit", version="0.1.0", lifespan=lifespan)
 # Starlette's TestClient reports its synthetic client as ("testclient", ...) — allow it alongside the
 # real loopback hosts so the unit tests exercise this middleware instead of needing to bypass it.
 _ALLOWED_CLIENT_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "testclient"})
+
+# `dev` mode (COCKPIT_DEV_NO_AUTH=1) sets no cookie at all, so SameSite=Strict protects nothing there.
+# A WebSocket handshake is exempt from the Same-Origin Policy — unlike fetch/XHR, ANY page a browser on
+# this machine has open can open one, and it reaches the loopback bind regardless. So in `dev` mode the
+# handshake's `Origin` (set by the browser itself; page JS cannot forge it) is the only signal left to
+# gate on. `http://testserver` is Starlette TestClient's synthetic default host, parallel to
+# "testclient" above.
+_ALLOWED_DEV_WS_ORIGINS = frozenset({
+    "http://127.0.0.1:8760", "http://localhost:8760",  # the built frontend, served directly (README.md)
+    "http://127.0.0.1:5173", "http://localhost:5173",  # `npm run dev`'s Vite dev server (vite.config.ts)
+    "http://testserver",
+})
+
+
+def _dev_ws_origin_same_host(origin: Optional[str], host_header: Optional[str], is_secure: bool) -> bool:
+    """Second `dev`-mode WS gate, beside `_ALLOWED_DEV_WS_ORIGINS`: accept an `Origin` naming the SAME
+    host the browser sent in its `Host` header on this very handshake, with a matching scheme.
+
+    This covers a reverse proxy on a LAN hostname (e.g. `http://cockpit.lan` -> 127.0.0.1:8760) without
+    a per-hostname allowlist: the proxy forwards the client's `Host` unchanged, so a page loaded from
+    that hostname sends `Origin: http://cockpit.lan` + `Host: cockpit.lan`. It compares two
+    client-supplied values against EACH OTHER and never treats either alone as a credential: a hostile
+    page's `Origin` is pinned by the browser to its own origin, so aiming `new WebSocket(...)` at the
+    proxied host yields a mismatch and is refused. `oidc` mode never reaches this (it gates on the
+    session cookie).
+
+    Known limit: `is_secure` is the scheme of THIS hop, so a TLS-terminating proxy in front of plain
+    HTTP uvicorn needs proxy-header handling before an `https://` Origin would match."""
+    if not origin or not host_header:
+        return False
+    try:
+        parsed = urllib.parse.urlsplit(origin)
+    except ValueError:
+        return False
+    expected_scheme = "https" if is_secure else "http"
+    if parsed.scheme != expected_scheme or not parsed.netloc:
+        return False
+    return parsed.netloc == host_header
 
 
 @app.middleware("http")
@@ -591,13 +630,23 @@ async def ws_endpoint(websocket: WebSocket):
     chat.send/status.get/control.restart back (see _handle_browser_frame). Gated by the same auth mode
     every REST route uses (v5: a real session cookie in `oidc` mode, the dev stub in `dev` mode) —
     `@app.middleware("http")` does not run for websocket connections (Starlette limitation), so this
-    re-checks explicitly; the uvicorn 127.0.0.1 bind still covers exposure regardless of route type.
-    SameSite=Strict means a cross-site page can't even get this cookie attached to its handshake
-    request, so no separate CSRF check is needed here (see auth.py's module docstring)."""
+    re-checks explicitly. In `oidc` mode SameSite=Strict keeps a cross-site page from getting the
+    session cookie attached to its handshake. In `dev` mode there is no cookie, and the loopback bind
+    does NOT help — a WebSocket handshake is exempt from the Same-Origin Policy, so any page open in
+    the owner's browser could otherwise connect — so `dev` requires an allowlisted `Origin`
+    (`_ALLOWED_DEV_WS_ORIGINS`, or `_dev_ws_origin_same_host` for a reverse-proxied hostname) and
+    closes 4403 otherwise."""
     mode = auth.auth_mode()
     if mode == "unconfigured":
         await websocket.close(code=4401)
         return
+    if mode == "dev":
+        origin = websocket.headers.get("origin")
+        if origin not in _ALLOWED_DEV_WS_ORIGINS and not _dev_ws_origin_same_host(
+            origin, websocket.headers.get("host"), websocket.url.scheme == "wss"
+        ):
+            await websocket.close(code=4403)
+            return
     if mode == "oidc":
         cookie = websocket.cookies.get(session_mod.SESSION_COOKIE_NAME)
         if auth.current_session_from_cookie(cookie) is None:
