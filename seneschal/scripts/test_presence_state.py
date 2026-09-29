@@ -336,10 +336,13 @@ class SeedDayRollover(unittest.TestCase):
     def test_reaper_stamps_seed_under_its_name_on_clean_exit(self):
         # The reused slot lifecycle: a clean seed exit stamps slots.json[SEED_SLOT_NAME], so the
         # next-loop guard reads "already seeded today" — the once-per-day contract.
+        # A frozen instant, not the live clock: the stamp is derived from the `now_local` handed in,
+        # and asserting against a second live read could straddle midnight between the two.
+        now = datetime(2026, 1, 15, 9, 30)
         children = {pr.SEED_SLOT_NAME: _RcProc(rc=0)}
-        pr.reap_finished_slots(children, self.dir, lambda *_: None, {}, now_local=datetime.now())
+        pr.reap_finished_slots(children, self.dir, lambda *_: None, {}, now_local=now)
         stamped = pr.load_json(os.path.join(self.dir, "slots.json"), {})
-        self.assertEqual(stamped.get(pr.SEED_SLOT_NAME), datetime.now().strftime("%Y-%m-%d"))
+        self.assertEqual(stamped.get(pr.SEED_SLOT_NAME), "2026-01-15")
 
 
 class StoreBackendActive(unittest.TestCase):

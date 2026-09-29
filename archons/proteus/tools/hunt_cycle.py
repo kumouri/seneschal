@@ -213,8 +213,12 @@ def main(argv=None) -> int:
             notified.append(job["url"])
 
     if not args.dry_run:
-        with open(ledger_path, "w", encoding="utf-8") as fh:
+        # Build-then-replace: the ledger is the only record of which jobs were already notified,
+        # and a torn in-place write would re-notify every one of them on the next cycle.
+        staged = ledger_path + ".tmp"
+        with open(staged, "w", encoding="utf-8") as fh:
             json.dump(ledger, fh, ensure_ascii=False, indent=1)
+        os.replace(staged, ledger_path)
         with open(os.path.join(OUT_DIR, "cycles.jsonl"), "a", encoding="utf-8") as fh:
             fh.write(json.dumps({"at": at, "fetched": scored_doc.get("considered"),
                                  "kept": scored_doc.get("kept"), "new_hot": len(newly_hot),

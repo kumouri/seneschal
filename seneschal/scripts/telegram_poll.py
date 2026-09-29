@@ -56,6 +56,8 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
+import memory_write as mw
+
 ENV_KEYS = ("TELEGRAM_BOT_TOKEN", "TELEGRAM_ALLOWED_CHAT_IDS", "TELEGRAM_API_BASE")
 
 DEFAULT_OFFSET_FILE = os.path.normpath(
@@ -107,9 +109,9 @@ def read_offset(path: str):
 
 
 def write_offset(path: str, offset: int) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write(str(offset))
+    # Atomic: this is the only record of how far the poller got, and an empty file reads as "no
+    # offset" -- which replays every update Telegram still holds.
+    mw.write_text(path, str(offset))
 
 
 def extract_media(msg: dict) -> dict | None:

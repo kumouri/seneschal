@@ -34,6 +34,7 @@ from datetime import date, datetime, timedelta
 from health_common import (
     CUT_HOUR, DEFAULT_DB, DEFAULT_STATE_DIR, EPISODE_GAP_MIN, connect, night_start, sleep_day)
 from identity_common import load_identity, owner_tz_label
+import memory_write as mw
 
 DEFAULT_OUT = os.path.join(DEFAULT_STATE_DIR, "health-dashboard.html")
 
@@ -674,9 +675,7 @@ def main() -> int:
     conn = connect(args.db)
     data = load(conn, args.days)
     page = build(data)
-    os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
-    with open(args.out, "w", encoding="utf-8") as fh:
-        fh.write(page)
+    mw.write_text(args.out, page)
     print(os.path.abspath(args.out))
     return 0
 

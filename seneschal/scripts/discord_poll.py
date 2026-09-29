@@ -36,6 +36,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+import memory_write as mw
+
 ENV_KEYS = ("DISCORD_BOT_TOKEN", "DISCORD_CHANNEL_ID", "DISCORD_ALLOWED_USER_IDS", "DISCORD_API_BASE")
 
 USER_AGENT = "DiscordBot (https://github.com/kumouri/seneschal, 1.0)"
@@ -70,9 +72,9 @@ def read_offset(path: str):
 
 
 def write_offset(path: str, offset: str) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write(str(offset))
+    # Atomic, for the same reason as `telegram_poll.write_offset`: an empty offset file reads as
+    # "start from the beginning", so a torn write replays the channel.
+    mw.write_text(path, str(offset))
 
 
 def get_messages(token: str, api_base: str, channel_id: str, after: str | None, limit: int) -> list:
