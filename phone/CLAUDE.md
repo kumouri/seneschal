@@ -22,6 +22,12 @@ Inbound call → Worker `POST /voice` runs the cheapest-first cascade (`src/scre
    REST), logs to D1, and notifies the owner — **Telegram when configured, SMS only as the fallback**
    (`src/notify/owner.ts`).
 
+A **live transfer** (a stage-1 allowlisted dial, a `ring_through` post-gate, or a stage-4 connect)
+rings the owner **three times** (12 s each, `/after-bridge?attempt=N`) before voicemail —
+`LIVE_TRANSFER_ATTEMPTS` / `LIVE_TRANSFER_RING_SEC` in `src/twilio/transfer.ts`. Keep the ring time
+**below the owner's cell no-answer-forward timer**, or a missed bridge forwards back into the screener.
+The reminder escalation's cap is a different constant.
+
 **Critical:** the DO uses the **non-hibernating** WebSocket API (`server.accept()`), not
 `state.acceptWebSocket()` — hibernation resets `callSid`/`history` every turn and breaks everything. Don't
 "optimize" it back to hibernation.
@@ -35,7 +41,8 @@ Inbound call → Worker `POST /voice` runs the cheapest-first cascade (`src/scre
   platform default voice. The env overrides it (`ASSISTANT_NAME` / `ASSISTANT_VOICE_ID` /
   `ASSISTANT_TTS_PROVIDER` → `personaFromEnv` in `src/config.ts`); the canonical persona lives in
   `persona/persona.md` at the repo root, and the setup wizard emits these env values.
-- `src/relay/session.ts` — the `RelaySession` Durable Object. `src/twilio/calls.ts` — live-call transfer.
+- `src/relay/session.ts` — the `RelaySession` Durable Object. `src/twilio/calls.ts` — live-call
+  transfer; `src/twilio/transfer.ts` — the three-attempt loop + `liveTransferTwiml`.
 - `src/notify/owner.ts` — the one door for owner notifications (Telegram else SMS; a failed Telegram
   send still tries SMS); `telegram.ts` talks to the Bot API directly (the Worker can't reach the
   daemon) and uploads voicemail audio.

@@ -123,7 +123,7 @@ export class RelaySession {
     try {
       if (terminal.kind === "connect") {
         await this.alertConnecting(terminal.callerName, terminal.reason);
-        await redirectToDial(this.env, this.callSid, this.env.USER_CELL_E164, this.base);
+        await redirectToDial(this.env, this.callSid, this.base, this.fromE164);
         await recordCall(this.env.DB, {
           id, fromE164: this.fromE164, toE164: this.toE164, startedAt, endedAt,
           outcomeStage: "conversation", verdict: "bridged",

@@ -21,6 +21,10 @@ Answering and conversing with every robocaller is expensive. On Twilio you're on
                                -> connect / take message / mark spam
 ```
 
+A **connect** (and an allowlisted dial) rings the owner's cell up to **three times** (12 s each) before
+rolling to voicemail; the voicemail's transcript — and, over Telegram, the recording itself — then goes to
+the owner. See [Owner notifications](#owner-notifications) and [Live transfer](#live-transfer-three-rings-then-a-message).
+
 Spam that gets flagged is remembered, so repeat offenders are rejected for $0 forever after. Target cost
 at ~8 calls/day: **~$5–10/mo**.
 
@@ -84,6 +88,17 @@ either one alone leaves the Worker on SMS. For `wrangler dev`, put the same keys
 (`.dev.vars.example` lists them). A merged Worker change is not live until someone runs
 `wrangler deploy`.
 
+### Live transfer: three rings, then a message
+
+When the screener connects a caller (or an allowlisted contact dials straight through), the `<Dial>` to
+the owner's cell rings for `LIVE_TRANSFER_RING_SEC` (**12 s**) and reports to `/after-bridge?attempt=N`.
+Unanswered ⇒ dial again, up to `LIVE_TRANSFER_ATTEMPTS` (**3**) in total; only then does the caller hear
+the voicemail prompt. Both constants live in `src/twilio/transfer.ts`. Keep the ring time **below your
+cell's no-answer-forward timer** (often 15 s when shortened) — otherwise a missed bridge forwards back to
+the Twilio number and the caller is screened all over again. This is **not** the reminder escalation's
+cap (`CallEscalation`, default 15 tries): a caller shouldn't be held for minutes, but the assistant can
+keep calling the owner about a reminder for half an hour.
+
 ## Layout
 
 - `src/screener/funnel.ts` — the tiered routing decision (pure, tested).
@@ -94,6 +109,8 @@ either one alone leaves the Worker on SMS. For `wrangler dev`, put the same keys
 - `src/escalation/` — the `CallEscalation` Durable Object (call-until-answered, storage alarm).
 - `src/notify/` — owner notifications: `owner.ts` (the Telegram-else-SMS switch), `telegram.ts`,
   `sms.ts`, `format.ts`; `call.ts` places outbound reminder calls.
+- `src/twilio/` — `calls.ts` (re-point a live call via REST), `transfer.ts` (the three-attempt live
+  transfer + its constants).
 - `src/data/` — D1 access + `schema.sql`.
 - `android/` — the on-device blocker + presence/health companion app (committed Gradle project).
 - `test/` — vitest unit tests for the pure logic.

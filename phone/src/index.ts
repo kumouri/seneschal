@@ -16,7 +16,8 @@ import { configured, personaFromEnv, settingsFromEnv } from "./config";
 import type { CallerInfo } from "./screener/decision";
 import { decideFunnel, decidePostGate } from "./screener/funnel";
 import { listBlocklist, lookupLists, recordGateFail, syncGoogleContacts, type GoogleContact } from "./data/db";
-import { connectRelay, dial, gate, hangupResponse, reject, say, sayVoiceOf, voicemail, wssOf } from "./twiml";
+import { connectRelay, gate, hangupResponse, reject, say, sayVoiceOf, voicemail, wssOf } from "./twiml";
+import { liveTransferTwiml, nextLiveTransferStep, parseAttempt } from "./twilio/transfer";
 import { notifyOwner } from "./notify/owner";
 import { sendVoicemailAudio, telegramConfigured } from "./notify/telegram";
 import { placeCall } from "./notify/call";
@@ -70,7 +71,9 @@ async function handleVoice(request: Request, env: Env): Promise<Response> {
 
   switch (decision.stage) {
     case "allow":
-      return xml(dial(settings.userCellE164, env.TWILIO_NUMBER_E164));
+      // Allowlisted: ring the owner straight through — attempt 1 of the live
+      // transfer, so an unanswered call re-rings and then takes a message like any other.
+      return xml(liveTransferTwiml(env, baseUrlOf(request, env), 1, from));
     case "reject":
       return xml(reject());
     default:
@@ -102,7 +105,7 @@ async function handleGate(request: Request, env: Env): Promise<Response> {
 
   const post = decidePostGate(settings);
   if (post.stage === "allow") {
-    return xml(dial(settings.userCellE164, env.TWILIO_NUMBER_E164));
+    return xml(liveTransferTwiml(env, baseUrlOf(request, env), 1, from));
   }
 
   // Hand to Claude. A per-call session id isolates this call's Durable Object
@@ -271,11 +274,25 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-/** After a live-transfer dial ends: hang up if it connected, else roll to voicemail. */
+/**
+ * After a live-transfer dial ends: hang up if it connected, ring the owner again
+ * while attempts remain (LIVE_TRANSFER_ATTEMPTS — `src/twilio/transfer.ts`, NOT the
+ * reminder escalation's cap), else roll to voicemail. The attempt number rides
+ * the action URL's query string; so does the caller, because Twilio's `From` on
+ * this callback is the leg's, not always the original caller's.
+ */
 async function handleAfterBridge(request: Request, env: Env): Promise<Response> {
   const form = await request.formData();
-  if (field(form, "DialCallStatus") === "completed") return xml(hangupResponse());
-  const from = field(form, "From");
+  const url = new URL(request.url);
+  const attempt = parseAttempt(url.searchParams.get("attempt"));
+  const fromQuery = url.searchParams.get("from") ?? "";
+  const from = fromQuery !== "" ? fromQuery : field(form, "From");
+  const step = nextLiveTransferStep(field(form, "DialCallStatus"), attempt);
+  if (step.kind === "hangup") return xml(hangupResponse());
+  if (step.kind === "redial") {
+    console.log(`after-bridge: attempt ${attempt} unanswered, redialing (${step.attempt})`);
+    return xml(liveTransferTwiml(env, baseUrlOf(request, env), step.attempt, from));
+  }
   const owner = configured(env.OWNER_NAME_SPOKEN) ?? configured(env.OWNER_NAME);
   return xml(
     voicemail({

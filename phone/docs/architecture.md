@@ -33,6 +33,9 @@ to the log and to Claude.
 - **`src/notify/`** — owner notifications: `owner.ts` is the one door (Telegram when configured, SMS as
   the fallback), `telegram.ts` (Bot API direct; voicemail audio via multipart `sendAudio`), `sms.ts`
   (Twilio), `call.ts` (outbound reminder calls), `format.ts` (verdict wording).
+- **`src/twilio/`** — `calls.ts` (re-point a live call via REST) and `transfer.ts`, the live transfer:
+  `LIVE_TRANSFER_ATTEMPTS` (3) rings of `LIVE_TRANSFER_RING_SEC` (12 s — keep it under the owner's cell
+  no-answer-forward timer) each, then voicemail. Separate from the reminder escalation's cap.
 - **`src/budget.ts`** — per-call cost estimation + the daily budget guard.
 
 ## Data model (D1)
