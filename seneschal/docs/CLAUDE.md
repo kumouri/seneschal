@@ -36,8 +36,8 @@ specs and carry no status.
   steps, and what not to do.
 - `hung-turn-deadline-spec.md` — **PARTIAL(P1+P2 BUILT; §4 decided)** — a hang is a gap between
   stream events, never a cap.
-- `seneschald-revive-spec.md` — **PARTIAL(BUILT + §8/§9)** — revives a dead daemon; §9 catches it
-  alive on the wrong account.
+- `seneschald-revive-spec.md` — **PARTIAL(watchdog side BUILT; the presence.py halves of §8/§9
+  pending)** — revives a dead daemon; §9 catches it alive on the wrong account.
 - `stacked-pr-branch-deletion-spec.md` — **BUILT** — deleting a branch used to close every PR stacked
   on it.
 - `mid-turn-interleave-spec.md` — **PARTIAL(phases 0+1 BUILT; phase 2 BUILT behind
@@ -111,8 +111,8 @@ specs and carry no status.
   turn cost; diagnosis only.
 - `usage-telemetry-spec.md` — **PARTIAL(phase 1 BUILT, loop wiring pending)** — reads the real
   plan meters; never speaks except on failure.
-- `grounding-restructure-spec.md` — **PARTIAL(mode router + modes/ + sub-routers BUILT)** — the root split into a
-  router + sub-routers.
+- `grounding-restructure-spec.md` — **PARTIAL(mode router + modes/ + sub-routers + InstructionsLoaded logger
+  BUILT)** — the root split into a router + sub-routers.
 - `read-first-retirement-spec.md` — **PARTIAL(the store + CLI BUILT — `standing_safety.py` /
   `state/standing-safety.json`; the digest itself RETIRED; the §4 classification/compression process
   and §6's completeness check remain unbuilt design)** — the READ FIRST digest section only ever

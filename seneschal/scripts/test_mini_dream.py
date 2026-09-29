@@ -131,7 +131,7 @@ class DistillUnit(unittest.TestCase):
         finally:
             md.subprocess.run = orig
             del os.environ["ANTHROPIC_API_KEY"]
-        self.assertNotIn("ANTHROPIC_API_KEY", captured["env"])   # subscription-billing rule
+        self.assertNotIn("ANTHROPIC_API_KEY", sorted(captured["env"].keys()))   # subscription-billing rule
         self.assertEqual(captured["env"][md.RECURSION_ENV], "1")  # never dream the dreamer
 
     def test_llm_distill_spawns_windowless(self):
@@ -292,6 +292,69 @@ class ProducerStamp(unittest.TestCase):
         prompt = seen["prompt"]
         self.assertLess(prompt.index("BEGIN UNTRUSTED"), prompt.index("secret-marker-text"))
         self.assertGreater(prompt.index("END UNTRUSTED"), prompt.index("secret-marker-text"))
+
+
+class MachineSourceSkip(unittest.TestCase):
+    """The comms peek is not distilled — left in, it dominates the log with the daemon distilling itself.
+
+    **The scope is the load-bearing part, not the skip.** `watch` goes; `daemon` and `scheduled`
+    stay, and so does an unset source. Widening `SKIP_SOURCES` would silently delete the warm
+    session's own lives — where most LLM distillates come from — and a desktop `/assistant`
+    session, which is the one job this store does that nothing else does."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.tr = _transcript(os.path.join(self.dir, "t.jsonl"), user_turns=8)
+        self._prev = os.environ.get(md.SOURCE_ENV_VAR)
+
+    def tearDown(self):
+        if self._prev is None:
+            os.environ.pop(md.SOURCE_ENV_VAR, None)
+        else:
+            os.environ[md.SOURCE_ENV_VAR] = self._prev
+
+    def _run(self):
+        return md.main(["--transcript", self.tr, "--session-id", "s-1",
+                        "--state-dir", self.dir, "--engine", "deterministic"])
+
+    def _written(self):
+        path = os.path.join(self.dir, md.DISTILL_FILE)
+        if not os.path.exists(path):
+            return []
+        with open(path, encoding="utf-8") as fh:
+            return [json.loads(l) for l in fh if l.strip()]
+
+    def test_a_watch_peek_writes_nothing(self):
+        os.environ[md.SOURCE_ENV_VAR] = "watch"
+        self.assertEqual(self._run(), 0)          # skipped, not failed
+        self.assertEqual(self._written(), [])
+
+    def test_case_and_whitespace_do_not_smuggle_a_peek_through(self):
+        for spelling in (" WATCH ", "Watch", "watch"):
+            with self.subTest(spelling=spelling):
+                os.environ[md.SOURCE_ENV_VAR] = spelling
+                self._run()
+                self.assertEqual(self._written(), [])
+
+    def test_the_warm_session_and_the_slots_are_still_distilled(self):
+        """`daemon` is the warm session's own life; `scheduled` is Brief/Wrap/Dream."""
+        for i, source in enumerate(("daemon", "scheduled")):
+            with self.subTest(source=source):
+                os.environ[md.SOURCE_ENV_VAR] = source
+                md.main(["--transcript", self.tr, "--session-id", f"s-{i}",
+                         "--state-dir", self.dir, "--engine", "deterministic"])
+        self.assertEqual(len(self._written()), 2)
+
+    def test_an_unset_source_is_still_distilled(self):
+        """A desktop /assistant session and a delegated worktree job carry no stamp at all — and they
+        are the ONLY thing this log records that no other store does."""
+        os.environ.pop(md.SOURCE_ENV_VAR, None)
+        self.assertEqual(self._run(), 0)
+        self.assertEqual(len(self._written()), 1)
+
+    def test_scope_is_pinned(self):
+        """A bare assertion, so widening the set is a deliberate edit to a failing test."""
+        self.assertEqual(md.SKIP_SOURCES, {"watch"})
 
 
 if __name__ == "__main__":
