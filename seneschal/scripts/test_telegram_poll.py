@@ -53,11 +53,107 @@ class ExtractMedia(unittest.TestCase):
             media = tp.extract_media({kind: {"file_id": "x", "file_unique_id": "u", "file_size": 10}})
             self.assertEqual(media["kind"], kind)
 
+    def test_sticker_and_video_note_recognized(self):
+        """D1 fix: these two carry a real `file_id` and used to fall out of MEDIA_KINDS entirely —
+        a sticker from the owner would vanish without trace (../docs/telegram-capability-map.md §2.2)."""
+        for kind in ("sticker", "video_note"):
+            media = tp.extract_media({kind: {"file_id": "x", "file_unique_id": "u", "file_size": 10}})
+            self.assertEqual(media["kind"], kind)
+            self.assertEqual(media["file_id"], "x")
+
     def test_text_message_has_no_media(self):
         self.assertIsNone(tp.extract_media({"text": "hey"}))
 
     def test_empty_photo_array_is_not_media(self):
         self.assertIsNone(tp.extract_media({"photo": []}))
+
+    def test_unsupported_kinds_have_no_media(self):
+        """location/venue/contact/poll/dice carry no file_id — extract_media must not invent one;
+        describe_unsupported() (below) is the door that keeps these from vanishing instead."""
+        for msg in (
+            {"location": {"latitude": 1.0, "longitude": 2.0}},
+            {"venue": {"title": "The Bean", "location": {"latitude": 1.0, "longitude": 2.0}}},
+            {"contact": {"phone_number": "+15551234567", "first_name": "Jane"}},
+            {"poll": {"question": "Pizza?"}},
+            {"dice": {"emoji": "🎲", "value": 4}},
+        ):
+            self.assertIsNone(tp.extract_media(msg))
+
+
+class DescribeUnsupported(unittest.TestCase):
+    """D1 fix: a non-file inbound kind used to reach main() with empty text and no attachment,
+    rendering as an empty line that `telegram_task`'s `if not line: continue` silently dropped — with
+    the offset already committed, so Telegram never redelivered it."""
+
+    def test_none_for_ordinary_message(self):
+        self.assertIsNone(tp.describe_unsupported({"text": "hi"}))
+
+    def test_location(self):
+        line = tp.describe_unsupported({"location": {"latitude": 41.88, "longitude": -87.62}})
+        self.assertIn("41.88", line)
+        self.assertIn("-87.62", line)
+
+    def test_location_missing_a_coordinate_is_not_a_location(self):
+        self.assertIsNone(tp.describe_unsupported({"location": {"latitude": 41.88}}))
+
+    def test_venue_with_address(self):
+        line = tp.describe_unsupported(
+            {"venue": {"title": "The Bean", "address": "123 Main St",
+                       "location": {"latitude": 1.0, "longitude": 2.0}}})
+        self.assertIn("The Bean", line)
+        self.assertIn("123 Main St", line)
+
+    def test_venue_without_address(self):
+        line = tp.describe_unsupported(
+            {"venue": {"title": "The Bean", "location": {"latitude": 1.0, "longitude": 2.0}}})
+        self.assertEqual(line, "[shared a venue: The Bean]")
+
+    def test_contact_with_full_name(self):
+        line = tp.describe_unsupported(
+            {"contact": {"phone_number": "+15551234567", "first_name": "Jane", "last_name": "Doe"}})
+        self.assertIn("Jane Doe", line)
+        self.assertIn("+15551234567", line)
+
+    def test_contact_with_no_name(self):
+        line = tp.describe_unsupported({"contact": {"phone_number": "+15551234567"}})
+        self.assertIn("unnamed", line)
+
+    def test_poll(self):
+        line = tp.describe_unsupported({"poll": {"question": "Pizza tonight?"}})
+        self.assertIn("Pizza tonight?", line)
+
+    def test_dice(self):
+        line = tp.describe_unsupported({"dice": {"emoji": "🎯", "value": 4}})
+        self.assertIn("🎯", line)
+        self.assertIn("4", line)
+
+    def test_dice_missing_value_is_not_a_dice(self):
+        self.assertIsNone(tp.describe_unsupported({"dice": {"emoji": "🎲"}}))
+
+    def test_malformed_fields_are_ignored(self):
+        for msg in ({"location": "nope"}, {"venue": []}, {"contact": None},
+                    {"poll": "?"}, {"dice": 4}):
+            self.assertIsNone(tp.describe_unsupported(msg))
+
+
+class ResolveText(unittest.TestCase):
+    def test_real_text_wins(self):
+        self.assertEqual(tp.resolve_text({"text": "hello", "dice": {"emoji": "🎲", "value": 3}}),
+                         "hello")
+
+    def test_falls_back_to_unsupported_description(self):
+        self.assertEqual(tp.resolve_text({"dice": {"emoji": "🎲", "value": 3}}), "[rolled 🎲 — 3]")
+
+    def test_plain_message_is_untouched(self):
+        self.assertEqual(tp.resolve_text({"text": "hi"}), "hi")
+
+    def test_media_message_resolves_to_empty(self):
+        """A media message's non-empty line comes from the `attachment` field main() adds
+        separately — resolve_text must not invent text for it."""
+        self.assertEqual(tp.resolve_text({"photo": [{"file_id": "f", "file_unique_id": "u"}]}), "")
+
+    def test_nothing_at_all_resolves_to_empty(self):
+        self.assertEqual(tp.resolve_text({}), "")
 
 
 class ExtractReplyTo(unittest.TestCase):
@@ -170,7 +266,12 @@ class GetFileWritesLocally(unittest.TestCase):
         self.dir = tempfile.mkdtemp()
 
     def _urlopen(self, payload_json, blob):
-        def fake(url, timeout=None):
+        def fake(req, timeout=None):
+            # Both round trips go through `telegram_http`, which always builds a
+            # `urllib.request.Request` (it has headers and a method to carry); an older getFile call
+            # was handed a bare URL string. Accept either, so the double describes the seam rather
+            # than one caller's spelling of it.
+            url = getattr(req, "full_url", req)
             if "getFile" in url:
                 return mock.MagicMock(
                     __enter__=lambda s: mock.MagicMock(read=lambda: payload_json.encode()),

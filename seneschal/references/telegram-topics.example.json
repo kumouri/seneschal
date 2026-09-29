@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "_doc": "The Telegram private-chat TOPICS routing table -- `scripts/telegram_topics.py` reads it instead of a hard-coded dict, so a purpose that graduates to reviewed status costs a row in a file, never a code change. This `.example.json` is the SHIPPED DEFAULT; copy it to `telegram-topics.json` (gitignored, per-install owner config) to add, drop or retitle rows -- the loader reads `telegram-topics.json` when it exists and falls back to this file otherwise. Key = the purpose a caller names (`telegram_ask.py --topic <purpose>` / `telegram_send.py --topic <purpose>`); value = the topic's title shown in the owner's Telegram client. Runtime thread ids live in the gitignored `state/telegram-topics.json` -- the Bot API has no `getForumTopics`, so that state file is the only record of which topics exist; this table is only ever read, never written by the daemon. A purpose minted at runtime (`telegram_topics.py add <purpose> \"<Title>\"`) also lives in that state file, which the loader overlays on this table (this table wins on a shared key).",
+  "_invariant": "`main` (telegram_topics.TOPIC_MAIN_CHAT) must NEVER be a key here. It resolves through the unknown-purpose branch on purpose, so an explicit main-chat send and a typo'd purpose land in exactly the same place -- putting it in this table would turn a mistyped purpose into a picker that never arrives. The loader drops a `main` row defensively if one is ever added by mistake.",
+  "topics": {
+    "pull-requests": "Pull requests",
+    "decisions": "Decisions",
+    "reminders": "Reminders"
+  }
+}

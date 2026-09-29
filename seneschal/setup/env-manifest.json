@@ -83,6 +83,14 @@
           "validate": "^(|MarkdownV2|HTML)$"
         },
         {
+          "name": "TELEGRAM_FORMAT",
+          "required": false,
+          "secret": false,
+          "default": "",
+          "prompt": "Outbound formatting: 'markdown' converts the assistant's Markdown to Telegram HTML (a rejected render is re-sent once as plain text); '' or 'plain' sends it verbatim",
+          "validate": "^(|plain|markdown)$"
+        },
+        {
           "name": "TELEGRAM_API_BASE",
           "required": false,
           "secret": false,

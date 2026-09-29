@@ -299,6 +299,18 @@ class SecretHygiene(unittest.TestCase):
         self.assertEqual(chat["validate"], "^-?\\d+$")
         self.assertIn("discover", chat)
 
+    def test_telegram_format_accepts_exactly_the_modes_telegram_format_knows(self):
+        """`TELEGRAM_FORMAT` is read by `telegram_format.normalize_format`; the manifest's validate
+        must admit its two spellings (plus unset) and nothing that would silently read as plain."""
+        telegram = next(e for e in ENTRIES if e["id"] == "telegram")
+        fmt = next(v for v in telegram["vars"] if v["name"] == "TELEGRAM_FORMAT")
+        self.assertFalse(fmt["required"])
+        pattern = re.compile(fmt["validate"])
+        for ok in ("", "plain", "markdown"):
+            self.assertTrue(pattern.match(ok), ok)
+        for bad in ("Markdown", "html", "MarkdownV2"):
+            self.assertFalse(pattern.match(bad), bad)
+
     def test_no_var_default_looks_like_a_credential(self):
         for e in ENTRIES:
             for var in e["vars"]:
