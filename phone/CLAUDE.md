@@ -36,6 +36,12 @@ Inbound call → Worker `POST /voice` runs the cheapest-first cascade (`src/scre
   `persona/persona.md` at the repo root, and the setup wizard emits these env values.
 - `src/relay/session.ts` — the `RelaySession` Durable Object. `src/twilio/calls.ts` — live-call transfer.
 - `src/notify/call.ts` — outbound reminder calls: `placeCall` (single ring) + `placeEscalationCall`.
+  **Both speak in the persona's voice** when one is configured — `<Say voice="<Provider>.<id>">`,
+  derived from `personaFromEnv` via `twiml.ts::sayVoiceOf` (never a second hardcoded id). Twilio's
+  default voice is a **runtime fallback only**: a create Twilio refuses with the voice is re-placed
+  once with a bare `<Say>`, and an in-call invalid voice is Twilio warning 13511, which speaks the
+  default voice rather than dropping the call (`wrangler tail` / the Twilio debugger show the 13511s).
+  No persona voice set = one plain-`<Say>` request.
 - `src/escalation/escalation.ts` — the **`CallEscalation`** Durable Object: `POST /push-call {escalate:true}`
   re-calls (default every 2 min, ≤15 tries) via a **storage alarm** until the owner presses a digit
   (`POST /push-call/ack`) or the cap is hit. Pure `nextEscalationStep` for the retry decision.

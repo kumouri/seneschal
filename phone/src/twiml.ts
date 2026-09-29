@@ -6,6 +6,11 @@
 
 const XML_DECL = '<?xml version="1.0" encoding="UTF-8"?>';
 
+/** `https://` -> `wss://` (and `http://` -> `ws://`) for a ConversationRelay WebSocket URL. */
+export function wssOf(base: string): string {
+  return base.replace(/^http:/i, "ws:").replace(/^https:/i, "wss:");
+}
+
 /** Escape a string for safe inclusion in XML text / attribute values. */
 export function escapeXml(s: string): string {
   return s
@@ -64,9 +69,31 @@ export function reject(reason: "rejected" | "busy" = "rejected"): string {
   return doc(`<Reject reason="${reason}" />`);
 }
 
-/** Speak a message, optionally hanging up afterward. */
-export function say(message: string, opts: { hangup?: boolean } = {}): string {
-  return doc(`<Say>${escapeXml(message)}</Say>${opts.hangup ? "<Hangup />" : ""}`);
+/**
+ * The `<Say voice="…">` value for a persona: Twilio's third-party-provider form is
+ * `<Provider>.<voiceId>` (e.g. `ElevenLabs.<id>`; ElevenLabs in `<Say>` is a Twilio
+ * public beta). Undefined when the persona names no provider+voice pair, so `say()`
+ * falls back to a bare `<Say>` (Twilio's default voice). The persona (via
+ * `personaFromEnv`) stays the single source of the id — nothing here hardcodes a
+ * second one.
+ */
+export function sayVoiceOf(persona: { ttsProvider?: string; voice?: string }): string | undefined {
+  if (persona.ttsProvider === undefined || persona.voice === undefined) return undefined;
+  return `${persona.ttsProvider}.${persona.voice}`;
+}
+
+function sayTag(text: string, voice?: string): string {
+  const attr = voice !== undefined ? ` voice="${escapeXml(voice)}"` : "";
+  return `<Say${attr}>${escapeXml(text)}</Say>`;
+}
+
+/**
+ * Speak a message, optionally hanging up afterward. `voice` is passed straight
+ * through as the `<Say voice>` attribute (see `sayVoiceOf`); omitted => plain
+ * `<Say>` in Twilio's default voice.
+ */
+export function say(message: string, opts: { hangup?: boolean; voice?: string } = {}): string {
+  return doc(`${sayTag(message, opts.voice)}${opts.hangup ? "<Hangup />" : ""}`);
 }
 
 export interface GateOptions {
@@ -102,6 +129,8 @@ export interface EscalationGatherOptions {
   numDigits?: number;
   /** Seconds to wait for a keypress after the prompt before hanging up. */
   timeoutSec?: number;
+  /** `<Say voice>` for the prompt (see `sayVoiceOf`); omitted => Twilio's default voice. */
+  voice?: string;
 }
 
 /**
@@ -109,13 +138,14 @@ export interface EscalationGatherOptions {
  * as `gate()`, but a longer default timeout (the owner needs a moment to press) and the
  * `<Gather>` wraps the whole `<Say>` so a press *during* the message is captured.
  * On no input, falls through to `<Hangup>` — the Durable Object's alarm calls back.
+ * The digit-ack behaviour is identical with or without a `voice`.
  */
 export function escalationGather(opts: EscalationGatherOptions): string {
   const numDigits = opts.numDigits ?? 1;
   const timeout = opts.timeoutSec ?? 30;
   const gather =
     `<Gather numDigits="${numDigits}" timeout="${timeout}" action="${escapeXml(opts.actionUrl)}" method="POST">` +
-    `<Say>${escapeXml(opts.prompt)}</Say>` +
+    sayTag(opts.prompt, opts.voice) +
     `</Gather>`;
   return doc(`${gather}<Hangup />`);
 }

@@ -16,7 +16,7 @@ import { configured, personaFromEnv, settingsFromEnv } from "./config";
 import type { CallerInfo } from "./screener/decision";
 import { decideFunnel, decidePostGate } from "./screener/funnel";
 import { listBlocklist, lookupLists, recordGateFail, syncGoogleContacts, type GoogleContact } from "./data/db";
-import { connectRelay, dial, gate, hangupResponse, reject, say, voicemail } from "./twiml";
+import { connectRelay, dial, gate, hangupResponse, reject, say, sayVoiceOf, voicemail, wssOf } from "./twiml";
 import { sendSms } from "./notify/sms";
 import { placeCall } from "./notify/call";
 
@@ -55,10 +55,6 @@ function field(form: FormData, key: string): string {
 function baseUrlOf(request: Request, env: Env): string {
   const p = env.PUBLIC_BASE_URL;
   return p ? p : new URL(request.url).origin;
-}
-
-function wssOf(base: string): string {
-  return base.replace(/^http:/i, "ws:").replace(/^https:/i, "wss:");
 }
 
 async function handleVoice(request: Request, env: Env): Promise<Response> {
@@ -257,12 +253,14 @@ async function handlePushCallAck(request: Request, env: Env): Promise<Response> 
   const form = await request.formData();
   const digits = field(form, "Digits");
   const id = new URL(request.url).searchParams.get("id") ?? "";
+  // Same voice the reminder itself spoke in (unset persona voice => Twilio's default).
+  const voice = sayVoiceOf(personaFromEnv(env));
   if (digits !== "" && id !== "") {
     const stub = env.CALL_ESCALATION.get(env.CALL_ESCALATION.idFromName(id));
     await stub.fetch("https://escalation/ack", { method: "POST" });
-    return xml(say("Got it — I'll stop calling. Talk soon.", { hangup: true }));
+    return xml(say("Got it — I'll stop calling. Talk soon.", { hangup: true, voice }));
   }
-  return xml(say("Goodbye.", { hangup: true }));
+  return xml(say("Goodbye.", { hangup: true, voice }));
 }
 
 function jsonResponse(body: unknown, status = 200): Response {
