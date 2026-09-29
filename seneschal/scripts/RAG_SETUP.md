@@ -46,6 +46,8 @@ refresh**:
 2. It fetches their text via the Notion MCP and writes a JSONL
    (`{"source":"journal","ref":"<date/page>","text":"..."}` per line).
 3. It runs `python seneschal/scripts/rag_index.py --local --ingest <that.jsonl>` (act-low — local only).
+   A real (non-`--dry-run`) run stamps Dream step `2b` in `state/dream-steps.json`
+   (`dream_steps.py`), so a night the index is skipped shows up as a stale ledger row, not silence.
 
 Because indexing is incremental, unchanged docs are skipped, so the nightly pass is cheap. A full
 `--rebuild --local` (plus a fresh ingest) rebuilds from scratch if the index is ever lost — it's a

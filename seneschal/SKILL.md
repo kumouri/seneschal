@@ -525,6 +525,13 @@ On a Dream run:
    cockpit shows that staleness honestly rather than Dream forcing a write it can't back. A future
    health/nutrition archon **replaces this feed once it exists** — this step is only the placeholder
    source until then (`docs/cockpit-spec.md` ruling 6).
+2g. **Rotate state backups (act-low, local).** `python scripts/state_backup.py` — byte-copies the
+   irreplaceable, wholesale-rewritten `state/` files (carry-over, run-log, digest, reminders, acks, …)
+   to `<stem>.backup-YYYYMMDD-HHMM<ext>` beside them, keeping 7 per file. It stamps its own row in the
+   **Dream step ledger** (`state/dream-steps.json`, `scripts/dream_steps.py`), as do `rag_index.py`
+   (2b) and `salience_rollup.py` (rollup); `python scripts/dream_steps.py status` shows which steps have
+   gone unrun and for how long. A deliberate skip is recorded, never left to prose:
+   `dream_steps.py record <step> --skip --reason "…"`.
 3. **Propose learnings (gated).** Spot repeated patterns worth encoding (*"declines every recruiter
    invite," "archives the X newsletter every time"*) and draft each as a **proposal**. **Weekly, also run
    the Observability rollup:** scan a rolling window of `state/metrics.jsonl` (the metrics the

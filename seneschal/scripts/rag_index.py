@@ -184,6 +184,19 @@ def print_stats(conn):
               f"{touched} chunks in the access ledger")
 
 
+def stamp_dream_step(step: str, db_path=None) -> None:
+    """Record that a Dream step actually ran (`dream_steps.py`), in the state dir holding the index.
+
+    **Imported lazily and swallowed whole.** Bookkeeping that cannot import must never stop the
+    work it was measuring. A failed stamp costs the row, never the run."""
+    try:
+        import dream_steps
+        state = Path(db_path).resolve().parent if db_path else rc.STATE
+        dream_steps.record(str(state), step)
+    except Exception:  # noqa: BLE001 — see the docstring
+        pass
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Build/update the assistant's local RAG index.")
     ap.add_argument("--local", action="store_true", help="index run-log/carry-over/context-digest")
@@ -227,6 +240,9 @@ def main(argv=None):
     verb = "would index" if args.dry_run else "indexed"
     print(f"{verb}: +{added} new, ~{updated} updated, {skipped} unchanged")
     if not args.dry_run:
+        # Dream step 2b actually ran. Stamped HERE, by the script that did the work, rather than
+        # by the Dream prompt that was supposed to remember — see `dream_steps.py`.
+        stamp_dream_step("2b", args.db)
         print_stats(conn)
     return 0
 

@@ -40,7 +40,7 @@ Router: run the mechanism, log the evidence, let the owner gate any action on it
 
 ```sh
 python rag_index.py --stats            # includes a salience line once anything is tagged/touched
-python salience_rollup.py              # the weekly report (Dream runs this): per-category buckets
+python salience_rollup.py              # the weekly report (Dream runs this; stamps dream_steps "rollup"): per-category buckets
 python salience_rollup.py --json       # machine shape; --propose adds gated draft text
 ```
 

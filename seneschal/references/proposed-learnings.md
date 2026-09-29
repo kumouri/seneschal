@@ -12,7 +12,12 @@ assistant gets sharper over time, but every behavior change is the owner's call 
    you about meds at 9"* — it appends a proposal under **Pending** and surfaces it to the owner
    (Telegram / Notion / the next Brief). It does **not** act on it.
 2. **The owner rules.** Approve → the assistant applies it and moves it to **Applied**. Decline → it
-   moves to **Declined** (so the same thing doesn't keep getting re-proposed).
+   moves to **Declined** (so the same thing doesn't keep getting re-proposed). Close a row with
+   `python scripts/learnings.py close <date> --note "…"` (add `--declined` for a decline) — it ticks
+   the row and stamps `CLOSED <date> (applied|declined)` in one step. `learnings.py audit` flags open
+   rows whose `Applies to:` file changed since they were raised, and `learnings.py retire --apply`
+   moves stamped rows closed 30+ days ago into `proposed-learnings-archive.md` (move, never delete;
+   declined rows stay unless `--include-declined`).
 3. **The assistant applies (on approval only).** It makes the concrete change — edit
    `autonomy-config.json` (e.g. graduate an action ask-high → act-low) and/or the relevant reference
    (a noise rule in `comms-mapping.md`, a default in `briefing.md`) and/or the persona — **and logs

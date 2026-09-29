@@ -65,7 +65,14 @@ seneschal/
                    /doctor green/yellow/red health board + the ~/.claude/settings.json hook
                    merger + the daemon chapter's launcher/unit/plist renderer + the
                    git-worktree guard preflight and render_units --apply enforce),
-                   check_placeholders.py (CI guard), *_SETUP.md guides,
+                   foundation primitives (each module's docstring is its spec): paths.py
+                   (state-dir resolution), stateio.py + memory_write.py (atomic state writes),
+                   envfile.py, clock.py + activity_day.py (owner wall clock + the
+                   owner.dayBoundaryHour after-midnight cut, over tz_common), failures.py
+                   (state/failures.jsonl), dream_steps.py (Dream step ledger), state_backup.py,
+                   notes.py, learnings.py (proposed-learnings close/retire/audit), log_rotation.py,
+                   gate_git.py, domain_age.py, _http_test_server.py (test fixture),
+                   check_placeholders.py (CI guard), *_SETUP.md guides + INTEGRATIONS.md (index),
                    seneschald-control.ps1 + run-*.cmd (Windows scheduled-task wrappers)
   setup/           env-manifest.json — the machine-readable manifest of every configurable env
                    surface, which the /setup wizard's env walker + the doctor read

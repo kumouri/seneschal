@@ -372,6 +372,19 @@ def render_proposals(verdicts, window):
 
 # ------------------------------------------------------------------ CLI
 
+def _stamp_dream_step(step: str, db_path=None) -> None:
+    """Record that a Dream step actually ran (`dream_steps.py`), in the state dir holding the index.
+
+    Lazy import, swallowed whole: bookkeeping that cannot import must never stop the work it was
+    measuring. A failed stamp costs the row, never the run."""
+    try:
+        import dream_steps
+        state = Path(db_path).resolve().parent if db_path else rc.STATE
+        dream_steps.record(str(state), step)
+    except Exception:  # noqa: BLE001 — see the docstring
+        pass
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Weekly salience rollup (report-only).")
     ap.add_argument("--db", default=str(rc.DEFAULT_DB))
@@ -417,6 +430,9 @@ def main(argv=None):
                 print("\n---\n\n## Draft gated proposals (for proposed-learnings.md via "
                       "Dream's PR — NOT applied)\n")
                 print(proposals)
+    # The weekly rollup actually ran — stamped by this script, not by the Dream prompt that was
+    # meant to remember it (`dream_steps.py`).
+    _stamp_dream_step("rollup", args.db)
     return 0
 
 
