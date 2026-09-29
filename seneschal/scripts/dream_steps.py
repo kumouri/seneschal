@@ -91,6 +91,9 @@ STEPS = {
     # 2 days, not 7: the window this protects is "how much can one bad write cost", and every night
     # it does not run is a night of `carry-over.md` with no copy. See state_backup.py.
     "2g": {"label": "state backups", "owner": "state_backup.py", "max_age_days": 2},
+    # 2 days, not 14 (the register's own dormancy window): the whole point is catching a gate the
+    # DAY it is met, not weeks later when its evidence may be stale. See observation_gate.py.
+    "2i": {"label": "observation-gate scan", "owner": "observation_gate.py", "max_age_days": 2},
     "rollup": {"label": "salience rollup (weekly)", "owner": "salience_rollup.py",
                "max_age_days": 21},
 }
