@@ -169,8 +169,9 @@ Per reconcile pass:
    for a few days and retires, so hand-authoring an alias for one costs more than the hand lookup it
    replaces and is permanently behind. So on a stage-1 **miss** (and only then — an alias *ambiguity*
    stays a refusal) `ack.py` matches the phrase against the **titles of the reminder rows that are active
-   right now**, read live through one `store-query` (`scripts/reminders_live.py`; on the Notion backend a
-   subscription-billed `claude -p` one-shot where the model copies the table out and decides nothing).
+   right now**, read live through one query (`scripts/reminders_live.py` — **Notion backend only**: a
+   subscription-billed `claude -p` one-shot where the model copies the table out and decides nothing; on
+   a filesystem backend it declines without spawning anything, so a stage-1 miss simply refuses).
    **Stage 2's bar is higher than stage 1's, not lower**, because inference is more dangerous than
    curated vocabulary: the row's title must account for **every distinctive word the owner said**, only
    `Status`-active rows are candidates (a `finished` match would resurrect a dead todo), and a
@@ -818,8 +819,8 @@ when the hold lifted: **26 entries**. The catch-up stagger drains at one per 15 
 arithmetically guaranteed the moment the hold lifted. The stagger is a *rate limit*, not a *lateness
 bound*, and that is the difference the two rules below supply.
 
-- **Night curfew — an owner-local small-hours window (01:00–07:00 as shipped;
-  `sentinel.in_night_curfew`).** A **non-piercing** nudge that **leaked into** the window is
+- **Night curfew — an owner-local small-hours window (`owner.nightCurfew` in
+  `persona/identity.json`, 01:00–07:00 as shipped; `sentinel.in_night_curfew`).** A **non-piercing** nudge that **leaked into** the window is
   **consumed**: `suppressed_at` stamped, `reminder_suppressed_curfew` emitted. Same drop-not-defer
   contract and the same stamping as the quiet window, so the EOD wrap and `Consecutive Misses` count both
   identically.
@@ -836,8 +837,10 @@ bound*, and that is the difference the two rules below supply.
     replayed incident it is what eats the 23:00–01:00 drips (3 h+ past due by the time the drip reached
     them).
   - **DST-correct, not a frozen offset.** Readings go through the owner's timezone (`tz_common`), never a
-    fixed UTC offset. The window **does not wrap midnight**: it lies entirely after midnight, so the
-    occurrence containing `now` always begins on `now`'s own local date.
+    fixed UTC offset. The default window lies entirely after midnight, so the occurrence containing
+    `now` begins on `now`'s own local date; an owner who configures a window whose start is after its
+    end (e.g. `23:00`–`07:00`) gets a wrapping window whose after-midnight half began the previous local
+    date. `start` equal to `end` disables the curfew; an unusable value falls back to the default.
 - **Staleness cutoff — `MAX_LATENESS_SEC`, 2 h.** A **non-piercing** nudge more than two hours past due
   has stopped being a reminder and become an interruption, at any hour. Consumed the same way:
   `suppressed_at` + `reminder_suppressed_stale`. Comparison is strictly `>`, so exactly two hours still

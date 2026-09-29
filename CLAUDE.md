@@ -45,7 +45,9 @@ seneschal/
                    identity_common.py (persona/identity.json reader — never raises, defaults
                    when absent; presence.py renders its grounding/slot prompts from it),
                    telegram/discord/proton/google comms bridges, reminders_* queue+ack ledger
-                   (incl. reminders_seed.py — the whole-day exact-time seeder),
+                   (incl. reminders_seed.py — the whole-day exact-time seeder; reminders_cadence
+                   / reminder_premise* / reminder_suppressions / reminders_live / _reconcile),
+                   ack.py (free-text ack) + watch_ack/_reconcile/_suppress (Watch-send gates),
                    cockpit_pipe.py + model_config.py + governor.py + fable_delegate.py (the
                    cockpit pipe, model dials, budget governor, and Fable delegation one-shot),
                    outbox.py + outbox_common.py (durable write-behind journal for act-low
