@@ -4,18 +4,24 @@
 [![license: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-00ff0f?style=flat-square)](LICENSE)
 [![Git Flow](https://img.shields.io/badge/workflow-git--flow-8e00ff?style=flat-square)](#-git-flow)
 
-> A local-first, chief-of-staff AI assistant framework built as a
-> [Claude Code](https://claude.com/claude-code) Skill suite — you bring the persona,
-> the data store, and the channels; seneschal brings the machinery.
+> A local-first, chief-of-staff AI assistant framework — you bring the persona, the data
+> store, the channels, and the AI subscription; seneschal brings the machinery.
 
 A *seneschal* was the steward who ran a medieval great house. This one manages your time,
 screens your communications (email, Slack, calendar invites, phone), fires your reminders,
 keeps a daily journal, and answers questions about your schedule, todos, projects, and notes —
-running entirely on your machine, on your Claude subscription, with no hosted brain.
+running entirely on your machine, on an AI subscription you already have, with no hosted brain.
 
-It is **not a conventional application**: it's a suite of Claude Code **Skills** (Markdown skill
-definitions) plus a modest amount of stdlib-first Python. The "brain" is Claude Code itself; the
-repo is the character, the memory, the routing, and the plumbing.
+It is **not a conventional application**: it's a suite of agent **skills** (Markdown skill
+definitions) plus a modest amount of stdlib-first Python. The "brain" is an agentic coding CLI you
+already pay for; the repo is the character, the memory, the routing, and the plumbing.
+
+**Which brain.** The always-on chat session sits behind a pluggable backend: a **Claude**
+subscription through [Claude Code](https://claude.com/claude-code) (the default), or a **ChatGPT**
+subscription through the [Codex CLI](https://github.com/openai/codex) — one dial in the cockpit.
+The setup wizard, the skills, and background work (jobs, delegation, Dream) run through Claude Code
+today. Pay-per-token APIs (OpenRouter and the like) are not a backend yet: the design deliberately
+favors flat-rate subscriptions (`seneschal/docs/pluggable-backend-spec.md`).
 
 ## Why it's interesting
 
@@ -27,14 +33,14 @@ repo is the character, the memory, the routing, and the plumbing.
 - **Local-first proactive loop, no server.** A resident asyncio **presence daemon** holds a warm
   chat session over Telegram/Discord, fires each reminder at its **exact configured time**, and
   runs a cheap comms-peek on a cadence — event-driven, so idle ≈ free. It's
-  **subscription-billed** through the `claude` CLI (it scrubs `ANTHROPIC_API_KEY` to stay off the
-  metered API), and it reloads itself when a PR merges. Two **model dials** pick the warm model
+  **subscription-billed** through the backend's CLI (it scrubs `ANTHROPIC_API_KEY` /
+  `OPENAI_API_KEY` to stay off the metered APIs), and it reloads itself when a PR merges. Two **model dials** pick the warm model
   and a delegation ceiling — a hard turn can be **delegated up** to a bigger model as a one-shot,
   quota-gated by a budget **governor** (rails metered in code, advisory knobs honest about being
   guidance).
 - **Bring your own everything.** The assistant's **persona** (name, voice, demeanor), your
   **identity/timezone** (a small config file), and your **data backend** are all pluggable. Out of
-  the box it's a nameless, default-Claude assistant on no store; the guided, resumable `/setup`
+  the box it's a nameless default assistant on no store; the guided, resumable `/setup`
   wizard makes it yours one skippable chapter at a time.
 - **Pluggable system of record.** Notion, an **Obsidian vault**, or a plain **Markdown folder** —
   behind one seam. Skills speak six backend-neutral verbs (`store-query/get/create/update/append/
@@ -44,7 +50,9 @@ repo is the character, the memory, the routing, and the plumbing.
 
 ## Quickstart
 
-Requires [Claude Code](https://claude.com/claude-code) and Python 3.11+.
+Requires [Claude Code](https://claude.com/claude-code) (the wizard and skills run there) and Python 3.11+.
+Optional: the [Codex CLI](https://github.com/openai/codex), to run the always-on chat on a ChatGPT
+subscription instead (`seneschal/scripts/CODEX_SETUP.md`).
 
 ```bash
 git clone https://github.com/kumouri/seneschal
@@ -62,7 +70,7 @@ Then, inside Claude Code in the repo:
 /assistant         # open a chat with your assistant  (or /assistant what's on today)
 ```
 
-Out of the box that's a working, nameless default-Claude assistant on no store. To make it yours,
+Out of the box that's a working, nameless default assistant on no store. To make it yours,
 run **`/setup`** — a guided, **resumable** wizard that walks persona, data store, owner profile,
 auth + model dials, channel env files (Telegram first), MCP servers, and the cockpit, one skippable
 chapter at a time; interrupt it anywhere and `/setup` resumes where it left off (`/setup <chapter>`
