@@ -428,7 +428,7 @@ class PromptPathsAreNotDocsTest(GuardCase):
 
     def test_ordinary_prose_is_still_prose(self):
         for path in ("README.md", "seneschal/docs/cockpit-spec.md", "seneschal/state/README.md",
-                     "phone/android/README.md", "archons/hephaestus/out/README.md"):
+                     "phone/android/README.md", "archons/example-archon/out/README.md"):
             with self.subTest(path=path):
                 self.assertEqual(mg.non_docs_paths([path]), [])
 
