@@ -12,7 +12,7 @@ Every inbound call runs a cheapest-first cascade in the Worker (`src/index.ts` �
 | 3 | Unknown | `<Gather>` "press 1" gate | ~$0.01–0.02 |
 | 4 | Pressed 1 | `<Connect><ConversationRelay>` → Claude | ~$0.10 |
 
-Stage 4 decides via one tool call: `connect_call` (bridge to the user), `take_message` (store + SMS), or
+Stage 4 decides via one tool call: `connect_call` (bridge to the user), `take_message` (store + notify), or
 `mark_spam` (hang up + add to blocklist). Spam flagged here or a repeated gate-fail feeds the **learning
 blocklist**, so the number is rejected for $0 next time.
 
@@ -23,14 +23,24 @@ to the log and to Claude.
 ## Components
 
 - **`src/index.ts`** — Worker HTTP router: `POST /voice` (funnel → TwiML), `POST /gate` (the pressed
-  digit), `GET /ws` (ConversationRelay WebSocket → Durable Object), `GET /status`.
+  digit), `GET /ws` (ConversationRelay WebSocket → Durable Object), `GET /status`, plus `/blocklist`,
+  `/sync-contacts`, `/push-call` (+ `/push-call/ack`; reminder calls and `{mode:"talk"}` owner
+  conversations), `/after-bridge` (live-transfer attempts), `/voicemail`.
 - **`src/twiml.ts`** — pure TwiML string builders.
 - **`src/screener/`** — `funnel.ts` (routing), `brain.ts` (stage-4 decision behind an `LlmClient`
   interface), `prompt.ts` (system prompt + tool schemas), `decision.ts` (shared types).
 - **`src/relay/`** — `protocol.ts` (ConversationRelay JSON frames), `session.ts` (the `RelaySession`
-  Durable Object holding the WebSocket + conversation state).
+  Durable Object holding the WebSocket + conversation state, in `screener` mode for inbound calls or
+  `owner` mode for an outbound talk call — the seed is persisted to DO storage and must agree with the
+  TwiML's `mode=owner` parameter), `owner-prompt.ts` + `owner-conversation.ts` (the owner-mode prompt
+  and turn engine).
 - **`src/data/`** — `db.ts` (D1 access) + `schema.sql`.
-- **`src/notify/sms.ts`** — Twilio SMS to the owner.
+- **`src/notify/`** — owner notifications: `owner.ts` is the one door (Telegram when configured, SMS as
+  the fallback), `telegram.ts` (Bot API direct; voicemail audio via multipart `sendAudio`), `sms.ts`
+  (Twilio), `call.ts` (outbound reminder calls), `format.ts` (verdict wording).
+- **`src/twilio/`** — `calls.ts` (re-point a live call via REST) and `transfer.ts`, the live transfer:
+  `LIVE_TRANSFER_ATTEMPTS` (3) rings of `LIVE_TRANSFER_RING_SEC` (12 s — keep it under the owner's cell
+  no-answer-forward timer) each, then voicemail. Separate from the reminder escalation's cap.
 - **`src/budget.ts`** — per-call cost estimation + the daily budget guard.
 
 ## Data model (D1)
@@ -45,7 +55,9 @@ Twilio bills only **answered** calls. `<Reject>` is free; the gate is a few seco
 ConversationRelay is $0.07/min and only runs at stage 4. Cost knobs:
 - `POST_GATE_ACTION = ring_through` skips the Claude conversation entirely (gate-only screening).
 - `REPUTATION_LOOKUP_ENABLED` (paid Twilio Lookup) is off by default.
-- `DAILY_BUDGET_USD` caps daily spend; over the cap, stage 4 downgrades to voicemail.
+- `DAILY_BUDGET_USD` caps daily spend; over the cap, stage 4 downgrades to voicemail. Outbound talk-mode
+  calls draw from the same cap (`sumSpendToday` over `calls.cost_estimate_usd`) and are refused when it
+  is reached.
 
 ## Why not the raw Twilio Media Streams path?
 

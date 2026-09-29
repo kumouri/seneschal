@@ -104,6 +104,20 @@ export async function recordCall(db: D1Database, rec: CallRecord): Promise<void>
 }
 
 /**
+ * Sum of `cost_estimate_usd` for calls started today (UTC) — the daily-budget guard's read
+ * (`DAILY_BUDGET_USD`, `budget.ts::overBudget`). Talk-mode calls share this budget with screened
+ * inbound calls: both spend real Twilio + Claude minutes against the same daily cap.
+ */
+export async function sumSpendToday(db: D1Database): Promise<number> {
+  const todayPrefix = new Date().toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
+  const row = await db
+    .prepare("SELECT COALESCE(SUM(cost_estimate_usd), 0) AS total FROM calls WHERE started_at LIKE ?1")
+    .bind(`${todayPrefix}%`)
+    .first<{ total: number }>();
+  return row?.total ?? 0;
+}
+
+/**
  * Single-row settings overrides. Env supplies defaults today; this lets the
  * owner tweak behavior at runtime in a later milestone.
  */

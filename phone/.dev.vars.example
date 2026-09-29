@@ -14,6 +14,15 @@ USER_CELL_E164=+15555550100
 # Public https base URL of this Worker / dev tunnel (no trailing slash).
 PUBLIC_BASE_URL=https://your-tunnel.example.com
 
+# Owner notifications (verdicts, "pick up!", voicemail text + audio) go to Telegram when BOTH of
+# these are set — the same bot + chat the assistant's daemon uses
+# (seneschal/scripts/TELEGRAM_SETUP.md). Leave them unset and the Worker falls back to SMS to
+# USER_CELL_E164.
+#TELEGRAM_BOT_TOKEN=123456789:AAxxxxxxxx
+#TELEGRAM_CHAT_ID=123456789
+# Optional: a private-chat topic id (message_thread_id) to file them under; unset = main chat.
+#TELEGRAM_THREAD_ID=
+
 # Optional persona overrides (see src/persona.ts). Nameless + platform default
 # voice when unset; the setup wizard fills these from your persona.
 #ASSISTANT_NAME=Robin

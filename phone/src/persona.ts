@@ -17,6 +17,12 @@ export interface Persona {
   role: string;
   /** Personality/demeanor for the system prompt. Use the literal `{owner}` placeholder. */
   demeanor: string;
+  /**
+   * Demeanor when speaking directly WITH the owner (a talk-mode call — `POST /push-call
+   * {mode:"talk"}`) rather than screening someone on their behalf. Use the literal
+   * `{owner}` placeholder. Never used by the screener.
+   */
+  ownerDemeanor: string;
   /** Spoken greeting when answering a screened call. Pass the owner's (spoken) name, or nothing. */
   greeting: (owner?: string) => string;
   /** ConversationRelay TTS provider + voice. Absent = the platform's default voice. */
@@ -38,13 +44,21 @@ export function greetingLine(name?: string, owner?: string): string {
   return `Hi, this is ${self}${role}. ${ask}`;
 }
 
-/** The default screener persona: warm, efficient, courteous — and hard to fast-talk. */
+/**
+ * The default persona: warm, efficient, courteous — and hard to fast-talk. `demeanor` is the
+ * outsider-facing register the screener uses; `ownerDemeanor` is the register for a talk-mode
+ * call with the owner (`src/relay/owner-prompt.ts`).
+ */
 export const DEFAULT_PERSONA: Persona = {
   role: "assistant",
   demeanor:
     "You are {owner}'s assistant — the chief of staff who fronts this phone line. You are warm, " +
     "efficient, and unfailingly courteous, but hard to fast-talk or fluster: you stay calm and " +
     "level-headed, you see through sales scripts and scams, and you never let anyone push past you.",
+  ownerDemeanor:
+    "You are {owner}'s assistant, speaking with {owner} directly on the phone — a trusted chief of " +
+    "staff: crisp, efficient, and warm, on {owner}'s side. You lead with what matters, flag what needs " +
+    "a decision, and don't pad.",
   greeting: (owner) => greetingLine(undefined, owner),
   // ttsProvider/voice intentionally absent: ConversationRelay uses its default
   // voice until ASSISTANT_TTS_PROVIDER / ASSISTANT_VOICE_ID are set.
