@@ -48,13 +48,7 @@ import tz_common  # noqa: E402
 import usage_health as uh  # noqa: E402
 import usage_probe as up  # noqa: E402
 
-try:  # the daemon half lands with the presence wiring; until then its tests skip, never fail
-    import presence as pr  # noqa: E402
-except Exception:  # noqa: BLE001
-    pr = None
-HAS_WIRING = pr is not None and hasattr(pr, "maybe_usage_notice") \
-    and hasattr(pr, "maybe_usage_reading")
-needs_wiring = unittest.skipUnless(HAS_WIRING, "presence.py does not carry the usage hooks yet")
+import presence as pr  # noqa: E402
 
 LOCAL = timezone(timedelta(hours=-5))  # a fixed owner offset for every instant below
 NOW = datetime(2026, 8, 27, 17, 0, 0, tzinfo=LOCAL)
@@ -324,7 +318,6 @@ class TheQuietWindow(unittest.TestCase):
         sentinel.set_quiet(d, noon + timedelta(hours=2), reason="test")
         self.assertTrue(uh.in_quiet(d, noon))
 
-    @needs_wiring
     def test_it_never_pierces(self):
         """`pierce` / `tone="critical"` is the queue's Critical exemption, and nothing here may reach
         for it — that is the difference between an instrument notice and a missed dose.
@@ -416,7 +409,6 @@ class TheLevelStillNeverSpeaks(unittest.TestCase):
             self.assertNotIn("projection", lowered)
             self.assertNotIn("burn", lowered)
 
-    @needs_wiring
     def test_the_reading_itself_is_still_mute(self):
         """The instrument writes rows and says nothing, on every path — `maybe_usage_reading` must
         stay that way, which is why the announcement is a SEPARATE function."""
@@ -455,7 +447,6 @@ def args(**over):
     return types.SimpleNamespace(**base)
 
 
-@needs_wiring
 class TheDaemonWiring(unittest.TestCase):
     """presence.py's half. Nothing in this class sends anything: the sender is injected the same way
     `usage_probe`'s runner is."""

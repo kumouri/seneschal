@@ -235,16 +235,6 @@ def script_source(name: str) -> str:
         return fh.read()
 
 
-def _presence_has(*names) -> bool:
-    """Is the resident daemon's wiring for this module present in `presence.py`? Tests that drive
-    that wiring are kept and skipped until it lands (wave 26), rather than deleted or faked.
-    Never raises: an unimportable `presence` is simply *not wired yet*."""
-    try:
-        import presence
-    except Exception:  # noqa: BLE001
-        return False
-    return all(hasattr(presence, n) for n in names)
-
 
 def state_fingerprint(root: str) -> dict:
     """Every byte under `root`, keyed by relative path. The strongest available spelling of *"it wrote
@@ -1445,8 +1435,6 @@ class ShortMatchHeadIsRefusedBeforeTheSpendTest(GuardCase):
         argv = mg.request_argv(406, facts, ["seneschal/scripts/x.py"], self.dir)
         self.assertIn(f"Head: {HEAD}", argv[argv.index("--question") + 1])
 
-    @unittest.skipUnless(_presence_has("_merge_approval_clause"),
-                         "presence wiring lands in wave 26 (presence._merge_approval_clause)")
     def test_the_daemons_relay_line_prints_the_full_head(self):
         import presence
 
@@ -1799,15 +1787,11 @@ class ApprovalIsNotAgentMintableTest(unittest.TestCase):
                    if "record_approval(" in src and name != "merge_guard.py"]
         self.assertLessEqual(set(callers), {"presence.py"})
 
-    @unittest.skipUnless(_presence_has("_merge_approval_clause", "_callback_line"),
-                         "presence wiring lands in wave 26 (presence._merge_approval_clause)")
     def test_record_approval_has_exactly_one_caller_and_it_is_the_daemon(self):
         callers = [name for name, src in self._scripts()
                    if "record_approval(" in src and name != "merge_guard.py"]
         self.assertEqual(callers, ["presence.py"])
 
-    @unittest.skipUnless(_presence_has("_merge_approval_clause", "_callback_line"),
-                         "presence wiring lands in wave 26 (presence._merge_approval_clause)")
     def test_the_daemons_caller_is_the_telegram_callback_path(self):
         here = os.path.dirname(os.path.abspath(__file__))
         with open(os.path.join(here, "presence.py"), "r", encoding="utf-8") as fh:
@@ -1876,8 +1860,7 @@ class RejectionMessageTest(GuardCase):
 
 class DaemonWritesTheApprovalTest(GuardCase):
     """`presence._merge_approval_clause` — the single write site, driven the way a real tap drives
-    it. `presence` is imported lazily so this module's other tests do not pay for it. The tests that
-    drive `presence` are skipped until that wiring lands (wave 26); the `telegram_ask` half runs now."""
+    it. `presence` is imported lazily so this module's other tests do not pay for it."""
 
     def setUp(self):
         super().setUp()
@@ -1896,8 +1879,6 @@ class DaemonWritesTheApprovalTest(GuardCase):
                 "labels": ["Approve"], "line": '[the owner answered "Merge PR #406?" → "Approve"]',
                 "meta": {"kind": kind, "pr": pr, "head_sha": head, "approve_index": 0}}
 
-    @unittest.skipUnless(_presence_has("_merge_approval_clause", "_callback_line"),
-                         "presence wiring lands in wave 26 (presence._merge_approval_clause)")
     def test_an_approve_tap_writes_the_record(self):
         clause = self.pr_mod._merge_approval_clause(self.args, self._resolved(), self.log)
         record = mg.load_approval(self.dir, 406)
@@ -1906,23 +1887,17 @@ class DaemonWritesTheApprovalTest(GuardCase):
         self.assertIsNone(record["consumed_at"])
         self.assertIn("#406", clause)
 
-    @unittest.skipUnless(_presence_has("_merge_approval_clause", "_callback_line"),
-                         "presence wiring lands in wave 26 (presence._merge_approval_clause)")
     def test_a_not_now_tap_writes_nothing(self):
         clause = self.pr_mod._merge_approval_clause(self.args, self._resolved(selected=(1,)), self.log)
         self.assertEqual(clause, "")
         self.assertIsNone(mg.load_approval(self.dir, 406))
 
-    @unittest.skipUnless(_presence_has("_merge_approval_clause", "_callback_line"),
-                         "presence wiring lands in wave 26 (presence._merge_approval_clause)")
     def test_an_ordinary_question_tap_is_untouched(self):
         for meta in (None, {"kind": "something-else"}, "not a dict", {}):
             with self.subTest(meta=str(meta)[:20]):
                 res = {"ok": True, "answered": True, "selected": [0], "meta": meta, "line": "x"}
                 self.assertEqual(self.pr_mod._merge_approval_clause(self.args, res, self.log), "")
 
-    @unittest.skipUnless(_presence_has("_merge_approval_clause", "_callback_line"),
-                         "presence wiring lands in wave 26 (presence._merge_approval_clause)")
     def test_a_failed_write_is_never_silent(self):
         with mock.patch.object(mg, "record_approval", side_effect=OSError("disk full")):
             clause = self.pr_mod._merge_approval_clause(self.args, self._resolved(), self.log)
@@ -1930,16 +1905,12 @@ class DaemonWritesTheApprovalTest(GuardCase):
         self.assertIn("don't merge around it", clause)
         self.assertIsNone(mg.load_approval(self.dir, 406))
 
-    @unittest.skipUnless(_presence_has("_merge_approval_clause", "_callback_line"),
-                         "presence wiring lands in wave 26 (presence._merge_approval_clause)")
     def test_the_clause_reaches_the_warm_session_on_the_answered_path(self):
         with mock.patch.object(self.pr_mod, "resolve_callback", lambda *a, **k: self._resolved()):
             line = self.pr_mod._callback_line(self.args, {"data": "q:q1:0"}, self.log)
         self.assertIn("answered", line)
         self.assertIn("merge approval recorded", line)
 
-    @unittest.skipUnless(_presence_has("_merge_approval_clause", "_callback_line"),
-                         "presence wiring lands in wave 26 (presence._merge_approval_clause)")
     def test_a_toggle_can_never_fire_the_effect(self):
         # `telegram_ask.resolve` returns `meta` only on the answered path, and `_callback_line`
         # gates on `answered` as well. Both halves are asserted because either alone would let a

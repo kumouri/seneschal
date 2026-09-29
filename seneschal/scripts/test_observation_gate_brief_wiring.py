@@ -3,8 +3,7 @@
 
 `_brief_context` — the `morning-brief` slot's one `context` hook — renders
 `observation_gate.brief_line`'s text FIRST, above the unassigned-work line and Tomorrow's Lead, each
-guarded independently so one raising helper never costs the others. Skipped until the presence
-wiring lands (wave 26); the bodies activate automatically once `presence._brief_context` exists.
+guarded independently so one raising helper never costs the others.
 
 Run:  python -m unittest discover -s seneschal/scripts -p "test_observation_gate_brief_wiring.py"   (from the repo root)
 """
@@ -40,7 +39,6 @@ GOOD = dict(
 )
 
 
-@unittest.skipUnless(hasattr(pr, "_brief_context"), "presence wiring lands in wave 26")
 class BriefContext(Base):
     def test_nothing_ready_says_so_and_says_omit(self):
         text = pr._brief_context(self.state)

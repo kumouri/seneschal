@@ -60,25 +60,6 @@ except Exception:  # noqa: BLE001
     WarmSession = None
 
 
-def _presence_has(*names):
-    return pr is not None and all(hasattr(pr, n) for n in names)
-
-
-_NEEDS_WARM_INTERRUPT = unittest.skipUnless(
-    WarmSession is not None and hasattr(WarmSession, "send_interrupt"),
-    "wave 26: backends.claude_cli.WarmSession.send_interrupt not wired yet")
-_NEEDS_LIVE_SEND = unittest.skipUnless(
-    _presence_has("interleave_open_turn", "interleave_live_send"),
-    "wave 26: presence hook interleave_live_send not wired yet")
-_NEEDS_OBSERVE = unittest.skipUnless(
-    _presence_has("interleave_open_turn", "interleave_snapshot", "interleave_observe"),
-    "wave 26: presence hooks interleave_snapshot/interleave_observe not wired yet")
-_NEEDS_TRACK = unittest.skipUnless(
-    _presence_has("interleave_open_turn", "interleave_track_tool_call"),
-    "wave 26: presence hook interleave_track_tool_call not wired yet")
-_NEEDS_POP = unittest.skipUnless(
-    _presence_has("pop_folded_prefix"),
-    "wave 26: presence hook pop_folded_prefix not wired yet")
 
 
 def _args(state_dir, **over):
@@ -221,7 +202,6 @@ def _session(**kw):
     return sess
 
 
-@_NEEDS_WARM_INTERRUPT
 class SendInterrupt(unittest.TestCase):
     def test_writes_the_probed_control_request_shape(self):
         sess = _session()
@@ -260,7 +240,6 @@ class SendInterrupt(unittest.TestCase):
         self.assertTrue(sess.interrupt_requested)
 
 
-@_NEEDS_WARM_INTERRUPT
 class InterruptSuppressesTheFallbackLadder(unittest.TestCase):
     """§3.6/§3.7: an interrupt landing on a session's very first turn must read exactly like the
     watchdog's own `timed_out` — never as a stale resume or a bad model dial, or the ladder respawns
@@ -350,7 +329,6 @@ def _fold(text, arrival_id="a", channel="telegram"):
     return {"arrival_id": arrival_id, "channel": channel, "text": text}
 
 
-@_NEEDS_LIVE_SEND
 class InterleaveLiveSend(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
@@ -516,7 +494,6 @@ class _InterruptingSession:
         return True
 
 
-@_NEEDS_OBSERVE
 class ContiguityIsEnforced(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
@@ -593,7 +570,6 @@ class ContiguityIsEnforced(unittest.IsolatedAsyncioTestCase):
 # --------------------------------------------------------------------------- interleave_track_tool_call
 
 
-@_NEEDS_TRACK
 class TrackToolCall(unittest.TestCase):
     def test_a_tool_use_event_sets_pending_tool_call(self):
         state = pr.DaemonState()
@@ -643,7 +619,6 @@ class TrackToolCall(unittest.TestCase):
 # --------------------------------------------------------------------------- pop_folded_prefix (§5.3)
 
 
-@_NEEDS_POP
 class PopFoldedPrefix(unittest.TestCase):
     def _state_with(self, entries):
         state = pr.DaemonState()

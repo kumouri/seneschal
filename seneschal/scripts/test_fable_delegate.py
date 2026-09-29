@@ -141,14 +141,8 @@ class ThreadSeed(unittest.TestCase):
         self.assertIn("legacy layout", fd.thread_seed(self.dir))
 
     def test_spellings_match_the_daemon_when_it_declares_them(self):
-        # Drift between this module's duplicated path and the daemon's is SILENT, so pin it — once the
-        # daemon carries the per-topic cache constants.
-        try:
-            import presence  # noqa: WPS433 -- optional: the daemon may not import in every env
-        except Exception:  # noqa: BLE001
-            self.skipTest("presence.py not importable here")
-        if not hasattr(presence, "THREAD_DIR"):
-            self.skipTest("wave 26: presence hook THREAD_DIR not wired yet")
+        # Drift between this module's duplicated path and the daemon's is SILENT, so pin it.
+        import presence  # noqa: WPS433
         self.assertEqual(fd.THREAD_DIR, presence.THREAD_DIR)
         self.assertEqual(fd.LEGACY_THREAD_FILE, presence.LEGACY_THREAD_FILE)
 

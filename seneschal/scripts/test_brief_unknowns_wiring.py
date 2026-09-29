@@ -15,7 +15,7 @@ What these guard:
 * `presence.maybe_run_slots` appends that rendered line to the `morning-brief` prompt at launch, with
   the instruction to print it verbatim, and tells the run explicitly when the count is 0. The number
   in the prompt is the store's, never the model's. A broken helper costs the Brief nothing but the
-  line (`slot_context` never raises). *(Skipped until the presence wiring lands — wave 26.)*
+  line (`slot_context` never raises).
 * `presence.reap_finished_slots` calls `owi_unknowns.note_brief_sent` on the `morning-brief` slot's
   CLEAN exit only — a failed run does not reset the window — and a hook that raises never blocks the
   stamp. *(Same skip.)*
@@ -102,11 +102,8 @@ class BriefLine(Base):
         self.assertIn("1 item", data["line"])
 
 
-_PRESENCE_WIRING = hasattr(pr, "_brief_context")
-_WAVE_26 = "presence wiring lands in wave 26"
 
 
-@unittest.skipUnless(_PRESENCE_WIRING, _WAVE_26)
 class LaunchCarriesTheCount(Base):
     """`maybe_run_slots` appends the code-rendered line to the morning-brief prompt."""
 
@@ -157,7 +154,6 @@ class LaunchCarriesTheCount(Base):
         self.assertIn(brief["on_complete"], pr.SLOT_ON_COMPLETE)
 
 
-@unittest.skipUnless(_PRESENCE_WIRING, _WAVE_26)
 class CleanExitResetsTheWindow(Base):
     """`reap_finished_slots` is the one caller of `note_brief_sent` now."""
 

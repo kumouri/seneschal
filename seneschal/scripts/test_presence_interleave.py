@@ -18,8 +18,6 @@ Three things are under test, and the first is the most important:
 **No test here makes a real Ollama call**: `interleave.gate` is replaced throughout. Nothing sends —
 `--stub-send` plus a temp state dir, this suite's standing rule.
 
-The whole module skips until `interleave.py` lands in the tree (wave 26 ports it separately).
-
 Run:  python -m unittest seneschal.scripts.test_presence_interleave
 """
 import argparse
@@ -35,14 +33,8 @@ sys.path.insert(0, SCRIPT_DIR)
 
 import presence as pr  # noqa: E402
 
-try:
-    import interleave as il  # noqa: E402
-except ImportError:  # wave 26 ports interleave.py separately; skip until it lands
-    il = None
+import interleave as il  # noqa: E402
 
-_NEEDS_INTERLEAVE = unittest.skipUnless(
-    il is not None and hasattr(pr, "interleave_open_turn"),
-    "wave 26: interleave.py (and presence's interleave hooks) not landed yet")
 
 
 def _args(state_dir, **over):
@@ -98,7 +90,6 @@ class _Patch:
 
 # --------------------------------------------------------------------------- the turn window
 
-@_NEEDS_INTERLEAVE
 class TurnWindow(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
@@ -139,7 +130,6 @@ class TurnWindow(unittest.TestCase):
         self.assertIsNone(state.inflight_turn)
 
 
-@_NEEDS_INTERLEAVE
 class SnapshotEligibility(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
@@ -172,7 +162,6 @@ class SnapshotEligibility(unittest.TestCase):
 
 # --------------------------------------------------------------------------- observing
 
-@_NEEDS_INTERLEAVE
 class ObservedRows(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
@@ -255,7 +244,6 @@ class ObservedRows(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Bash", in_flight)
 
 
-@_NEEDS_INTERLEAVE
 class IntakeGatesEveryMidTurnArrival(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
@@ -293,7 +281,6 @@ class IntakeGatesEveryMidTurnArrival(unittest.IsolatedAsyncioTestCase):
 
 # --------------------------------------------------------------------------- the claim that matters
 
-@_NEEDS_INTERLEAVE
 class ObserveChangesNothing(unittest.IsolatedAsyncioTestCase):
     """`observe` is zero behaviour change (§4.3). Same conversation, mode off and mode observe:
     identical reply, identical durable queue, identical continuity, identical prompt."""
@@ -348,7 +335,6 @@ class ObserveChangesNothing(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(os.path.exists(il.log_path(off["dir"])))
 
 
-@_NEEDS_INTERLEAVE
 class LiveIsGatedByHostVersion(unittest.TestCase):
     """Phase 2 (interrupt/continue, §5) is BUILT (behind a flag) — the tests that used to assert
     nothing here implements a fold were the thing phase 2 deliberately made false. What survives from them: `live`

@@ -37,11 +37,6 @@ RID = "00000000-0000-0000-0000-0000000000a7"   # a placeholder ⏰ page id
 NOW = datetime(2026, 8, 7, 14, 30, 0, tzinfo=timezone.utc)
 
 
-def _hook(*names):
-    """Skip until every named presence hook exists (the daemon rewrite wires them)."""
-    missing = [n for n in names if not hasattr(pr, n)]
-    return unittest.skipUnless(not missing, f"wave 26: presence hook {', '.join(missing)} not wired yet")
-
 
 class _NotionBackend:
     """Mixin: pin the active store backend to Notion for the duration of a test — the outbox is a
@@ -76,7 +71,6 @@ def _enqueue_ack(state_dir, date, rid=RID, created=None):
         conn.close()
 
 
-@_hook("outbox_backlog")
 class BacklogReading(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
@@ -141,7 +135,6 @@ class BacklogReading(unittest.TestCase):
         self.assertNotIn("read_failed", healthy)
 
 
-@_hook("outbox_drain_due", "OUTBOX_STALE_SEC", "OUTBOX_LIVE_SESSION_STALE_SEC")
 class DrainGate(unittest.TestCase):
     """`outbox_drain_due` is pure so the two conditions can be pinned without spawning anything."""
 
@@ -188,7 +181,6 @@ class DrainGate(unittest.TestCase):
                                             stale_sec=20 * 60, live_stale_sec=60 * 60))
 
 
-@_hook("maybe_drain_outbox", "OUTBOX_DRAIN_PROMPT", "OUTBOX_DRAIN_INTERVAL_SEC")
 class DrainSpawn(_NotionBackend, unittest.TestCase):
     def setUp(self):
         super().setUp()
@@ -314,7 +306,6 @@ class DrainSpawn(_NotionBackend, unittest.TestCase):
         self.assertEqual(self.spawned, [])
 
 
-@_hook("maybe_nudge_outbox_backlog", "DEAD_LETTER_NUDGE_MAX")
 class BacklogAlarm(unittest.TestCase):
     """The sensor the spec designed (§7) — without it a stuck backlog grows for a day unremarked."""
 
@@ -411,7 +402,6 @@ class BacklogAlarm(unittest.TestCase):
         self.assertTrue(any("retry next tick" in line for line in self.logs))
 
 
-@_hook("_tend_outbox", "outbox_backlog", "maybe_drain_outbox", "maybe_nudge_outbox_backlog")
 class ActuallyOwnedByTheTick(_NotionBackend, unittest.TestCase):
     """The part that actually matters.
 
@@ -484,7 +474,6 @@ class ActuallyOwnedByTheTick(_NotionBackend, unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.dir, "outbound.jsonl")))
 
 
-@_hook("render_status_reply")
 class StatusLine(unittest.TestCase):
     """`!status` is answered locally, without a warm session — so it still answers when the warm
     session IS the problem. Un-landed Notion writes belong there for exactly that reason."""
