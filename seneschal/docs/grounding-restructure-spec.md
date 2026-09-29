@@ -1,16 +1,19 @@
 # The grounding restructure — a router, sub-routers, and the duplication kill
 
 **Status:** `PARTIAL(the mode router, the mode files and the four sub-routers BUILT; the READ FIRST
-injection BUILT; the reachability test, the InstructionsLoaded logger and phase 4 NOT built)`
+injection BUILT; the InstructionsLoaded logger BUILT (its hook registration is host-side opt-in); the
+reachability test and phase 4 NOT built)`
 
 - **Built in this release:** `seneschal/SKILL.md` is a thin mode router that dispatches, by an
   imperative read, to `seneschal/modes/{chat,brief,wrap,triage,ask,reminders,watch,dream,forge}.md`
   (Journal and Archive dispatch to their subagents, which were always separate skills). The
   sub-routers `seneschal/docs/CLAUDE.md`, `seneschal/references/CLAUDE.md`, `archons/CLAUDE.md` and
   `cockpit/CLAUDE.md` exist and the root `CLAUDE.md` names each of them. The standing-safety block is
-  injected verbatim into the warm session's cold grounding (§4.4).
-- **Not built:** the golden-question reachability test (§6.3); the host-side `InstructionsLoaded`
-  load logger (§6.2 — a PR cannot ship it); phase 4, deletion (§7). The byte ratchet that stops the
+  injected verbatim into the warm session's cold grounding (§4.4). The `InstructionsLoaded` load
+  logger (§6.2) is `seneschal/scripts/instructions_loaded.py`; the hook that feeds it lives in the
+  user's `~/.claude/settings.json`, which a PR cannot touch, so it fires only once the owner opts in
+  (`settings_merge.py --guard instructions-loaded`).
+- **Not built:** the golden-question reachability test (§6.3); phase 4, deletion (§7). The byte ratchet that stops the
   routers regrowing is the enforcement half and lives in `context-budget-spec.md` (§8).
 
 **The ask this answers:** split the grounding into a router plus sub-routers, kill genuine
@@ -323,7 +326,7 @@ is why it can persist for weeks. Three mechanisms a restructure introduces:
 3. **A fact that lands in no file at all** — a paragraph dropped in a reflow. **Undetectable
    afterwards.** This is the one §7's losslessness rule exists to prevent.
 
-### 6.2 The cheapest honest detector — NOT BUILT (host-side)
+### 6.2 The cheapest honest detector — BUILT (registration host-side)
 
 Claude Code's **`InstructionsLoaded`** hook fires when a `CLAUDE.md` or rules file loads, with the
 file path and a `load_reason` (`session_start`, `nested_traversal`, `path_glob_match`, `include`,

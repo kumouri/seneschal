@@ -30,8 +30,12 @@ documents its block and this tool writes exactly that block, under the same cont
   * ``branch-delete`` — ``PreToolUse`` ``Bash|PowerShell`` → ``branch_delete_guard.py``
   * ``query-shape``   — ``PostToolUse`` on the Notion query tool → ``query_shape_hook.py``.
     **Notion backend only**, so ``all`` does not include it; name it explicitly.
+  * ``instructions-loaded`` — ``InstructionsLoaded`` (no matcher) → ``instructions_loaded.py``, the
+    sub-router load logger (its own module docstring is the guide). Observability, not a guard,
+    so ``all`` does not include it either; name it explicitly.
 
-None of them is installed unless named: they refuse commands, and refusing is the owner's call.
+None of them is installed unless named: the guards refuse commands, and refusing is the owner's
+call; the logger fires on every session on the machine, which is the owner's call too.
 
 Contracts:
   * **Dry-run by default.** ``--dry-run`` (the default) prints a unified diff of what would
@@ -74,7 +78,8 @@ HOOK_TIMEOUT = 10
 ENV_DEFAULTS = {"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
 
 #: The optional guard hooks: name -> [(event, matcher, script, extra args, timeout)]. Each row is
-#: the block its ``*_SETUP.md`` documents; a test pins the two against each other.
+#: the block its ``*_SETUP.md`` documents; a test pins the two against each other. A ``None``
+#: matcher writes a matcher-less group (an event with no tool to match, e.g. InstructionsLoaded).
 GUARDS = {
     "bash-path": [("PreToolUse", "Bash", "bash_path_guard.py", "", 10)],
     "script-file": [("PreToolUse", "Bash|PowerShell", "script_file_guard.py", "", 10)],
@@ -83,8 +88,10 @@ GUARDS = {
     "branch-delete": [("PreToolUse", "Bash|PowerShell", "branch_delete_guard.py", "", 60)],
     "query-shape": [("PostToolUse", "mcp__notion__notion-query-data-sources",
                      "query_shape_hook.py", "", 10)],
+    "instructions-loaded": [("InstructionsLoaded", None, "instructions_loaded.py", "", 10)],
 }
-#: What ``--guard all`` means: every guard except the Notion-only one.
+#: What ``--guard all`` means: every guard except the Notion-only one (and the load logger,
+#: which is observability rather than a guard).
 ALL_GUARDS = ("bash-path", "script-file", "merge", "branch-delete")
 
 
@@ -165,8 +172,9 @@ def _merge_guard_rows(hooks: dict, repo: Path, guards, force_path: bool, notes: 
                                      f"checkout ({item['command']}) - left unchanged. Re-run with "
                                      "--force-path to repoint it here.")
                 continue
-            groups.append({"matcher": matcher,
-                           "hooks": [{"type": "command", "command": want_cmd, "timeout": timeout}]})
+            group = {"matcher": matcher} if matcher is not None else {}
+            group["hooks"] = [{"type": "command", "command": want_cmd, "timeout": timeout}]
+            groups.append(group)
 
 
 def load_settings(path: Path) -> dict:
@@ -294,7 +302,8 @@ def _main(argv: list[str]) -> int:
                    help="repoint an existing session_stamp.py hook from another checkout at this repo")
     p.add_argument("--guard", action="append", default=[], metavar="NAME",
                    help="also add an optional guard hook (repeatable): "
-                        + ", ".join(sorted(GUARDS)) + ", or all (every one but query-shape)")
+                        + ", ".join(sorted(GUARDS))
+                        + ", or all (every one but query-shape and instructions-loaded)")
     p.add_argument("--settings", default=None, help="settings.json path override (tests)")
     p.add_argument("--repo", default=None, help="repo root override (default: this checkout)")
     args = p.parse_args(argv[1:])

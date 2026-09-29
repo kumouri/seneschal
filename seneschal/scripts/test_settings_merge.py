@@ -249,6 +249,19 @@ class GuardHooks(Base):
         self.assertEqual(len(cmds), 1)
         self.assertIn(str(self.repo).replace("\\", "/"), cmds[0])
 
+    def test_instructions_loaded_is_opt_in_and_matcherless(self):
+        self.assertEqual(self.run_cli("--apply", "--guard", "all"), 0)
+        self.assertNotIn("InstructionsLoaded", self.read()["hooks"])
+        self.assertEqual(self.run_cli("--apply", "--guard", "instructions-loaded"), 0)
+        groups = self.read()["hooks"]["InstructionsLoaded"]
+        self.assertEqual(len(groups), 1)
+        self.assertNotIn("matcher", groups[0])
+        item = groups[0]["hooks"][0]
+        self.assertTrue(item["command"].endswith("seneschal/scripts/instructions_loaded.py"))
+        self.assertEqual(item["timeout"], 10)
+        self.assertEqual(self.run_cli("--apply", "--guard", "instructions-loaded"), 0)
+        self.assertEqual(len(self.read()["hooks"]["InstructionsLoaded"]), 1)   # idempotent
+
     def test_unknown_guard_is_refused_and_nothing_written(self):
         self.assertEqual(self.run_cli("--apply", "--guard", "nope"), 2)
         self.assertFalse(self.settings.exists())
@@ -256,14 +269,16 @@ class GuardHooks(Base):
     def test_each_guard_row_matches_its_setup_guide(self):
         guides = {"bash-path": "BASH_PATH_GUARD_SETUP.md", "script-file": "SCRIPT_FILE_GUARD_SETUP.md",
                   "merge": "MERGE_GUARD_SETUP.md", "branch-delete": "BRANCH_DELETE_GUARD_SETUP.md",
-                  "query-shape": "QUERY_SHAPE_SETUP.md"}
+                  "query-shape": "QUERY_SHAPE_SETUP.md",
+                  "instructions-loaded": "instructions_loaded.py"}
         self.assertEqual(set(guides), set(sm.GUARDS))
         for name, guide in guides.items():
             text = (HERE / guide).read_text(encoding="utf-8")
             for event, matcher, script, extra, timeout in sm.GUARDS[name]:
                 with self.subTest(guard=name, event=event):
                     self.assertIn(f'"{event}"', text)
-                    self.assertIn(f'"matcher": "{matcher}"', text)
+                    if matcher is not None:
+                        self.assertIn(f'"matcher": "{matcher}"', text)
                     self.assertIn(f"seneschal/scripts/{script}{extra}", text)
                     self.assertIn(f'"timeout": {timeout}', text)
                     self.assertIn(f"--guard {name}", text)

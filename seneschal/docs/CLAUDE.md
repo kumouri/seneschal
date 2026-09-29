@@ -111,8 +111,8 @@ specs and carry no status.
   turn cost; diagnosis only.
 - `usage-telemetry-spec.md` — **PARTIAL(phase 1 BUILT, loop wiring pending)** — reads the real
   plan meters; never speaks except on failure.
-- `grounding-restructure-spec.md` — **PARTIAL(mode router + modes/ + sub-routers BUILT)** — the root split into a
-  router + sub-routers.
+- `grounding-restructure-spec.md` — **PARTIAL(mode router + modes/ + sub-routers + InstructionsLoaded logger
+  BUILT)** — the root split into a router + sub-routers.
 - `read-first-retirement-spec.md` — **PARTIAL(the store + CLI BUILT — `standing_safety.py` /
   `state/standing-safety.json`; the digest itself RETIRED; the §4 classification/compression process
   and §6's completeness check remain unbuilt design)** — the READ FIRST digest section only ever
