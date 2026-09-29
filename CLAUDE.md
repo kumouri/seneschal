@@ -82,6 +82,11 @@ seneschal/
                    (the outbound approval gate, its one approval store, the non-content send
                    ledger — SEND_GATE_SETUP.md; _owner_fixture.py is their test fixture),
                    provenance_guard.py (the RAG index's writer-provenance registry),
+                   the opt-in guard hooks — merge_guard.py (owner-approved head SHA before any
+                   merge; MERGE_GUARD_SETUP.md), branch_delete_guard.py, bash_path_guard.py,
+                   script_file_guard.py, query_shape_hook.py (each its *_SETUP.md) — and the
+                   PR automation pr_*.py + picker_*.py + watch_pr.py + branch_sweep.py +
+                   develop_ci_status.py, configured by repo_config.py (references/pr-guard.json),
                    the CI gate set — check_*.py (each docstring is its spec) + count_tests.py +
                    ci_local.py (runs every CI gate locally) + check_placeholders.py —
                    *_SETUP.md guides + INTEGRATIONS.md,

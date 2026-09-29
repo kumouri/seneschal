@@ -151,6 +151,23 @@ a corrupt settings.json outright. If it reports a `session_stamp.py` hook pointi
 **different checkout**, surface that verbatim and leave it — `--force-path` repoints it
 here, only on the owner's explicit say-so.
 
+**Optional guard hooks — offer, never assume.** The same tool can add the shell/PR guards
+(`PreToolUse` / `PostToolUseFailure` hooks that *refuse* commands), each only when named:
+`bash-path` (`BASH_PATH_GUARD_SETUP.md`), `script-file` (`SCRIPT_FILE_GUARD_SETUP.md`),
+`merge` — the owner approves an exact head SHA before any `gh pr merge`, and red or pending CI
+never merges (`MERGE_GUARD_SETUP.md`) — and `branch-delete`
+(`BRANCH_DELETE_GUARD_SETUP.md`); `all` is those four. `query-shape`
+(`QUERY_SHAPE_SETUP.md`) is Notion-backend only, so offer it only when the active store is
+notion. Ask which (a multi-select), then diff first exactly as above:
+
+```
+python seneschal/scripts/settings_merge.py --dry-run --guard merge --guard branch-delete
+```
+
+and `--apply` on confirm. Same guarantees: append-only, idempotent, backup-first, foreign
+checkouts reported and left alone. A guard the owner declines is simply not installed —
+nothing else depends on it.
+
 ## 6 — Verify
 
 Run what the platform can actually show, and report only what happened:
