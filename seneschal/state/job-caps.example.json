@@ -1,0 +1,7 @@
+{
+  "schema": "seneschal.job-caps/1",
+  "soft_per_session": 3,
+  "hard_global": 5,
+  "updated_at": "2026-01-01T00:00:00Z",
+  "updated_by": "cockpit"
+}

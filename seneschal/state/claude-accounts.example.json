@@ -1,0 +1,5 @@
+{
+  "_note": "Named Claude logins for `jobs.py start --account <name>`. Copy to claude-accounts.json (gitignored) and log each dir in first: seneschal/scripts/CLAUDE_ACCOUNTS_SETUP.md. null = the normal ~/.claude login. Keys starting with _ are ignored.",
+  "default": null,
+  "2": "C:\\Users\\example\\.claude-2"
+}

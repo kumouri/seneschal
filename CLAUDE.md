@@ -59,7 +59,7 @@ seneschal/
                    Notion writes — Notion backend only; filesystem backends write direct),
                    session_stamp.py + session_heartbeat.py + mini_dream.py (multi-session
                    registry under state/sessions/ + the per-session mini-dream distiller),
-                   jobs.py + job_*.py + worktree_gc.py (durable background jobs —
+                   jobs.py + job_*.py + worktree_gc.py + claude_accounts.py (durable background jobs —
                    docs/background-jobs-spec.md), loops.py + cadence_chain/owi_*/
                    observation_gate/standing_safety/brief_prestage/carryover_region (the
                    open-work register and its satellites — state/README.md),

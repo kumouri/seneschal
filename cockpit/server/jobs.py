@@ -93,6 +93,27 @@ def log_tail(path: Any, lines: int = DEFAULT_TAIL_LINES) -> list:
     return kept[-min(lines, MAX_TAIL_LINES):]
 
 
+def _runtime(rec: dict) -> Optional[dict]:
+    """The record's `runtime` block (jobs.py stamps it at start, background-jobs-spec
+    §3.16) in the panel's shape, or `None` for a record that predates it — which the panel renders as
+    "—". **Never derived here**: the stamp is the evidence, and re-guessing it from the argv would be a
+    third copy of `jobs.job_agent_class` (ruling 3). Each field is read on its own, so one garbled field
+    blanks that field only; `llm` keeps exactly its three legal values and anything else is `None`."""
+    rt = rec.get("runtime")
+    if not isinstance(rt, dict):
+        return None
+
+    def text(key: str) -> Optional[str]:
+        value = rt.get(key)
+        return value if isinstance(value, str) and value.strip() else None
+
+    llm = rt.get("llm")
+    if not (llm is True or llm is False or llm == "unknown"):
+        llm = None
+    return {"subscription": text("subscription"), "harness": text("harness"),
+            "model": text("model"), "llm": llm}
+
+
 def _normalize(rec: dict, state_dir, tail_lines: int, now: Optional[datetime] = None) -> Optional[dict]:
     """One on-disk record -> the panel's shape. `None` if it isn't recognizably a job."""
     if not isinstance(rec, dict):
@@ -108,6 +129,12 @@ def _normalize(rec: dict, state_dir, tail_lines: int, now: Optional[datetime] = 
         # shows a tail.
         log_path = str(_jobs_dir(state_dir) / f"{job_id}.log")
     argv = rec.get("argv")
+    # `jobs.py start --account <name>`: which Claude login the job bills to. Surfaced
+    # only when it is NOT the default, matching `jobs.py list` — a panel of ordinary jobs is unchanged.
+    acct = rec.get("account") if isinstance(rec.get("account"), dict) else {}
+    account = acct.get("name") if isinstance(acct.get("name"), str) else None
+    if account == "default":
+        account = None
     return {
         "id": job_id,
         "title": rec.get("title") if isinstance(rec.get("title"), str) else job_id,
@@ -122,6 +149,9 @@ def _normalize(rec: dict, state_dir, tail_lines: int, now: Optional[datetime] = 
         "deadline_sec": rec.get("deadline_sec") if isinstance(rec.get("deadline_sec"), int) else None,
         "lease": bool(rec.get("lease")),
         "wake": bool(rec.get("wake")),
+        "account": account,
+        # What it runs on — subscription / harness / model, and whether it is an LLM job at all.
+        "runtime": _runtime(rec),
         # `notified_at` is the honest "was the owner actually told" field: jobs.py stamps it only
         # once the push landed — or once it provably went out and cannot safely be re-sent, which
         # the record then says in `notify_delivery: "ambiguous"`. Either way a terminal

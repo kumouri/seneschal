@@ -79,8 +79,8 @@ specs and carry no status.
 
 ## Background work
 
-- `background-jobs-spec.md` — **PARTIAL(BUILT + §3.7-§3.14)** — exactly-once completion push;
-  concurrency capped 3 soft / 5 hard, agent jobs only; §3.13 detect/resume/rescue for a job that
+- `background-jobs-spec.md` — **PARTIAL(BUILT + §3.7-§3.16)** — exactly-once completion push;
+  concurrency capped 3 soft / 5 hard (owner-settable), agent jobs only; `--account` per job; §3.13 detect/resume/rescue for a job that
   exits 0 unfinished; §3.14 a `PreToolUse` hook (`job_background_guard.py`) refusing the
   backgrounded-Bash call that causes it, before it runs.
 - `job-origin-routing-spec.md` — **PARTIAL(phases 0-3,5 BUILT)** — a wrong attribution is worse than

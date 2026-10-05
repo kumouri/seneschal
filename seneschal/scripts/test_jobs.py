@@ -602,6 +602,67 @@ class LoopFlagTests(unittest.TestCase):
         self.assertEqual(loops.get(loops.load(self.state), item["id"])["status"], "done")
 
 
+
+class PrFlagTests(unittest.TestCase):
+    """`start --pr N` (concurrent-pr-collisions-spec §5A.10) — the structured record of
+    which PRs a job works on, read by the PR watcher so it never repairs a PR a live job owns."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.state = self.tmp.name
+        self.addCleanup(self.tmp.cleanup)
+
+    def _cli_start(self, *extra):
+        real_start = jobs.start_job
+
+        def stubbed(*a, **kw):
+            kw["runner"] = _runner()
+            return real_start(*a, **kw)
+
+        out = io.StringIO()
+        with mock.patch.object(jobs, "start_job", stubbed), contextlib.redirect_stdout(out), \
+             contextlib.redirect_stderr(io.StringIO()):
+            code = jobs.main(["--state-dir", self.state, "start", "--title", "t",
+                              *extra, "--", "python", "-c", "pass"])
+        return code, json.loads(out.getvalue())
+
+    def test_repeated_flags_stamp_a_sorted_deduplicated_list(self):
+        code, printed = self._cli_start("--pr", "881", "--pr", "880", "--pr", "881")
+        self.assertEqual(code, 0)
+        self.assertEqual(printed["prs"], [880, 881])
+        self.assertEqual(jobs.load_job(self.state, printed["id"])["prs"], [880, 881])
+
+    def test_no_flag_writes_no_key(self):
+        code, printed = self._cli_start()
+        self.assertEqual(code, 0)
+        self.assertNotIn("prs", jobs.load_job(self.state, printed["id"]))
+        self.assertIsNone(printed["prs"])
+
+    def test_a_non_integer_is_refused_by_argparse(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            jobs.main(["--state-dir", self.state, "start", "--title", "t", "--pr", "#880",
+                       "--", "python", "-c", "pass"])
+
+    def test_normalize_prs(self):
+        self.assertEqual(jobs.normalize_prs([3, 1, 3, "2"]), [1, 2, 3])
+        self.assertEqual(jobs.normalize_prs([True, 0, -4, None, "x"]), [])
+        self.assertEqual(jobs.normalize_prs(None), [])
+        self.assertEqual(jobs.normalize_prs("880"), [])
+
+    def test_list_shows_the_prs(self):
+        rec = jobs.start_job(self.state, "rebase stack", ["x"], runner=_runner(), now=NOW, prs=[882, 880])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            jobs._print_job(rec)
+        self.assertIn("prs: #880, #882", out.getvalue())
+
+    def test_the_watcher_reads_the_stamp(self):
+        import job_pr_draft
+        jobs.start_job(self.state, "stack rebase", ["x"], runner=_runner(), now=NOW, prs=[880])
+        owners = job_pr_draft.list_pr_owners(self.state)
+        self.assertEqual({pr: o["via"] for pr, o in owners.items()}, {880: "prs"})
+
+
 class WakeDefaultTests(unittest.TestCase):
     """The wake defaults ON for a job the owner asked for, so the completion report is a mechanism
     instead of a promise: a job that ends badly with `--wake` forgotten would otherwise go unexplained

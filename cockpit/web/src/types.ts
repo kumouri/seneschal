@@ -496,6 +496,19 @@ export interface ArchonsResponse {
 // is deliberately no cancel action here, because cancelling is `jobs.py cancel`, a decision rather
 // than a dashboard click.
 
+/** `jobs.py`'s `runtime` block, field by field as the backend served it (a garbled field is `null`). */
+export interface JobRuntime {
+  /** `main` / a Claude account name / `ChatGPT` / `HuggingFace` / `local`; `null` for non-LLM. */
+  subscription: string | null
+  /** `claude-cli` | `codex` | `hf-router` | `ollama` | `unknown` | `none` — typed loosely, a newer
+   *  daemon may add one. */
+  harness: string | null
+  /** The model id, or the literal `default` when the harness ran with no model flag. */
+  model: string | null
+  /** `jobs.job_agent_class` verbatim: true = LLM, false = non-LLM, `unknown` = could not place it. */
+  llm: boolean | 'unknown' | null
+}
+
 export interface Job {
   id: string
   title: string
@@ -513,6 +526,12 @@ export interface Job {
   deadline_sec: number | null
   lease: boolean
   wake: boolean
+  /** `jobs.py start --account <name>` — which Claude login it bills to. `null` for the default login
+   *  (and every job that never passed the flag), so ordinary rows stay unchanged. */
+  account?: string | null
+  /** What it runs on, stamped by `jobs.py start` (background-jobs-spec §3.16). `null` for a record that
+   *  predates the stamp — rendered "—", never re-derived in the browser (jobRuntime.ts). */
+  runtime?: JobRuntime | null
   /** Stamped ONLY once the completion push actually landed. A terminal job with `null` here is a ping
    *  still being retried — the one genuinely alarming state this panel can show. */
   notified_at: string | null
@@ -539,6 +558,26 @@ export interface JobsResponse {
 export interface JobDetailResponse {
   available: boolean
   job: Job | null
+}
+
+/** `GET`/`POST /api/job-caps` — the Jobs panel's one write. `limits` is served so the browser keeps no
+ *  copy of the bounds. `in_flight` is the live AGENT-job count `jobs.py` itself would refuse a start on;
+ *  `null` means it could not be counted (`count_error` says why) — never read it as zero. */
+export interface JobCapsResponse {
+  available: boolean
+  reason?: string
+  soft_per_session: number
+  hard_global: number
+  /** `file` once the owner has set them; `default` = the built-in 3 / 5. */
+  source: 'file' | 'default'
+  updated_at: string | null
+  updated_by: string | null
+  /** A present-but-unusable job-caps.json: the defaults are in force and this says why. */
+  error: string | null
+  limits: { soft_min: number; hard_ceiling: number; default_soft: number; default_hard: number }
+  in_flight: number | null
+  uncounted: number | null
+  count_error: string | null
 }
 
 // ------------------------------------------------------------------------------------------------

@@ -174,6 +174,42 @@ class JobsReaderTests(unittest.TestCase):
         self.assertIsNone(job["duration_sec"])                  # unreadable, omitted not faked
         self.assertEqual(job["log_tail"], [])
 
+    def test_a_non_default_account_is_surfaced_and_default_or_absent_is_not(self):
+        """`jobs.py start --account <name>` — shown only when it is not the default
+        login, matching `jobs.py list`, so a panel of ordinary jobs is unchanged."""
+        self._write("20260729-020000-acc2", account={"name": "2", "config_dir": "C:\\x\\.claude-2"})
+        self._write("20260729-020001-accd", account={"name": "default", "config_dir": None})
+        self._write("20260729-020002-none")
+        self._write("20260729-020003-junk", account="2")  # a malformed block is tolerated, not shown
+        by_id = {j["id"]: j["account"] for j in jobs.read_jobs(self.state)["active"]}
+        self.assertEqual(by_id, {"20260729-020000-acc2": "2", "20260729-020001-accd": None,
+                                 "20260729-020002-none": None, "20260729-020003-junk": None})
+
+    def test_the_runtime_block_is_served_as_stamped_and_absent_is_null(self):
+        """`jobs.py`'s `runtime` stamp (§3.16) — passed through field by field, never
+        derived from the argv here: a record without it is `None`, which the panel shows as "—"."""
+        stamped = {"subscription": "2", "harness": "claude-cli", "model": "default", "llm": True}
+        self._write("20260729-030000-llm", runtime=stamped)
+        self._write("20260729-030001-nonllm", runtime={"subscription": None, "harness": "none",
+                                                       "model": None, "llm": False})
+        self._write("20260729-030002-unk", runtime={"subscription": None, "harness": "unknown",
+                                                    "model": None, "llm": "unknown"})
+        self._write("20260729-030003-old", argv=["claude", "-p", "x"])  # would classify — must not
+        self._write("20260729-030004-junk", runtime="claude")
+        self._write("20260729-030005-garbled", runtime={"subscription": 7, "harness": "codex",
+                                                        "model": "", "llm": "yes"})
+        by_id = {j["id"]: j["runtime"] for j in jobs.read_jobs(self.state)["active"]}
+        self.assertEqual(by_id["20260729-030000-llm"], stamped)
+        self.assertIs(by_id["20260729-030001-nonllm"]["llm"], False)
+        self.assertEqual(by_id["20260729-030001-nonllm"]["harness"], "none")
+        self.assertEqual(by_id["20260729-030002-unk"]["llm"], "unknown")
+        self.assertIsNone(by_id["20260729-030003-old"])
+        self.assertIsNone(by_id["20260729-030004-junk"])
+        self.assertEqual(by_id["20260729-030005-garbled"],
+                         {"subscription": None, "harness": "codex", "model": None, "llm": None})
+        # The single-job payload carries it too.
+        self.assertEqual(jobs.read_job(self.state, "20260729-030000-llm")["job"]["runtime"], stamped)
+
     def test_a_garbled_timestamp_yields_no_duration_rather_than_a_wrong_one(self):
         self._write("20260729-020000-bad", started_at="not-a-time", created_at="also-not")
         self.assertIsNone(jobs.read_jobs(self.state)["active"][0]["duration_sec"])
