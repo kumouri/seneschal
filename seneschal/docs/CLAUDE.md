@@ -34,8 +34,8 @@ specs and carry no status.
   supervised tasks under one `asyncio.gather`, each behind `_supervise`; the loop as deployed.
 - `how-to-add-a-daemon-task.md` — REFERENCE — the explicit gather-and-`_supervise` mechanism, the
   steps, and what not to do.
-- `hung-turn-deadline-spec.md` — **BUILT(P1, P2; P3 is deliberately nothing)** — a hang is a gap between
-  stream events, never a cap.
+- `hung-turn-deadline-spec.md` — **BUILT(P1, P2, the outside backstop; P3 is deliberately nothing)** — a
+  hang is a gap between stream events, never a cap; a 30-minute backstop catches a failed watchdog.
 - `seneschald-revive-spec.md` — **PARTIAL(watchdog side BUILT; the presence.py halves of §8/§9
   pending)** — revives a dead daemon; §9 catches it alive on the wrong account.
 - `stacked-pr-branch-deletion-spec.md` — **BUILT** — deleting a branch used to close every PR stacked

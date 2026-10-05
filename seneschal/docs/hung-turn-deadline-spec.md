@@ -1,7 +1,8 @@
 # Spec — the hung turn that replays forever
 
-**Status:** `BUILT(P1, P2; P3 is deliberately nothing)` — the per-turn idle-gap deadline (P1) and the
-bounded control hold (P2) both ship in the daemon. P3 is deliberately nothing. §4's three questions
+**Status:** `BUILT(P1, P2, the outside backstop; P3 is deliberately nothing)` — the per-turn idle-gap
+deadline (P1), the bounded control hold (P2) and the 30-minute outside backstop behind P1's gap all ship
+in the daemon. P3 is deliberately nothing. §4's three questions
 are all decided, and the two decided last both confirmed the shipped default, so nothing about how
 the daemon behaves changed when they were settled.
 **Owner:** `seneschal/scripts/presence.py` — the warm session's `_read_until_result` (the
@@ -69,7 +70,9 @@ can run long — tool use, a big read, a Fable delegation. What a hang looks lik
 events exceeds it. A flat total cap would kill exactly the good long turns.
 
 **As built:** `TURN_IDLE_GAP_SEC = 600.0` (§4 Q1), and `_TurnWatchdog` — one short-lived daemon thread
-per turn, armed at the top of `_read_until_result`, beaten on every line, cancelled in a `finally`.
+per turn, beaten on every line, cancelled in a `finally`. Both live in `../scripts/backends/claude_cli.py`.
+**Armed in `_send_turn` BEFORE the stdin write**, not at the top of `_read_until_result` as first built —
+see "The write was outside the deadline" below.
 
 - **Why a watchdog and not a reader thread + `queue.get(timeout=…)`.** `for raw in self.proc.stdout`
   cannot be interrupted from outside, so the alternative is restructuring the read loop — and that
@@ -95,6 +98,97 @@ per turn, armed at the top of `_read_until_result`, beaten on every line, cancel
 - **A timeout gets its own respawn reason**, `RESPAWN_TURN_TIMEOUT`, and is **not** in
   `RESUMABLE_REASONS` — a hung session is the one whose state there is the most evidence against
   restoring.
+
+### The write was outside the deadline
+
+A resumed warm session with a large context was handed a ~4.7 KB job-finished prompt and produced
+nothing for most of half an hour; the idle gap never fired and only a manual `reseneschald` freed it. The
+CLI's own transcript held **no `queue-operation` row for that message** — every other turn had one within
+~20 ms of the write — so the child never read its stdin. The watchdog was armed only inside the read
+loop, i.e. after `stdin.write`+`flush`, and a write larger than the pipe buffer blocks until the reader
+reads: measured on Windows, 3,000 bytes returns and 4,095 blocks. A child wedged before it reads stdin
+therefore held the drainer inside `write()` with no deadline anywhere.
+
+The fix arms the watchdog first, so a silent write and a silent read are one silence on one clock. The
+kill closes the pipe's read end and the blocked write fails — on Windows as `OSError(EINVAL)`, not
+`BrokenPipeError`, so the catch widened to `OSError` — and `timed_out` is read in the same `finally`,
+so a hang that never got past the write reports as `turn_timeout` like any other. Pinned by
+`test_presence_hung_turn.AWriteThatNeverLandsIsCovered`, including one case against a real child and a
+real pipe. **Not proven:** why the CLI wedged before reading stdin.
+
+### The outside backstop
+
+**Why it exists.** The wedge above showed that once the in-thread watchdog fails, **nothing else
+watches turn progress.** The daemon's heartbeat comes from the event loop, and the event loop stayed
+free the whole time (the stuck send runs on a worker thread), so the updater's liveness check kept
+reporting "presence: alive". P2's control-hold cap would eventually have forced a pending restart
+through, but only if a restart happened to be queued.
+
+**As built** (`../scripts/presence.py`):
+
+- `TURN_BACKSTOP_SEC = 30 * 60.0`. `turn_backstop_sec(session)` returns
+  `max(TURN_BACKSTOP_SEC, 2 × session.turn_gap_sec)`, read per turn like the gap itself. **The 2× floor
+  keeps it from competing with the gap, whatever the gap is:** if the gap is ever raised above
+  15 minutes, the backstop moves up with it instead of firing first. A gap that disables the watchdog
+  (zero, negative, unreadable) leaves the plain 30 minutes as the only deadline.
+- `TurnBackstop`, one per send. It is armed when constructed, so a turn that never emits anything is
+  still timed. `wrap(on_event)` is the callback the drainer hands `session.send()`, and every stream
+  event beats the backstop before it reaches the tee.
+- `turn_backstop_watch`, an asyncio task the drainer spawns beside the send (`arm_turn_backstop`) and
+  cancels **first thing** in the same `finally` that ends it. The cancel is what keeps it off a turn the
+  watchdog already ended or a turn that simply finished. The channel-declaration corrective re-send
+  (the drainer's second `send`) gets its own backstop the same way.
+- **On firing**, in this order:
+  1. log `!! TURN BACKSTOP fired: turn <id> …` to `presence.log`;
+  2. set `session.backstop_killed`;
+  3. `proc.kill()` the warm child, which closes the pipes so a blocked read ends and a blocked write
+     raises;
+  4. send the owner one Telegram line (`turn_backstop_alert`, `kind="alert"`) saying the backstop
+     fired, which means the watchdog has a bug.
+
+  The kill comes before the ping so a slow Telegram can't delay it.
+- **The turn ends on the existing timeout path**, not a new one. The drainer treats
+  `reply is None and backstop.fired` exactly like `timed_out`: the `turn_timeout_notice` (quoting the
+  backstop's deadline, since that is the silence the owner sat through), `RESPAWN_TURN_TIMEOUT`, the
+  message kept queued, and the attempt counted toward `MAX_TURN_ATTEMPTS`. If the watchdog reported a
+  timeout too, its reading stands.
+- **`backstop_killed` stops the fallback ladder.** The wedge above was the **first turn of a resumed
+  session**. That is exactly where `WarmSession.send()`'s rung 1 reads an unexplained `None` as a stale
+  resume and respawns cold to re-send. Both `WarmSession` and `CodexWarmSession` treat the flag the
+  way they treat `timed_out`, and reset it per send.
+- **When the kill doesn't free the turn.** If the drainer still hasn't got its turn back
+  `TURN_BACKSTOP_RELEASE_SEC` (60 s) after the kill, the backstop logs that and sends one more line
+  saying a `reseneschald` is needed. This covers a worker thread stuck somewhere a dead pipe can't
+  reach. It can't kill a thread, so saying so is the most it can do. Every path through the watcher is
+  wrapped so it never raises.
+
+**Where it lives, and why there.** It runs on the drainer's event loop, as a per-turn task, rather
+than inside the backend or as another supervised task.
+
+- **Not in the backend.** It has to survive a bug in `_TurnWatchdog`, so it shares nothing with it:
+  a different thread (the event loop, which stays alive while the worker is stuck), a different clock
+  (`asyncio.sleep`, not a `threading.Event` wait), a different beat (presence's own `on_event` wrapper,
+  not the backend's per-line `beat()`), and a different kill site. A second watchdog in `claude_cli.py`
+  would sit in the code path it is meant to back up, and would have to be built again for every
+  backend. This one covers `codex-cli` for free.
+- **Not a supervised task.** A periodic task would have to work out whether a turn is in flight, and
+  which one, from shared flags (`session_busy`, `inflight_text`). It would race the drainer's `finally`,
+  and that race is exactly the double-handling this has to avoid. A task the drainer starts and cancels
+  around one send knows its turn by construction, can't fire on an idle session, and leaves the
+  supervisor's task list (and its restart semantics) unchanged.
+
+**What it measures.** Parsed stream events. The watchdog beats on every non-empty line, which includes
+unparseable ones, so in principle the watchdog can see life the backstop can't. That only matters for a
+child streaming 30 minutes of non-JSON, which `stream-json` never produces. The 2× floor is the margin
+for it anyway.
+
+**Tests** (`test_presence_hung_turn.py`, the `Backstop*` classes): it fires through the real drainer on
+a real `WarmSession` over a silent fake child, with the watchdog both disabled (gap 0) and broken (a no-op
+stand-in); it never fires on a turn three times its own deadline that keeps streaming; it never touches a
+turn the watchdog already ended; `backstop_killed` suppresses both ladder rungs and resets per send; a
+kill that frees nothing asks for `reseneschald`, and a missing child or a raising kill is survived; the
+shipped value is 30 minutes and is ≥ 2× both backends' gaps. The fake child also closes its own stdout
+after 10 s, so a regression that kills **both** deadlines fails the suite instead of hanging it.
 
 ### P2 — bound the control hold
 
@@ -228,10 +322,11 @@ behaving exactly as before.
   choice for P2 all fall out of it.
 - **It does not detect a *slow* turn**, only a silent one — by design. A child that streams filler
   forever is a different pathology and is not what this bounds.
-- **It adds no dependency and no config surface.** Two module constants, stdlib only.
+- **It adds no dependency and no config surface.** Module constants, stdlib only — including the
+  outside backstop's two.
 
 ## Router entry
 
 **Router status:** **P1+P2 BUILT; §4 fully decided — Q2 and Q3 both confirmed the shipped default**.
 **What it decided:** **A gap between stream events, never a cap** — a hang is silent, not slow; plus
-the bounded control hold.
+the bounded control hold, plus the 30-minute outside backstop that catches a failed watchdog.

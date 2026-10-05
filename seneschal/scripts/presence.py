@@ -192,7 +192,16 @@ attribution and never the turn.
 
 `TURN_IDLE_GAP_SEC=600` — a hang is SILENT, not slow, and a total cap kills the long healthy turns. A
 watchdog kills the child and the EXISTING mid-turn-death path takes over; a hung turn is the ONE
-delivered outcome that does NOT pop the queue. See ../docs/hung-turn-deadline-spec.md.
+delivered outcome that does NOT pop the queue. The gap is armed BEFORE the stdin write: a prompt over
+the 4 KB Windows pipe buffer blocks until the child reads, and a child wedged before it reads stdin
+otherwise parked the drainer in `write()` with no deadline at all. See ../docs/hung-turn-deadline-spec.md.
+
+**An outside backstop sits behind it.** `TurnBackstop` + `turn_backstop_watch` run on the EVENT LOOP,
+spawned by the drainer beside each send and cancelled in the same `finally`: no stream event for
+`TURN_BACKSTOP_SEC` (30 min, never under 2x the session's own gap) kills the child, routes the turn down
+the existing timeout path, and pings the owner that the inner watchdog failed. It shares no code with
+`_TurnWatchdog` — different thread, clock, beat source and kill site — so one bug can't disable both.
+Spec: "The outside backstop".
 
 ### The tick writes vitals once a minute
 
@@ -357,6 +366,17 @@ MAX_TURN_ATTEMPTS = 3
 # **The idle-gap length is 10 minutes.** (Defined in
 # backends/claude_cli.py and re-exported above — TURN_IDLE_GAP_SEC — since it's the claude-cli
 # backend's own dial; codex_cli.py holds its own CODEX_TURN_GAP_SEC, currently the same value.)
+#
+# **The outside backstop behind it: 30 minutes.** If a turn goes this long with NO stream event, the
+# idle-gap watchdog above has failed (a bug), so the event loop kills the child itself. It can only catch
+# a failed watchdog and never competes with the idle gap: `turn_backstop_sec()` floors it at 2x the
+# session's own gap, so raising the gap can't make the backstop fire first. See TurnBackstop below and
+# docs/hung-turn-deadline-spec.md "The outside backstop".
+TURN_BACKSTOP_SEC = 30 * 60.0
+# After the backstop kills the child, how long the turn gets to come back before the backstop says the
+# kill did NOT release it (the worker thread is stuck somewhere a dead pipe can't reach) and that only
+# a `reseneschald` will. One extra log line + one extra ping; it changes nothing else.
+TURN_BACKSTOP_RELEASE_SEC = 60.0
 # The maximum a defer-until-idle control may be held before it applies anyway (P2). A deploy that never
 # lands is worse than a turn cut short: an unbounded hold is how Path A silently stops deploying — the
 # same failure class as seneschald-update's branch drift. Deliberately far above
@@ -2046,6 +2066,125 @@ def turn_timeout_notice(gap_sec: float = TURN_IDLE_GAP_SEC) -> str:
     span = f"{int(round(mins))} minutes" if mins >= 1.5 else f"{int(round(gap_sec))} seconds"
     return (f"That one hung — {span} without a word out of me, so I cut the turn off rather than "
             "leave you sitting there waiting on it.")
+
+
+def turn_backstop_sec(session) -> float:
+    """The backstop deadline for a turn on `session`: `TURN_BACKSTOP_SEC`, never under 2x the
+    session's own idle gap. Read per turn, like the gap itself, so a re-ruled or per-session gap can't
+    make the backstop fire before the watchdog it backs up. A gap that disables the watchdog (zero,
+    negative, unreadable) leaves the plain backstop standing — it's the only deadline left."""
+    try:
+        gap = float(getattr(session, "turn_gap_sec", TURN_IDLE_GAP_SEC))
+    except (TypeError, ValueError):
+        gap = TURN_IDLE_GAP_SEC
+    return max(TURN_BACKSTOP_SEC, 2.0 * gap)
+
+
+class TurnBackstop:
+    """The outside half of the turn deadline (docs/hung-turn-deadline-spec.md "The outside backstop").
+    One per turn, owned by the drainer.
+
+    `wrap(on_event)` is what the drainer hands `session.send()`: every stream event the backend parses
+    beats this clock before reaching the tee. `turn_backstop_watch` reads it from the event loop. It
+    deliberately shares nothing with `_TurnWatchdog` — not the thread (the event loop, which a real
+    wedge showed stays alive while the drainer's worker thread is stuck), not the clock,
+    not the beat (presence's own callback, not the backend's line loop), not the kill site. So a bug
+    that disables the watchdog leaves this one standing."""
+
+    def __init__(self, deadline_sec: float):
+        self.deadline_sec = deadline_sec
+        self.last = time.monotonic()  # armed at construction: a turn that never emits is still timed
+        self.fired = False
+
+    def beat(self) -> None:
+        self.last = time.monotonic()  # one store; runs on the worker thread for every event
+
+    def silent_for(self) -> float:
+        return time.monotonic() - self.last
+
+    def wrap(self, on_event):
+        def _on_event(ev):
+            self.beat()
+            if on_event is not None:
+                on_event(ev)
+        return _on_event
+
+
+def arm_turn_backstop(state: "DaemonState", args, log, turn_id: str):
+    """Arm a backstop for one send: returns `(backstop, task)`. The caller hands `backstop.wrap(...)`
+    to `session.send()` as its `on_event` and cancels `task` in the `finally` that ends the send."""
+    backstop = TurnBackstop(turn_backstop_sec(state.session))
+    return backstop, asyncio.ensure_future(turn_backstop_watch(state, args, log, backstop, turn_id))
+
+
+def turn_backstop_alert(silent_sec: float, gap_sec: float) -> str:
+    """The one Telegram line the backstop sends. It says the INNER watchdog failed, because that is
+    what a backstop firing means — the timeout notice the turn itself gets is a separate message."""
+    return (f"⚠️ Turn backstop fired: a turn went {silent_sec / 60.0:.0f} min with no output and my "
+            f"{gap_sec / 60.0:.0f}-min idle-gap watchdog never cut it off — that's a bug in the "
+            "watchdog. I killed the turn; presence.log has the details (TURN BACKSTOP).")
+
+
+async def turn_backstop_watch(state: "DaemonState", args, log, backstop: TurnBackstop,
+                              turn_id: str) -> None:
+    """Sleep until `backstop` has seen no stream event for its deadline, then kill the warm child.
+
+    Cancelled by the drainer the moment the turn's send returns, which is how a turn the inner
+    watchdog already ended (or a turn that simply finished) is never touched. Firing marks
+    `backstop.fired` — the drainer reads it to route the turn down the EXISTING timeout path (notice,
+    RESPAWN_TURN_TIMEOUT, kept queued, counted toward MAX_TURN_ATTEMPTS) — and sets the session's
+    `backstop_killed`, which keeps the backend's first-turn fallback ladder from respawning and
+    re-sending into a fresh deadline. Never raises: a backstop that can crash is one more thing to
+    back up."""
+    while True:
+        remaining = backstop.deadline_sec - backstop.silent_for()
+        if remaining <= 0:
+            break
+        await asyncio.sleep(remaining)
+    backstop.fired = True
+    silent = backstop.silent_for()
+    session = state.session
+    try:
+        gap = float(getattr(session, "turn_gap_sec", TURN_IDLE_GAP_SEC))
+    except (TypeError, ValueError):
+        gap = TURN_IDLE_GAP_SEC
+    try:
+        log(f"!! TURN BACKSTOP fired: turn {turn_id} produced no output for {silent:.0f}s; the "
+            f"{gap:.0f}s idle-gap watchdog should have ended it and did not (a bug). Killing the warm "
+            "child (docs/hung-turn-deadline-spec.md \"The outside backstop\").")
+        if session is not None:
+            try:
+                session.backstop_killed = True
+            except Exception:  # noqa: BLE001 — a session that refuses the flag still gets killed
+                pass
+        proc = getattr(session, "proc", None)
+        if proc is None:
+            log("!! TURN BACKSTOP: no child process to kill — the turn may stay wedged until reseneschald")
+        else:
+            try:
+                proc.kill()  # closes the pipes: a blocked read ends, a blocked write raises
+            except Exception as e:  # noqa: BLE001
+                log(f"!! TURN BACKSTOP: kill failed ({e!r}) — the turn may stay wedged until reseneschald")
+        # The kill comes first; the ping can wait on the network. A cancel landing during the send
+        # (the kill released the turn) doesn't stop the send — the worker thread finishes it.
+        if not await asyncio.to_thread(deliver_reply, "telegram", turn_backstop_alert(silent, gap),
+                                       args, log, kind="alert"):
+            log("!! TURN BACKSTOP: the Telegram ping did not land")
+        await asyncio.sleep(TURN_BACKSTOP_RELEASE_SEC)
+        # Still not cancelled: the kill did not give the drainer its turn back.
+        log(f"!! TURN BACKSTOP: turn {turn_id} still in flight {TURN_BACKSTOP_RELEASE_SEC:.0f}s after "
+            "the kill — the worker thread is stuck somewhere a dead pipe can't reach; needs reseneschald")
+        await asyncio.to_thread(
+            deliver_reply, "telegram",
+            "⚠️ The backstop's kill didn't free the stuck turn. I need a `reseneschald` to recover.",
+            args, log, kind="alert")
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001 — see the docstring
+        try:
+            log(f"!! TURN BACKSTOP: handler error {e!r}")
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def is_status_command(text: str) -> bool:
@@ -6595,15 +6734,20 @@ async def drainer_task(state: DaemonState, args, log, make_session, idle_sec: fl
                           session_id=getattr(state.session, "session_id", None))
         state.session_busy = True
         _push_cockpit_status(state, args)  # push AFTER flipping busy, so this snapshot says in-flight
+        backstop, backstop_task = None, None
         try:
             # The send blocks a worker thread on the child's stdout until this turn's result event —
             # the event loop stays free, so reminders/polls/controls keep running underneath.
             on_event = _make_stream_tee(state, args, log, channel, turn_id)
+            # The outside backstop (hung-turn-deadline-spec.md): every event beats it on
+            # the way to the tee, and a watcher on the event loop kills the child if none arrives for
+            # its deadline — which, floored at 2x the gap, means the idle-gap watchdog has failed.
+            backstop, backstop_task = arm_turn_backstop(state, args, log, turn_id)
             # `cold_retry_text` is passed ONLY on a resumed spawn — it's the grounding to fall back to
             # if the resume doesn't take, and it means nothing otherwise. Keeping it off the common
             # path also keeps `send(text, on_event=...)` the whole interface a session type has to
             # implement, which several test doubles rely on.
-            send_kwargs = {"on_event": on_event}
+            send_kwargs = {"on_event": backstop.wrap(on_event)}
             if cold_prompt is not None:
                 send_kwargs["cold_retry_text"] = cold_prompt
             # Phase 2: a thin wrapper over session.send() that also owns the interrupt-and-continue
@@ -6612,6 +6756,10 @@ async def drainer_task(state: DaemonState, args, log, make_session, idle_sec: fl
             # for why that makes this call byte-for-outcome-identical to the plain send() it replaces.
             reply, folded = await interleave_live_send(state, args, log, prompt, send_kwargs)
         finally:
+            # First, before anything that could raise: the turn is over, so the backstop stands down.
+            # This cancel is what keeps it off a turn the idle-gap watchdog already ended.
+            if backstop_task is not None:
+                backstop_task.cancel()
             state.session_busy = False
             # Phase 0: close the turn window and write the resolution row for every verdict that
             # landed inside it. In the `finally` so every way out of the send — a reply, a dead
@@ -6628,8 +6776,16 @@ async def drainer_task(state: DaemonState, args, log, make_session, idle_sec: fl
         # test double and the stub implement `send` and not much else.
         timed_out = reply is None and bool(getattr(state.session, "timed_out", False))
         timed_out_gap = getattr(state.session, "turn_gap_sec", TURN_IDLE_GAP_SEC)
+        # The backstop's kill is a timeout too — the same notice, reason and kept-queued path — but
+        # one the inner watchdog never reported, so its own deadline is the silence the owner was told of.
+        # Only when the watchdog did NOT fire: if both somehow did, the watchdog's reading stands.
+        by_backstop = reply is None and not timed_out and backstop is not None and backstop.fired
+        if by_backstop:
+            timed_out, timed_out_gap = True, backstop.deadline_sec
         if reply is None:  # session died/errored — reset and apologize
-            log(f"! warm session {'hung and was killed' if timed_out else 'died'} mid-turn "
+            how = ("hung and was killed by the TURN BACKSTOP" if by_backstop
+                   else "hung and was killed" if timed_out else "died")
+            log(f"! warm session {how} mid-turn "
                 f"({_session_vitals(state.session)})")
             _end_session(state, args, log,                      # neither is resumable, deliberately
                          RESPAWN_TURN_TIMEOUT if timed_out else RESPAWN_TURN_ERROR)
@@ -6738,10 +6894,13 @@ async def drainer_task(state: DaemonState, args, log, make_session, idle_sec: fl
                 retry_ask = channel_declare.retry_prompt(missing_channel=missing_channel,
                                                          missing_marker=missing_marker)
                 state.session_busy = True
+                c_backstop, c_task = arm_turn_backstop(state, args, log, turn_id)
                 try:
                     corrective = await asyncio.to_thread(
-                        functools.partial(state.session.send, retry_ask, on_event=on_event))
+                        functools.partial(state.session.send, retry_ask,
+                                          on_event=c_backstop.wrap(on_event)))
                 finally:
+                    c_task.cancel()
                     state.session_busy = False
                 if corrective is None:
                     # The channel-check itself hung or died — fail open, stop retrying. `reply` (the

@@ -194,6 +194,7 @@ class CodexWarmSession:
         self.fallback_alerted = False
         self._delivered_any = False
         self.timed_out = False
+        self.backstop_killed = False  # mirrors WarmSession: presence.py's turn backstop killed the child
         self.turn_gap_sec = CODEX_TURN_GAP_SEC
         self.permission_mode = permission_mode
         self.log = log
@@ -233,15 +234,18 @@ class CodexWarmSession:
         `start()` respawn needed between rungs since there is no held-open process to tear down, only
         the resume id / model string to clear before the next `_send_turn` call."""
         self.timed_out = False
+        self.backstop_killed = False
         reply = self._send_turn(text, on_event)
-        if reply is None and not self.timed_out and not self._delivered_any and self.resume_session_id:
+        if (reply is None and not self.timed_out and not self.backstop_killed and not self._delivered_any
+                and self.resume_session_id):
             self.log(f"! codex session couldn't resume {self.resume_session_id!r} "
                      "(stale/unknown thread id?); starting cold and re-grounding.")
             self.resume_session_id = None
             self.resumed = False
             self.resume_failed = True
             reply = self._send_turn(cold_retry_text or text, on_event)
-        if reply is None and not self.timed_out and not self._delivered_any and self._can_fallback():
+        if (reply is None and not self.timed_out and not self.backstop_killed and not self._delivered_any
+                and self._can_fallback()):
             self.log(f"! codex session produced no reply on its first turn with model {self.model!r}; "
                      f"falling back to {self.fallback_model!r} and retrying (bad warm dial?).")
             self.did_fallback = True

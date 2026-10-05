@@ -44,6 +44,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
@@ -205,6 +206,95 @@ class HangingTurnEnds(unittest.TestCase):
         threading.Thread(target=feeder, daemon=True).start()
         self.assertEqual(sess._read_until_result(), "survived")
         self.assertFalse(sess.timed_out)
+
+
+class _BlockingStdin:
+    """A stdin pipe whose reader never reads: `write` blocks — exactly as a real full pipe does — until
+    the child is killed, then fails the way a dead reader makes it fail (`OSError`, which on Windows is
+    EINVAL rather than BrokenPipeError)."""
+
+    closed = False
+
+    def __init__(self, proc):
+        self._proc = proc
+        self.entered = threading.Event()
+
+    def write(self, _s):
+        self.entered.set()
+        self._proc.killed.wait()
+        raise OSError(22, "Invalid argument")
+
+    def flush(self):
+        return None
+
+    def close(self):
+        self.closed = True
+
+
+def _send_bounded(sess, text, bound):
+    """Run `send()` on a daemon thread and give up after `bound` seconds, so a regression FAILS here
+    instead of hanging the whole suite the way it hung the live daemon."""
+    box = {}
+
+    def run():
+        box["reply"] = sess.send(text)
+
+    t = threading.Thread(target=run, daemon=True)
+    started = time.monotonic()
+    t.start()
+    t.join(timeout=bound)
+    return t.is_alive(), box.get("reply"), time.monotonic() - started
+
+
+class AWriteThatNeverLandsIsCovered(unittest.TestCase):
+    """A resumed warm session with a large context was handed a ~4.7 KB job-finished prompt and
+    produced nothing for most of half an hour; the idle gap never fired and only a manual `reseneschald` freed it.
+    The CLI's own transcript has no `queue-operation` row for that message at all — the child never
+    read its stdin. The watchdog was armed in `_read_until_result`, i.e. AFTER `stdin.write`+`flush`,
+    and a write larger than the pipe buffer blocks until the reader reads. A child wedged before it
+    starts reading stdin therefore parked the drainer inside the write with no deadline anywhere.
+    The idle gap has to cover the write too."""
+
+    def test_a_write_the_child_never_reads_is_killed_by_the_gap(self):
+        proc = _FakeProc()
+        proc.stdin = _BlockingStdin(proc)
+        sess = _session(0.2, proc=proc)
+        hung, reply, elapsed = _send_bounded(sess, "a prompt the child never reads", bound=5.0)
+
+        self.assertFalse(hung, "send() is still blocked in stdin.write — the idle gap does not cover it")
+        self.assertTrue(proc.stdin.entered.is_set())
+        self.assertIsNone(reply)
+        self.assertTrue(sess.timed_out, "a killed write must report as the hang it is, not a session death")
+        self.assertTrue(proc.killed.is_set())
+        self.assertLess(elapsed, 5.0)
+
+    def test_the_real_pipe_blocks_and_the_gap_still_ends_the_turn(self):
+        """The same thing against a REAL child and a REAL pipe, so this pins the mechanism and not just
+        a fake's opinion of it: the child is alive and silent and never reads stdin (a CLI wedged in
+        startup), and the prompt is far bigger than any OS's pipe buffer (4 KB Windows default, 64 KB
+        Linux), so the write genuinely blocks."""
+        import subprocess
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(120)"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace", bufsize=1,
+        )
+        self.addCleanup(lambda: (child.poll() is None and child.kill()))
+        sess = _session(1.0, proc=child)
+        hung, reply, elapsed = _send_bounded(sess, "x" * 2_000_000, bound=20.0)
+        if hung:
+            child.kill()  # unblock the stuck thread before failing, so it doesn't outlive the test
+
+        self.assertFalse(hung, "send() is still blocked writing to a child that never reads stdin")
+        self.assertIsNone(reply)
+        self.assertTrue(sess.timed_out)
+        # wait(), not poll(): TerminateProcess is asynchronous, so the blocked write can fail before
+        # the handle reads as exited — poll() here flaked 4 runs in 8 on Windows, on pristine develop.
+        try:
+            child.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        self.assertIsNotNone(child.poll(), "the watchdog must have killed the child")
 
 
 class WatchdogFailuresAreNoOps(unittest.TestCase):
@@ -664,6 +754,290 @@ class SlotDrainHoldsControl(unittest.IsolatedAsyncioTestCase):
         constant, distinct from the chat-idle cap it sits beside."""
         self.assertGreater(pr.SLOT_DRAIN_MAX_HOLD_SEC, 0)
         self.assertLess(pr.SLOT_DRAIN_MAX_HOLD_SEC, float("inf"))
+
+
+# --------------------------------------------------------------------------- the outside backstop
+
+class _NoWatchdog:
+    """A `_TurnWatchdog` with a bug that keeps it from ever firing — the failure the backstop exists
+    for. Same interface, does nothing."""
+
+    def __init__(self, *_a, **_kw):
+        self.fired = False
+
+    def start(self):
+        return self
+
+    def beat(self):
+        return None
+
+    def cancel(self):
+        return None
+
+
+class _WaitableFakeProc(_FakeProc):
+    """`_FakeProc` plus what `WarmSession.close()` calls on the way out."""
+
+    def wait(self, timeout=None):
+        return 0
+
+    def terminate(self):
+        self.kill()
+
+
+class FakeChildSession(pr.WarmSession):
+    """A REAL `WarmSession` — its real send(), _send_turn() and fallback ladder — over a fake child.
+    `start()` hands it a fresh fake child instead of spawning `claude`; `script(proc)`, if given, runs
+    on a thread against each child to play its stdout.
+
+    Every child is also killed after `SAFETY_KILL_SEC` no matter what, so a regression that leaves
+    BOTH deadlines dead FAILS these tests instead of parking a worker thread the event loop then waits
+    on forever at exit — which is the very wedge under test, and would hang the suite."""
+
+    SAFETY_KILL_SEC = 10.0
+
+    def __init__(self, gap, script=None):
+        super().__init__("claude", None, "bypassPermissions", lambda *_: None)
+        self.turn_gap_sec = gap
+        self.script = script
+        self.children = []
+
+    def start(self):
+        self.started_at = time.monotonic()
+        self.proc = _WaitableFakeProc()
+        self.children.append(self.proc)
+        safety = threading.Timer(self.SAFETY_KILL_SEC, self.proc.stdout.close)
+        safety.daemon = True
+        safety.start()
+        if self.script is not None:
+            threading.Thread(target=self.script, args=(self.proc,), daemon=True).start()
+
+
+BACKSTOP_ALERT = "Turn backstop fired"
+
+
+class BackstopNeverCompetesWithTheGap(unittest.TestCase):
+    """The backstop fires only if a turn has no output for 30 min, so it can only catch a failed
+    watchdog and never competes with the 10-min idle gap. The 2x floor is what makes "never competes"
+    true for any gap, not just today's."""
+
+    def test_the_shipped_backstop_is_thirty_minutes(self):
+        self.assertEqual(pr.TURN_BACKSTOP_SEC, 30 * 60.0)
+
+    def test_the_backstop_is_at_least_twice_every_shipped_gap(self):
+        self.assertGreaterEqual(pr.TURN_BACKSTOP_SEC, 2 * pr.TURN_IDLE_GAP_SEC)
+        self.assertGreaterEqual(pr.TURN_BACKSTOP_SEC, 2 * pr.codex_cli.CODEX_TURN_GAP_SEC)
+
+    def test_a_longer_gap_drags_the_backstop_with_it(self):
+        sess = pr.StubWarmSession()
+        sess.turn_gap_sec = 2 * pr.TURN_BACKSTOP_SEC        # a hypothetical gap past 15 minutes
+        self.assertEqual(pr.turn_backstop_sec(sess), 2 * sess.turn_gap_sec)
+
+    def test_a_disabled_or_unreadable_gap_leaves_the_plain_backstop(self):
+        for gap in (0, -1, None, "nonsense"):
+            sess = pr.StubWarmSession()
+            sess.turn_gap_sec = gap
+            self.assertEqual(pr.turn_backstop_sec(sess), pr.TURN_BACKSTOP_SEC, gap)
+
+
+class BackstopRouting(unittest.IsolatedAsyncioTestCase):
+    """The backstop through the real drainer, against a real WarmSession over a fake child."""
+
+    BACKSTOP = 1.0   # "1 seconds" in the notice; well clear of the 2x floor on every gap used here
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.args = _args(self.dir)
+        self.logs = []
+        for name, value in (("TURN_BACKSTOP_SEC", self.BACKSTOP), ("TURN_BACKSTOP_RELEASE_SEC", 30.0)):
+            patcher = mock.patch.object(pr, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _break_the_watchdog(self):
+        patcher = mock.patch.object(pr.claude_cli, "_TurnWatchdog", _NoWatchdog)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    async def _drain_until(self, state, make_session, cond, timeout=20.0):
+        task = asyncio.ensure_future(
+            pr.drainer_task(state, self.args, self.logs.append, make_session, 600.0))
+        try:
+            async with asyncio.timeout(timeout):
+                while not cond():
+                    await asyncio.sleep(0.01)
+        finally:
+            state.stop.set()
+            state.pending_event.set()
+            await asyncio.wait_for(task, timeout=5.0)
+
+    def _texts(self):
+        return [m["text"] for m in _sent(self.dir)]
+
+    async def _assert_the_backstop_ends_a_silent_turn(self, sess):
+        state = pr.DaemonState()
+        state.pending = [("telegram", "the prompt that wedges", 0)]
+        state.pending_event.set()
+        notice = pr.turn_timeout_notice(self.BACKSTOP)
+        await self._drain_until(
+            state, lambda: sess,
+            lambda: any(BACKSTOP_ALERT in t for t in self._texts()) and notice in self._texts())
+
+        texts = self._texts()
+        self.assertTrue(sess.children[0].killed.is_set(), "the backstop must kill the silent child")
+        self.assertIn(notice, texts, "the turn ends on the EXISTING timeout notice, quoting the backstop")
+        self.assertFalse([t for t in texts if "snag" in t], "a backstop kill is a hang, not a death")
+        self.assertEqual(state.last_respawn_reason, pr.RESPAWN_TURN_TIMEOUT)
+        self.assertTrue(state.pending, "a hung turn keeps its message queued")
+        self.assertEqual(state.pending[0][1], "the prompt that wedges")
+        self.assertTrue(any(line.startswith("!! TURN BACKSTOP fired") for line in self.logs), self.logs)
+        self.assertTrue(any("killed by the TURN BACKSTOP" in line for line in self.logs), self.logs)
+
+    async def test_it_fires_when_the_watchdog_is_disabled(self):
+        await self._assert_the_backstop_ends_a_silent_turn(FakeChildSession(gap=0))
+
+    async def test_it_fires_when_the_watchdog_is_broken(self):
+        self._break_the_watchdog()
+        await self._assert_the_backstop_ends_a_silent_turn(FakeChildSession(gap=0.15))
+
+    async def test_it_never_fires_while_output_keeps_flowing(self):
+        """A turn three times the backstop's length, never silent for long — it must survive whole,
+        even with the watchdog broken, because silence is the only thing the backstop measures."""
+        self._break_the_watchdog()
+        reply = "[[channel:main]]\n*(answering turn #1)*\nslow but alive"
+
+        def chatty(proc):
+            for i in range(30):                              # ~3 s of output at 0.1 s intervals
+                proc.stdout.feed(_assistant_line(i))
+                time.sleep(0.1)
+            proc.stdout.feed(json.dumps({"type": "result", "is_error": False, "result": reply,
+                                         "usage": {"input_tokens": 1, "output_tokens": 1},
+                                         "num_turns": 1}) + "\n")
+
+        sess = FakeChildSession(gap=0.15, script=chatty)
+        state = pr.DaemonState()
+        state.pending = [("telegram", "think hard about this", 0)]
+        state.pending_event.set()
+        await self._drain_until(state, lambda: sess, lambda: not state.pending)
+
+        texts = self._texts()
+        self.assertTrue(any("slow but alive" in t for t in texts), texts)
+        self.assertFalse([t for t in texts if BACKSTOP_ALERT in t])
+        self.assertFalse(sess.children[0].killed.is_set())
+        self.assertFalse([line for line in self.logs if "TURN BACKSTOP" in line])
+
+    async def test_it_never_touches_a_turn_the_watchdog_already_ended(self):
+        """The watchdog works: every hang is cut at the gap, the turn returns, and the backstop is
+        cancelled with it — three hangs to the dead-letter and not one backstop line among them."""
+        made = []
+
+        def make():
+            s = FakeChildSession(gap=0.15)                   # a real watchdog, firing at 0.15 s
+            made.append(s)
+            return s
+
+        state = pr.DaemonState()
+        state.pending = [("telegram", "wedges every time", 0)]
+        state.pending_event.set()
+        await self._drain_until(state, make, lambda: not state.pending)
+        await asyncio.sleep(self.BACKSTOP * 1.5)             # past the backstop: a stray one would fire
+
+        texts = self._texts()
+        hung = [t for t in texts if t == pr.turn_timeout_notice(0.15)]
+        self.assertEqual(len(hung), pr.MAX_TURN_ATTEMPTS, texts)   # the watchdog's notice, each time
+        self.assertFalse([t for t in texts if BACKSTOP_ALERT in t], texts)
+        self.assertFalse([line for line in self.logs if "TURN BACKSTOP" in line], self.logs)
+        self.assertTrue(made and all(s.timed_out for s in made))
+
+
+class BackstopSuppressesTheFallbackLadder(unittest.TestCase):
+    """The 02:39 wedge was the FIRST turn of a resumed session — exactly where the ladder would read
+    an unexplained `None` as a stale resume and re-send into a fresh process. A backstop kill is a
+    hang, so it must stop the ladder the way `timed_out` does."""
+
+    def setUp(self):
+        patcher = mock.patch.object(pr.claude_cli, "_TurnWatchdog", _NoWatchdog)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _kill_like_the_backstop(self, sess, after):
+        def go():
+            time.sleep(after)
+            sess.backstop_killed = True
+            sess.proc.kill()
+        threading.Thread(target=go, daemon=True).start()
+
+    def test_a_stale_resume_id_is_not_blamed(self):
+        sess = _session(0.15, resume_session_id="the-resumed-id")
+        starts = []
+        sess.start = lambda: starts.append(1)
+        self._kill_like_the_backstop(sess, 0.2)
+        hung, reply, _ = _send_bounded(sess, "hi", bound=5.0)
+        self.assertFalse(hung)
+        self.assertIsNone(reply)
+        self.assertEqual(starts, [])
+        self.assertEqual(sess.resume_session_id, "the-resumed-id")
+        self.assertFalse(sess.resume_failed)
+        self.assertFalse(sess.timed_out, "the watchdog never fired — only the backstop knows")
+
+    def test_the_warm_model_dial_is_not_blamed(self):
+        sess = _session(0.15, fallback_model="claude-sonnet-5")
+        sess.model = "claude-opus-5"
+        starts = []
+        sess.start = lambda: starts.append(1)
+        self._kill_like_the_backstop(sess, 0.2)
+        hung, reply, _ = _send_bounded(sess, "hi", bound=5.0)
+        self.assertFalse(hung)
+        self.assertIsNone(reply)
+        self.assertEqual(starts, [])
+        self.assertFalse(sess.did_fallback)
+
+    def test_the_flag_resets_per_send(self):
+        sess = _session(0.15)
+        sess.backstop_killed = True
+        sess.proc.stdout.feed(_result_line("fine"))
+        self.assertEqual(sess.send("works"), "fine")
+        self.assertFalse(sess.backstop_killed)
+
+
+class BackstopWhenTheKillDoesNotRelease(unittest.IsolatedAsyncioTestCase):
+    """If killing the child doesn't give the turn back (the worker is stuck somewhere a dead pipe
+    can't reach), the backstop says so once more — that one needs `reseneschald` — rather than going
+    quiet. And no path through it raises."""
+
+    async def _watch(self, session):
+        d = tempfile.mkdtemp()
+        args, logs = _args(d), []
+        state = pr.DaemonState()
+        state.session = session
+        with mock.patch.object(pr, "TURN_BACKSTOP_RELEASE_SEC", 0.1):
+            task = asyncio.ensure_future(
+                pr.turn_backstop_watch(state, args, logs.append, pr.TurnBackstop(0.05), "turn-x"))
+            try:
+                async with asyncio.timeout(10.0):
+                    while len(_sent(d)) < 2:
+                        await asyncio.sleep(0.01)
+            finally:
+                task.cancel()
+        return [m["text"] for m in _sent(d)], logs
+
+    async def test_a_kill_that_frees_nothing_asks_for_reseneschald(self):
+        sess = pr.StubWarmSession()
+        sess.proc = _FakeProc()                              # nothing reads its stdout; kill frees no one
+        texts, logs = await self._watch(sess)
+        self.assertIn(BACKSTOP_ALERT, texts[0])
+        self.assertIn("reseneschald", texts[1])
+        self.assertTrue(sess.proc.killed.is_set())
+        self.assertTrue(sess.backstop_killed)
+        self.assertTrue(any("still in flight" in line for line in logs), logs)
+
+    async def test_no_child_and_a_kill_that_raises_are_both_survived(self):
+        for proc in (None, _FakeProc(kill_raises=True)):
+            sess = pr.StubWarmSession()
+            sess.proc = proc
+            texts, logs = await self._watch(sess)
+            self.assertIn(BACKSTOP_ALERT, texts[0])
+            self.assertTrue(any("reseneschald" in line for line in logs), logs)
 
 
 if __name__ == "__main__":

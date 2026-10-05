@@ -126,6 +126,11 @@ class WarmSession:
         # the fallback ladder below and the drainer's "session died" branch treat a deliberate
         # interrupt exactly like a watchdog kill: a known, named reason to stop, never a real failure.
         self.interrupt_requested = False
+        # Set from OUTSIDE by presence.py's turn backstop (hung-turn-deadline-spec.md "The outside
+        # backstop") when it kills a child this session's own watchdog let hang. Its only job here is
+        # to keep the fallback ladder from re-sending into a fresh deadline; the drainer learns of the
+        # kill from its own backstop, not from this flag. Reset at the top of every send().
+        self.backstop_killed = False
         self.turn_gap_sec = TURN_IDLE_GAP_SEC  # the deadline this session reads; per-instance so a test
                                                # can shorten it without touching the module global
         self.permission_mode = permission_mode
@@ -222,7 +227,9 @@ class WarmSession:
         `TURN_IDLE_GAP_SEC` silence is evidence against both. Re-sending the same prompt would buy two
         more full deadlines of hanging (30 minutes at the default) before the drainer ever learns
         the turn is in trouble, so a timeout goes straight back to the drainer, which owns the retry
-        policy and counts it against MAX_TURN_ATTEMPTS.
+        policy and counts it against MAX_TURN_ATTEMPTS. The same holds for a kill by presence.py's
+        30-minute outside backstop (`backstop_killed`), which only ever fires when this session's own
+        watchdog failed to.
 
         **Nor does either rung fire on a deliberate interrupt** (phase 2, §3.6/§3.7's warning made
         concrete): an interrupt landing on a session's very first turn reads, from here, exactly like
@@ -232,9 +239,10 @@ class WarmSession:
         but a test or a future caller must not have to know that to get the suppression right."""
         self.timed_out = False
         self.interrupt_requested = False
+        self.backstop_killed = False
         reply = self._send_turn(text, on_event)
         if (reply is None and not self.timed_out and not self.interrupt_requested
-                and not self._delivered_any and self.resume_session_id):
+                and not self.backstop_killed and not self._delivered_any and self.resume_session_id):
             self.log(f"! warm session couldn't resume {self.resume_session_id!r} "
                      "(stale/unknown id?); starting cold and re-grounding.")
             self.resume_session_id = None
@@ -247,7 +255,7 @@ class WarmSession:
             self.start()
             reply = self._send_turn(cold_retry_text or text, on_event)
         if (reply is None and not self.timed_out and not self.interrupt_requested
-                and not self._delivered_any and self._can_fallback()):
+                and not self.backstop_killed and not self._delivered_any and self._can_fallback()):
             self.log(f"! warm session produced no reply on its first turn with model {self.model!r}; "
                      f"falling back to {self.fallback_model!r} and retrying (bad warm dial?).")
             self.did_fallback = True
@@ -296,30 +304,54 @@ class WarmSession:
 
     def _send_turn(self, text: str, on_event=None) -> str | None:
         """One raw turn against the current process: write the user event, read to the result. Returns
-        None if the process is gone or the stream closed without a result (the fallback's trigger)."""
+        None if the process is gone or the stream closed without a result (the fallback's trigger).
+
+        **The idle gap is armed BEFORE the stdin write, not after it.** A write larger than the pipe
+        buffer — 4 KB on Windows, measured: 4,095 bytes blocks, 3,000 doesn't — blocks until the child
+        reads, and a child wedged before it ever reads stdin never does. That has happened: a resumed
+        session with a large context was handed a ~4.7 KB job-finished prompt, the CLI's own transcript
+        shows it never even enqueued the message, and with the watchdog only armed inside the read loop
+        the drainer sat in `write()` for most of half an hour with no deadline anywhere until a manual
+        `reseneschald`. Arming first means a silent write and a silent
+        read are the same silence, on one clock; the kill closes the pipe's read end and the blocked
+        write fails, which on Windows is `OSError(EINVAL)` — not BrokenPipeError — so the catch below
+        is `OSError`."""
         if not self.proc or self.proc.poll() is not None:
             return None
         line = json.dumps({"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": text}]}})
+        watchdog = self._arm_watchdog()
         try:
-            self.proc.stdin.write(line + "\n")
-            self.proc.stdin.flush()
-        except (BrokenPipeError, ValueError):
-            return None
-        return self._read_until_result(on_event)
+            try:
+                self.proc.stdin.write(line + "\n")
+                self.proc.stdin.flush()
+            except (OSError, ValueError):  # BrokenPipeError is an OSError; so is a killed child's EINVAL
+                return None
+            return self._read_events(watchdog, on_event)
+        finally:
+            self._disarm_watchdog(watchdog)
 
     def _read_until_result(self, on_event=None) -> str | None:
         # P1's whole footprint in this method: arm an idle-gap watchdog, beat it on every line, cancel
         # it on the way out. Everything between is untouched, and with no hang the behaviour is
-        # byte-identical — the watchdog thread parks on an Event it never gets to.
-        watchdog = _TurnWatchdog(self.proc, getattr(self, "turn_gap_sec", TURN_IDLE_GAP_SEC),
-                                 self.log).start()
+        # byte-identical — the watchdog thread parks on an Event it never gets to. `_send_turn` arms
+        # its own before the write and goes straight to `_read_events`; this entry point is for a
+        # caller that has nothing to write.
+        watchdog = self._arm_watchdog()
         try:
             return self._read_events(watchdog, on_event)
         finally:
-            watchdog.cancel()
-            # Read AFTER the loop so a kill that races the last line still reports honestly. The
-            # drainer branches on this: a hang gets its own wording and its own respawn reason.
-            self.timed_out = watchdog.fired
+            self._disarm_watchdog(watchdog)
+
+    def _arm_watchdog(self) -> _TurnWatchdog:
+        return _TurnWatchdog(self.proc, getattr(self, "turn_gap_sec", TURN_IDLE_GAP_SEC),
+                             self.log).start()
+
+    def _disarm_watchdog(self, watchdog: _TurnWatchdog) -> None:
+        watchdog.cancel()
+        # Read AFTER the loop (or the write) so a kill that races the last line still reports
+        # honestly. The drainer branches on this: a hang gets its own wording and its own respawn
+        # reason — including a hang that never got past the write.
+        self.timed_out = watchdog.fired
 
     def _read_events(self, watchdog, on_event=None) -> str | None:
         for raw in self.proc.stdout:  # blocks line-by-line until this turn's result event
@@ -458,6 +490,7 @@ class StubWarmSession:
         self.timed_out = False  # mirrors WarmSession; a stub never hangs, but the drainer reads it
         self.interrupt_requested = False  # mirrors WarmSession; a stub has no send_interrupt, so this
                                           # never flips, but any defensive getattr() read stays honest
+        self.backstop_killed = False      # mirrors WarmSession; a stub has no child to kill
         self.fallback_alerted = False
         # Mirror WarmSession's observability surface so --stub-brain runs exercise the same status /
         # metrics paths (an offline harness that skips them can't catch a regression in them).
