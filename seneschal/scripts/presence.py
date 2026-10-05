@@ -323,7 +323,8 @@ SLOT_MAX_RETRIES = 8  # give up relaunching a failed slot after this many bad ex
 #      network blip that names no reset — backs off instead: `SLOT_BACKOFF_BASE_SEC * 2**(attempt-1)`,
 #      capped at `SLOT_BACKOFF_CAP_SEC`. See `slot_backoff_seconds`.
 # Both stay bounded by the two EXISTING backstops — `SLOT_MAX_RETRIES` above and `--slot-catchup-min`
-# (default 180 min, see `classify_slots`) — unchanged by this: this only adds a WAIT between attempts,
+# (default 180 min, see `classify_slots`; a `CATCHUP_UNBOUNDED` slot — the Daily Journal —
+# has only the first, plus the date rollover) — unchanged by this: this only adds a WAIT between attempts,
 # never a new attempt, and a slot held past its catch-up window is stamped `too_late` and abandoned for
 # the day exactly as before, regardless of how long it was still holding.
 #
@@ -511,11 +512,36 @@ def active_mcp_configs(args) -> list:
     getattr so a partial args namespace (e.g. tests) still works. Returns [] when nothing is wired."""
     return [c for c in (getattr(args, "notion_mcp", None), getattr(args, "slack_mcp", None)) if c]
 
+# --- Per-slot catch-up policy -----------------------------------------------------------------------
+# A slot missed at its time (machine down/asleep) fires late on the next loop. HOW late is the slot's
+# own `catchup` key:
+#   CATCHUP_WINDOW (the default when the key is absent) — only within `--slot-catchup-min` of its time,
+#     else it is skipped for the day. Right for anything time-keyed: a 06:30 Brief read at 11 pm is noise.
+#   CATCHUP_UNBOUNDED — no cliff: if it hasn't run for today's local date it runs on the next loop,
+#     however late. Right for date-keyed work that is simply WRONG until it has happened.
+# The Daily Journal is the one unbounded slot. A machine that was down until mid-morning used to log
+# `slot 'daily-journal' skipped (past 05:00 + 180m catch-up)`, stamp it done, and leave the page never
+# rolled over — yesterday unarchived, no carry-over — until the owner noticed hours later. Its work
+# (archive yesterday, rebuild carry-over, tracker rows) is keyed on the date, not the hour. Dream keeps
+# the window, but note what that window actually is: 22:00 + 180 min runs past midnight, so its
+# effective cliff is the DATE ROLLOVER, not the 180 min — and a Dream still unrun at midnight used to be
+# lost with no log line at all. It is not made unbounded because a 00:30 run would be stamped for the
+# NEW date and then suppress that night's own Dream; `missed_yesterday` below is what makes that loss
+# audible instead. Same for the Wrap's 7 minutes past midnight (21:07 + 180 min).
+#
+# Every skip — past the window, retries exhausted, or a whole day missed — is recorded as `skipped` in
+# `state/slot-status.json` (beside `slots.json`, which keeps its bare-date format for every old reader)
+# and told to the owner in ONE plain Telegram line through the Mouth, once per (slot, date). See
+# `_flush_slot_skip_notices`. Before this, the only trace was a presence.log line nobody reads.
+CATCHUP_WINDOW = "window"
+CATCHUP_UNBOUNDED = "unbounded"
+
 # Heavyweight scheduled runs the daemon owns itself (replacing separate Task Scheduler entries).
 # Times are the MACHINE-LOCAL wall clock — assumed to match the owner's timezone (startup warns via
 # warn_tz_mismatch when identity.owner.timezone says otherwise). Each fires at most once per local day;
-# a run that's missed (machine asleep at its time) fires late on the next loop IF still within the
-# catch-up window, else it's skipped for the day. These run the orchestrator/journal.
+# a run that's missed (machine asleep at its time) fires late on the next loop per its `catchup` policy
+# (above) — within the catch-up window by default, else skipped for the day and said out loud. These
+# run the orchestrator/journal.
 # Reminders are NOT fixed slots anymore: the four Morning/Midday/Evening/Bedtime reminder slots were
 # retired for arbitrary per-reminder times — a once-per-local-day `maybe_seed_day` (date-rollover
 # triggered, below) seeds each ⏰ row's exact fire time(s) into the queue and the ~5s delivery tick fires
@@ -523,7 +549,7 @@ def active_mcp_configs(args) -> list:
 # seneschal/docs/reminder-exact-time-scheduling-spec.md + references/reminders-policy.md.
 # Prompts carry the {tz} identity token; the runnable SLOTS below is rendered by build_slots().
 SLOTS_TEMPLATE = [
-    {"name": "daily-journal", "at": "05:00",
+    {"name": "daily-journal", "at": "05:00", "catchup": CATCHUP_UNBOUNDED,
      "prompt": "Run the Daily Journal (subagents/journal-steward/daily-journal-steward/SKILL.md). "
                "Use {tz}. Run silently."},
     # `context` / `on_complete` are CODE hooks around the run (`owi_unknowns.py`'s docstring): the
@@ -556,6 +582,10 @@ SLOTS_TEMPLATE = [
                "journal-presence satisfy-only backstop (auto-tick if the owner journaled after the "
                "Wrap check; no bedtime nudge). Use {tz}. Run silently."},
 ]
+# How a skip notice names a slot to the owner (`slot_skip_notice_text`). A name missing here falls back to
+# the raw slot name — still readable, never a KeyError.
+SLOT_LABELS = {"daily-journal": "the Daily Journal", "morning-brief": "the morning Brief",
+               "eod-wrap": "the Wrap", "dream": "Dream", "reminders-seed": "the reminders seed"}
 
 # **THE ENUMERATION RULE, and it binds SLOTS as well as SEED_PROMPT below.** A slot prompt that lists
 # a mode's steps becomes that run's scope: the prompt arrives first and the mode file reads as
@@ -3665,10 +3695,16 @@ def slot_on_complete(slot_name: str, state_dir: str, log) -> bool:
         return False
 
 
+def slot_catchup(slot: dict) -> str:
+    """A slot's catch-up policy — `CATCHUP_WINDOW` unless it declares otherwise (see `SLOTS`)."""
+    return slot.get("catchup") or CATCHUP_WINDOW
+
+
 def classify_slots(slots: list, now_local: datetime, fired: dict, window_min: int):
     """Split not-yet-fired-today slots into (to_run, too_late). A slot is due once its local time has
     arrived; if we're more than `window_min` past it (e.g. the machine was asleep through its window),
-    it's stamped-but-skipped so a 6:30 brief never fires at 11pm. Pure → unit-tested."""
+    it's stamped-but-skipped so a 6:30 brief never fires at 11pm — UNLESS the slot is
+    `CATCHUP_UNBOUNDED`, which is never too late on its own date. Pure → unit-tested."""
     today = now_local.strftime("%Y-%m-%d")
     now_min = now_local.hour * 60 + now_local.minute
     to_run, too_late = [], []
@@ -3678,8 +3714,121 @@ def classify_slots(slots: list, now_local: datetime, fired: dict, window_min: in
         start = parse_hhmm(s["at"])
         if now_min < start:
             continue  # not yet
-        (to_run if now_min <= start + window_min else too_late).append(s)
+        if slot_catchup(s) == CATCHUP_UNBOUNDED or now_min <= start + window_min:
+            to_run.append(s)
+        else:
+            too_late.append(s)
     return to_run, too_late
+
+
+def missed_yesterday(slots: list, now_local: datetime, fired: dict, status: dict) -> list:
+    """Slots whose whole local day YESTERDAY went by with neither a run nor a recorded skip — the
+    midnight cliff, which `classify_slots` never sees because by the time it looks the date has already
+    rolled. Returns `[(slot, last_fired_date)]`. Pure → unit-tested.
+
+    Only a slot with SOME prior `slots.json` stamp counts (a fresh install has missed nothing), and one
+    already recorded in `status` for yesterday or later is done — that is the once-per-(slot, date)
+    guard. Only yesterday is reported: after a week away one line saying "hasn't run since <date>" is
+    the useful fact, seven are not. The caller excludes a slot still RUNNING across midnight — its reap
+    stamps it with its launch date, so it isn't missed."""
+    yesterday = (now_local - timedelta(days=1)).strftime("%Y-%m-%d")
+    out = []
+    for s in slots:
+        last = fired.get(s["name"])
+        if not isinstance(last, str) or last >= yesterday:
+            continue  # never stamped (fresh install), or it ran/skipped yesterday or today
+        rec = status.get(s["name"])
+        if isinstance(rec, dict) and str(rec.get("date") or "") >= yesterday:
+            continue  # already recorded (and so already told) for yesterday
+        out.append((s, last))
+    return out
+
+
+SLOT_STATUS_FILE = "slot-status.json"
+
+
+def _load_slot_status(state_dir: str) -> dict:
+    data = load_json(os.path.join(state_dir, SLOT_STATUS_FILE), {})
+    return data if isinstance(data, dict) else {}
+
+
+def _record_slot_status(state_dir: str, name: str, date: str, status: str, now_local: datetime,
+                        log=None, reason: str | None = None) -> None:
+    """Write `slot-status.json[name] = {date, status, at[, reason, notified]}` — the `ran` / `skipped`
+    distinction `slots.json`'s bare date cannot carry. A `skipped` row starts `notified: false`, which
+    is what `_flush_slot_skip_notices` looks for. **Never raises**: this is the audit trail beside the
+    stamp, and it must not cost the stamp (already written) or the scheduler tick."""
+    try:
+        data = _load_slot_status(state_dir)
+        rec = {"date": date, "status": status, "at": now_local.isoformat(timespec="seconds")}
+        if reason:
+            rec["reason"] = reason
+        if status == "skipped":
+            rec["notified"] = False
+        data[name] = rec
+        save_json(os.path.join(state_dir, SLOT_STATUS_FILE), data)
+    except Exception as e:  # noqa: BLE001
+        if log is not None:
+            log(f"! slot-status write failed for '{name}' ({status}): {e}")
+
+
+def slot_outcome(state_dir: str, name: str, date: str) -> str | None:
+    """What happened to slot `name` on local `date`: `"ran"`, `"skipped"`, or `None` (nothing recorded
+    — not due yet, still running, or the daemon never looked). A `slots.json` stamp with no matching
+    `slot-status.json` row (written before the status file existed, or the status write failed) returns `"stamped"`:
+    it fired OR was skipped, and there is no telling which — the exact ambiguity this file exists to end."""
+    rec = _load_slot_status(state_dir).get(name)
+    if isinstance(rec, dict) and rec.get("date") == date and rec.get("status") in ("ran", "skipped"):
+        return rec["status"]
+    fired = load_json(os.path.join(state_dir, "slots.json"), {})
+    if isinstance(fired, dict) and fired.get(name) == date:
+        return "stamped"
+    return None
+
+
+def slot_skip_notice_text(pending: list, today: str) -> str:
+    """ONE plain line naming every not-yet-told skip in `pending` (`[(name, record)]`) and saying it can
+    run late on request. Plain text on purpose — never a picker: running a skipped slot late is a
+    judgement the owner makes on reading it, not a decision the daemon is waiting on."""
+    rows = [(SLOT_LABELS.get(name, name), "today" if rec.get("date") == today else "yesterday",
+             rec.get("reason") or "skipped") for name, rec in pending]
+    if len(rows) == 1:
+        label, when, reason = rows[0]
+        return f"Heads up: {label} did not run {when} — {reason}. I can run it late if you want — just ask."
+    listed = "; ".join(f"{label} ({when} — {reason})" for label, when, reason in rows)
+    return f"Heads up, these did not run: {listed}. I can run any of them late — just ask."
+
+
+def _flush_slot_skip_notices(state_dir: str, log, now_local: datetime) -> None:
+    """Tell the owner about every `skipped` slot-status row not yet told, in one Telegram line through the
+    Mouth (`mouth.enqueue`, the durable queue).
+
+    **At most once per (slot, date)**: a row is marked `notified` only once the enqueue returned an item,
+    so a failed enqueue retries on the next loop instead of being stamped as told on the strength of a
+    message nobody got. Only today's and yesterday's rows are eligible — a stale row from a long outage
+    is history, not news. Called every tick from `maybe_run_slots`, which also covers a give-up
+    `reap_finished_slots` recorded on a tick with nothing else due. Never raises."""
+    try:
+        data = _load_slot_status(state_dir)
+        today = now_local.strftime("%Y-%m-%d")
+        yesterday = (now_local - timedelta(days=1)).strftime("%Y-%m-%d")
+        pending = [(n, r) for n, r in data.items()
+                   if isinstance(r, dict) and r.get("status") == "skipped" and r.get("notified") is False
+                   and r.get("date") in (today, yesterday)]
+        if not pending:
+            return
+        pending.sort(key=lambda nr: (str(nr[1].get("date")), str(nr[1].get("at"))))
+        item = mouth.enqueue(state_dir, surface="telegram", kind="nudge", speaker="daemon",
+                             text=slot_skip_notice_text(pending, today))
+        if item is None:
+            log("! slot skip notice could not be queued — retries next loop")
+            return
+        for _, rec in pending:
+            rec["notified"] = True
+        save_json(os.path.join(state_dir, SLOT_STATUS_FILE), data)
+        log(f"• slot skip notice queued: {', '.join(n for n, _ in pending)}")
+    except Exception as e:  # noqa: BLE001 — a notice must never take the scheduler tick down
+        log(f"! slot skip notice failed: {e}")
 
 
 def maybe_run_slots(state_dir: str, args, log, children: list | None = None,
@@ -3698,7 +3847,8 @@ def maybe_run_slots(state_dir: str, args, log, children: list | None = None,
     done-for-the-day and never retried, silently skipping (e.g.) the whole morning nudge batch. Instead
     the launched proc is registered in `slot_children`; `reap_finished_slots` stamps it only when it
     exits **0**, and on a non-zero exit leaves it unstamped so the next loop relaunches it — bounded by
-    the same catch-up window (`--slot-catchup-min`), after which `classify_slots` gives up and stamps it.
+    the same catch-up window (`--slot-catchup-min`), after which `classify_slots` gives up and stamps it
+    (a `CATCHUP_UNBOUNDED` slot has no such window; `SLOT_MAX_RETRIES` alone bounds it).
 
     **A slot on hold (`slot_hold_until`, set by `reap_finished_slots` on a failed exit) is skipped
     silently here**, exactly like a not-yet-due slot: the hold was already logged once, with its reason,
@@ -3710,7 +3860,13 @@ def maybe_run_slots(state_dir: str, args, log, children: list | None = None,
     reads and a scheduled slot's read burst hit the same bucket (~3 req/s on Notion), so overlapping
     them 429s.
     Chat is priority and is never delayed — only the slot waits (it stays unstamped and retries next
-    loop, exactly like the in-flight-headless case)."""
+    loop, exactly like the in-flight-headless case).
+
+    **A skip is never silent.** A slot routed to `too_late`, or one whose whole day went by
+    unrun (`missed_yesterday`), is recorded `skipped` in `slot-status.json` and told to the owner in one
+    Telegram line (`_flush_slot_skip_notices`) — once per (slot, date). A slot still RUNNING
+    (`slot_children`) is excluded from both: a Brief launched at 09:25 and still going at 09:31 is late,
+    not skipped, and used to be logged as skipped mid-run."""
     if args.no_slots or args.stub_brain or args.fake_inbox is not None:
         return
     if warm_busy:
@@ -3720,16 +3876,25 @@ def maybe_run_slots(state_dir: str, args, log, children: list | None = None,
     if not isinstance(fired, dict):
         fired = {}
     now_local = datetime.now()  # machine-local wall clock (assumed to match the owner's timezone)
-    to_run, too_late = classify_slots(SLOTS, now_local, fired, args.slot_catchup_min)
-    if not to_run and not too_late:
-        return
+    running = set(slot_children or ())
     today = now_local.strftime("%Y-%m-%d")
-    stamp = local_stamp()
-    changed = False
+    yesterday = (now_local - timedelta(days=1)).strftime("%Y-%m-%d")
+    idle_slots = [s for s in SLOTS if s["name"] not in running]
+    for s, last in missed_yesterday(idle_slots, now_local, fired, _load_slot_status(state_dir)):
+        log(f"• slot '{s['name']}' never ran on {yesterday} (last stamped {last})")
+        _record_slot_status(state_dir, s["name"], yesterday, "skipped", now_local, log,
+                            reason=f"no run or skip was recorded all day (last ran {last})")
+    to_run, too_late = classify_slots(idle_slots, now_local, fired, args.slot_catchup_min)
     for s in too_late:  # missed its window — stamp so it doesn't linger, but don't run
         fired[s["name"]] = today
-        changed = True
+        save_json(path, fired)  # the stamp first: the status row + notice ride on it, never replace it
         log(f"• slot '{s['name']}' skipped (past {s['at']} + {args.slot_catchup_min}m catch-up)")
+        _record_slot_status(state_dir, s["name"], today, "skipped", now_local, log,
+                            reason=f"past its {s['at']} + {args.slot_catchup_min}m catch-up window")
+    _flush_slot_skip_notices(state_dir, log, now_local)
+    if not to_run:
+        return
+    stamp = local_stamp()
     for s in to_run:
         if slot_hold_until is not None:
             hold = slot_hold_until.get(s["name"])
@@ -3760,6 +3925,7 @@ def maybe_run_slots(state_dir: str, args, log, children: list | None = None,
                                         stdout=log_fh, stderr=subprocess.STDOUT)
             finally:
                 log_fh.close()  # the child holds its own duplicated handle now — see _open_slot_log
+            proc.slot_date = today  # reap stamps THIS date, even if the run exits after midnight
             if children is not None:
                 children.append(proc)
             if slot_children is not None:
@@ -3767,8 +3933,6 @@ def maybe_run_slots(state_dir: str, args, log, children: list | None = None,
             log(f"• slot '{s['name']}' launched ({s['at']} local)")
         except Exception as e:  # noqa: BLE001
             log(f"! slot '{s['name']}' launch failed: {e}")
-    if changed:
-        save_json(path, fired)
 
 
 def _stamp_slot(state_dir: str, name: str, today: str) -> None:
@@ -3787,7 +3951,9 @@ def reap_finished_slots(slot_children: dict, state_dir: str, log, slot_retries: 
     """Stamp a slot done only once its `claude -p` run has actually **finished cleanly** (exit 0).
 
     Called at the top of each loop, before `maybe_run_slots` re-evaluates what's due. For every tracked
-    slot child that has exited: exit 0 → stamp `slots.json[name] = today` (done for the day); non-zero →
+    slot child that has exited: exit 0 → stamp `slots.json[name] = today` (done for the day — "today"
+    being the date it was LAUNCHED for, `proc.slot_date`) and record `ran` in `slot-status.json`,
+    while a give-up records `skipped` there, which the next tick tells the owner about; non-zero →
     leave it unstamped and log loudly, so the next loop relaunches it (a failed morning run retries
     instead of silently vanishing). Two independent backstops keep a persistently-broken slot from
     relaunching forever: `--slot-catchup-min` (once the slot is that far past its time, `classify_slots`
@@ -3818,14 +3984,20 @@ def reap_finished_slots(slot_children: dict, state_dir: str, log, slot_retries: 
     if slot_hold_until is None:
         slot_hold_until = {}
     now_local = now_local or datetime.now()
-    today = now_local.strftime("%Y-%m-%d")
     for name, proc in list(slot_children.items()):
         rc = proc.poll()
         if rc is None:
             continue  # still running
         del slot_children[name]
+        # The date the run was LAUNCHED for, not the date it exited on: a Daily Journal launched at
+        # 23:50 and finishing at 00:10 is yesterday's run — stamping it today would silently suppress
+        # today's. Falls back to the exit date for a proc launched without the attribute.
+        today = getattr(proc, "slot_date", None)
+        if not isinstance(today, str) or not today:
+            today = now_local.strftime("%Y-%m-%d")
         if rc == 0:
             _stamp_slot(state_dir, name, today)
+            _record_slot_status(state_dir, name, today, "ran", now_local, log)
             slot_retries.pop(name, None)
             slot_hold_until.pop(name, None)
             log(f"• slot '{name}' completed")
@@ -3842,6 +4014,9 @@ def reap_finished_slots(slot_children: dict, state_dir: str, log, slot_retries: 
             slot_retries.pop(name, None)
             slot_hold_until.pop(name, None)
             log(f"! slot '{name}' run failed (exit {rc}) {max_retries}x — giving up for today")
+            # A give-up is a skip too — `maybe_run_slots`'s next tick tells the owner (never silent).
+            _record_slot_status(state_dir, name, today, "skipped", now_local, log,
+                                reason=f"it failed {max_retries} times and I stopped retrying")
             continue
         reset_at = parse_slot_reset_time(_read_slot_log_tail(state_dir, name), now_local)
         if reset_at is not None:
@@ -3915,6 +4090,7 @@ def maybe_seed_day(state_dir: str, args, log, children: list | None = None,
                                     stdout=log_fh, stderr=subprocess.STDOUT)
         finally:
             log_fh.close()  # the child holds its own duplicated handle now — see _open_slot_log
+        proc.slot_date = today  # a seed that exits after midnight still stamps the day it seeded
         if children is not None:
             children.append(proc)
         if slot_children is not None:
