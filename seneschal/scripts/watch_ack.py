@@ -73,7 +73,10 @@ renders `**bold**` before it is quoted) and uses THAT ROW's key — the source k
 which is the whole point. No ledger row (the alert predates the ledger, or was cut past 400 chars)
 falls back to the quote's own prose key, which is precisely what a caller passing `--key` by hand
 would have computed. A chat turn answering an alert the owner replied to MUST pass the quote here (or
-its key via `--key`) — see `../modes/chat.md` and `../modes/watch.md`.
+its key via `--key`) — see `../modes/chat.md` and `../modes/watch.md`. When the owner replied to a
+SELECTION of the alert the line reads `(replying to: "<alert>" — selected: "<part>")`; pass the first
+quote. A pasted ` — selected: "…"` tail is cut before matching anyway (`_SELECTION_TAIL_RE`), so the
+whole-parenthesis copy resolves too.
 
 ## `--key` — the id-first second door
 
@@ -380,6 +383,10 @@ def candidate_facts(state_dir: str | None, *, now: datetime | None = None,
 
 _MARKDOWN_MARKS_RE = re.compile(r"[*_`~]+")
 _WS_RE = re.compile(r"\s+")
+# A partial-quote reply renders as `(replying to: "<alert head>" — selected: "<the selection>")`
+# (presence.reply_prefix). The alert is the FIRST quote; a caller that pastes everything between the
+# outer quotes hands us the selection too, which would break the prefix match below — so it is cut.
+_SELECTION_TAIL_RE = re.compile(r'"\s*—\s*selected:\s*".*\Z', re.DOTALL)
 
 
 def _quote_norm(text) -> str:
@@ -403,6 +410,8 @@ def resolve_replied_to(quoted: str, state_dir: str | None = None, *,
 
     Returns `{"ok", "fact_key", "matched_by": "ledger"|"quote", "matched_text", "error"}`."""
     result = {"ok": False, "fact_key": None, "matched_by": None, "matched_text": None, "error": None}
+    if isinstance(quoted, str):
+        quoted = _SELECTION_TAIL_RE.sub("", quoted)
     needle = _quote_norm(quoted)
     if not needle:
         result["error"] = "empty --replied-to quote"
