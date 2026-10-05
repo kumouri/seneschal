@@ -1,11 +1,13 @@
 # The ⏰ cadence mechanism — an expression, not an enumeration — design
 
-**Status:** `PARTIAL(phase 1 BUILT — the grammar, the due-test and the wiring; phase 2, the Notion
-select → text conversion, is the owner's host-side action and is unbuilt by design)` — phase 1 is
-complete and shippable alone: it changes nothing in the store and every existing row keeps firing. ·
+**Status:** `PARTIAL(phase 1 BUILT — the grammar, the due-test and the wiring; phase 2's code rails BUILT —
+canonicalize-on-write + the nightly Dream lint, §7.5; the Notion select → text conversion itself is the
+owner's host-side action)` — phase 1 is complete and shippable alone: it changes nothing in the store
+and every existing row keeps firing; §7.5's rails change nothing in the store either. ·
 **Owner:** the assistant · **Scope:** `../scripts/reminders_cadence.py`, `../scripts/reminders_acks.py`,
-`../references/reminders-policy.md`, `../references/databases.md`, `../../subagents/reminders/SKILL.md`.
-Live behaviour is [reminders-policy.md](../references/reminders-policy.md) → *"Cadence — when a row is
+`../references/reminders-policy.md`, `../references/databases.md`, `../../subagents/reminders/SKILL.md`;
+phase 2's rails add `../scripts/reminders_cadence_lint.py`, `../scripts/dream_steps.py` and
+`../modes/dream.md` (step 2k). Live behaviour is [reminders-policy.md](../references/reminders-policy.md) → *"Cadence — when a row is
 'due today'"*. Companions: [reminder-exact-time-scheduling-spec.md](reminder-exact-time-scheduling-spec.md)
 (the `Times`/seed layer this sits above), [databases.md](../references/databases.md) (the ⏰ schema).
 
@@ -239,6 +241,42 @@ it, the parser reads whatever string the property holds, and every string it can
 rows keep firing throughout** — satisfied by making the old vocabulary a subset of the new one rather
 than by sequencing a cutover.
 
+### 7.5 The code rails — BUILT
+
+The select enforced **spelling** and nothing else; the parser was already the **semantic** check
+(seed-time parse, fail-open on a refusal, §5.1). Free text — always the case on the filesystem
+backends, and on Notion once the select is retyped — removes the spelling check, so it moves into code
+rather than disappearing. Two rails, no store change:
+
+**① Canonicalize on write.** `reminders_cadence.py --canonical "<text>"` prints the one spelling a
+value is written in and exits 0, or exits 2 with the parser's own message (plus a suggested fix when
+one is computable). **Every write of a `Cadence` value goes through it first, and a refusal is never
+written.** No Python in the tree writes `Cadence` — every writer is a turn's store call (creating or
+editing a ⏰ row) — so the rule lives where those turns read: `references/reminders-policy.md` →
+"Writing a Cadence", with a pointer from the ⏰ schema in `references/databases.md`.
+
+The write spelling (`Cadence.write_spelling`) is **the house style the select always held**: `Daily`,
+`Weekdays`, `Weekly`, `Multiple/day`, `One-off`, `Every N days`. So **every former option is its own
+canonical form** and no live row changes. A rate over a week is `N per week` (`3x/week`, `3/week`,
+`3 per 7`, `3 times a week` → `3 per week`), any other period `N per D days`. The rate separator
+widened to accept those spellings; nothing that parsed before reads differently
+(`test_reminders_cadence.CanonicalizeOnWrite`). `canonical()` — the lower-case form in the CLI's JSON —
+is unchanged.
+
+**② Lint nightly — Dream step 2k.** `reminders_cadence_lint.py` reads every active ⏰ row's `Cadence` —
+from the rows the SEED's own active-rows query returns (`--rows-json`; no schema fetch, no new read
+path), or from `state/reminders-id-cache.md` on a night the store is unreachable — parses each, and
+sends **one Telegram picker per unparseable row** through `telegram_ask.py`: the parser's suggested fix
+first and recommended (`reminders_cadence.suggest` — only ever a spelling that itself parses), "I'll
+type it", and "Leave it", each described. It never writes the store; a tap reaches the warm session as
+ordinary inbound and the write goes through ①. Report-only otherwise, and it never blocks Dream.
+
+**The once-per-value rule:** a bad row is asked about when it has never been asked, when its value has
+changed since, or when **7 days** have passed — which is `telegram_ask.QUESTION_TTL_DAYS`, the age at
+which the previous picker expires and can no longer be tapped. So there are never two live pickers for
+one row, and a still-broken row never goes quiet. Recorded only after a landed send
+(`state/cadence-lint.json`); a row that parses again drops out.
+
 ## 8. Non-goals
 
 * **No sub-day cadence.** `multiple/day` + `Times` + `reminders_roll.py` own intraday firing, and §5
@@ -261,8 +299,9 @@ than by sequencing a cutover.
 
 ## Router entry
 
-**Status:** PARTIAL (phase 1 — the grammar, due-test and wiring — BUILT; phase 2, the Notion select →
-text conversion, is the owner's host-side action).
+**Status:** PARTIAL (phase 1 — the grammar, due-test and wiring — BUILT; phase 2's code rails BUILT —
+canonicalize-on-write + Dream step 2k's lint, §7.5; the Notion select → text conversion is the owner's
+host-side action).
 
 **What it decides:** **⏰ `Cadence` is an EXPRESSION, not a list of options** —
 `../scripts/reminders_cadence.py`. The interval family was the only part of the list that grew, and each

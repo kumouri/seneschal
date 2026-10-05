@@ -365,7 +365,8 @@ general form that replaced the enumerated intervals, and the seventh is new.
 - **`N per D days` — a RATE, and it is GRID-ANCHORED.** *"Twice a week."* The D days are divided into N
   as-even-as-possible whole-day gaps (Bresenham: `2 per week` → 3, 4, 3, 4; `3 per week` → 2, 2, 3;
   `3 per 10 days` → 3, 3, 4), and the next due date is the first point of that fixed lattice **strictly
-  after** `Last Acknowledged`. Also spelled `N/week`, `N x week`, `N per 7`.
+  after** `Last Acknowledged`. Also spelled `N/week`, `N x week`, `Nx/week`, `N times a week`,
+  `N per 7` — all written as `N per week` (see "Writing a Cadence" below).
 
 **Why an interval drifts and a rate does not — a design rule, not an implementation detail.**
 `every 4 days` means *four days after you last did it*: the offset **is** the meaning, so acking three
@@ -392,6 +393,31 @@ expressions, so nothing has to change there for any of the above to work — a r
 expressions *typeable*; it is optional and the owner's to do. Runbook, and what the conversion costs:
 `../docs/reminder-cadence-mechanism-spec.md` → "Phase 2 — the Notion property". (The filesystem
 backends store `cadence` as free text already.)
+
+#### Writing a Cadence — canonicalize first, never write a refusal
+
+**Every time a turn writes a `Cadence` value** — creating a ⏰ row, editing one, or answering a
+cadence-lint picker — run the value through the parser first and write **exactly what it prints**:
+
+```
+python ../scripts/reminders_cadence.py --canonical "<what the owner said>"
+# exit 0 -> one line, e.g. "3 per week" — write that string, verbatim
+# exit 2 -> "! <why>" on stderr (+ a suggested fix when there is one) — write NOTHING
+```
+
+**A refusal is never written.** On exit 2, tell the owner the parser's own line (it names the spelling
+that works) and ask; if a suggested fix is printed, offer it as the recommended option. Never write the
+raw text "to fix later", never hand-round a fraction — a refused value in the store fails open and
+fires every day. The written form is the select's own house style (`Daily`, `Every 4 days`, `Weekly`,
+…), so a value that was already an option comes back unchanged; `3x/week`, `3/week`, `3 per 7` all
+come back `3 per week`.
+
+**A value that still does not parse is linted nightly** (Dream step 2k,
+`../scripts/reminders_cadence_lint.py`): the owner gets one Telegram picker per bad row, the parser's
+fix first. **A tap on it** arrives as an ordinary picker answer naming the row: on `Change to "<X>"`,
+write `<X>` to that row's `Cadence` (it is already canonical — the lint only offers spellings that pass
+`--canonical`); on `I'll type it`, ask, then canonicalize as above; on `Leave it`, write nothing — the
+lint re-asks about that value in 7 days.
 
 The **daily reset** (in the seed pass) only re-`Pending`s **`daily`** and **`weekdays`** habits.
 Interval / rate / `weekly` / `one-off` rows aren't reset daily — they flip to `Pending` when the parser
@@ -512,6 +538,7 @@ Never: `Why haven't you done this?`, `You always skip this`, anything that reads
 | Set a reminder `status: finished` (retire it) on the owner's **explicit** "I'm finished with X" | **act-low** |
 | **Auto-retire a completed `one-off`** at the seed → `status: finished` (all four conditions above) | **act-low** — same tracker the assistant owns, reversible (flip it back to `done`), and **logged in the Run Log** so a wrong retirement is visible |
 | Open/lift a **quiet window** (`quiet_set.py`) on the owner's request — suppress their own non-piercing nudges | **act-low** — reversible, bounded, self-directed (Call Me + Critical+ still pierce) |
+| Write a row's `Cadence` on the owner's explicit answer (their words, or a cadence-lint picker tap) — always the `--canonical` output, never a refused value | **act-low** — the owner's own instruction, reversible; the nightly lint itself only asks, never writes (see "Writing a Cadence") |
 | **Bulk-dequeue** a day's ordinary nudges on the owner's "clear my day" (`⭐ High` and below) | **act-low** — same class as the quiet window. But it is **irreversible** (a deleted nudge doesn't come back), so `🚨`+ stays queued unless the owner says otherwise and `Call Me` is never in scope — see "'Clear my day' — a dequeue DELETES…" |
 | Flip a **linked Task/Goal** to `Done` | **ask-high** — modifies primary Tasks/Goals beyond a routine tracker |
 | Create a persistent **Task** from "remind me to…" | **ask-high** |
@@ -718,7 +745,8 @@ the next push still fires.
   purely deictic *"I fixed that"* naming no distinctive vocabulary of its own. **`--replied-to "<the
   quoted alert>"` is the door for a swipe-reply** — the turn arrives as `(replying to: "<the alert>")
   <the owner's words>`, the quote IS the alert, and it resolves to that alert's own ledger key (the source
-  key when it has one) by text prefix, never by matching the owner's words. **A chat turn answering an
+  key when it has one) by text prefix, never by matching the owner's words (a partial-quote reply adds
+  ` — selected: "…"` after the alert; pass the alert, the first quote). **A chat turn answering an
   alert the owner replied to MUST call `watch_ack` with that alert's key** — the words alone will usually
   refuse, correctly, and a carry-over note is NOT where the watcher looks.
 - **The gate ENFORCES, unconditionally — no report-only phase, no env var.** `watch_ack.ack_blocks`

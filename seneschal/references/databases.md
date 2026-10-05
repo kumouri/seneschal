@@ -172,7 +172,10 @@ unconfirmed todos, deadlines approaching). **Provisioned + seeded at setup** wit
   edit plus doc edits to express one integer. **Converting `Cadence` to a `text` property is what makes
   an arbitrary expression typeable**; it is optional, it changes no behaviour on its own, and it is the
   owner's to do — runbook and costs in `../docs/reminder-cadence-mechanism-spec.md`. Filesystem
-  backends store the expression as plain text already.
+  backends store the expression as plain text already. **Write it only through
+  `../scripts/reminders_cadence.py --canonical`** — the exact line it prints, never a value it refuses
+  (`reminders-policy.md` → "Writing a Cadence"); a value that still fails to parse is linted nightly
+  (Dream step 2k) into a one-tap fix picker.
 - `Times` (text) — **the reminder's exact fire time(s):** a comma-list of `HH:MM` owner-local times
   (e.g. `08:00` or `08:00, 20:00`), enqueued for the whole day by the daily **seed**
   (`../scripts/reminders_seed.py`). Empty ⇒ fall back to the `Time Window` default below. *(Additive

@@ -23,7 +23,9 @@ tick of each new owner-local date) — it runs the daily reset and enqueues the 
 nudges (the Seed steps below); the push + Run Log write attach there. The **Wrap** + **Dream** runs carry
 the journal-presence gate. Each prompt inlines the state machine so it runs unattended. Invoked
 **interactively** ("remind me to…", "did I do X"), do the read + reconcile and propose writes, but only
-write the tracker (act-low) and never the linked Task/Goal.
+write the tracker (act-low) and never the linked Task/Goal. **A `Cadence` value is written only as
+`python ../../seneschal/scripts/reminders_cadence.py --canonical "<value>"` prints it; an exit 2 is never
+written** (`../../seneschal/references/reminders-policy.md` → "Writing a Cadence").
 
 ## Read first
 

@@ -181,8 +181,8 @@ specs and carry no status.
   owner register with no screener tools; `push_call.py --talk` builds the context snapshot; P2
   inbound owner-call auth decided (caller ID + spoken passphrase) but unbuilt; P3-P4 unbuilt)** — a
   live voice conversation with the assistant, Worker-brained, not a relay to the home daemon.
-- `reminder-cadence-mechanism-spec.md` — **PARTIAL(phase 1 BUILT)** — a cadence is an expression, not
-  an enumerable list.
+- `reminder-cadence-mechanism-spec.md` — **PARTIAL(phase 1 + phase 2's code rails BUILT)** — a cadence is
+  an expression, not an enumerable list; written only in its canonical spelling, linted nightly.
 - `reminder-exact-time-scheduling-spec.md` — **BUILT** — reminders fire at arbitrary per-reminder
   times.
 - `reminder-premise-spec.md` — **PARTIAL(Phase 0 BUILT, pure; Phase 0.5 BUILT — wired into the live
