@@ -4775,6 +4775,24 @@ def _edit_line(m: dict) -> str:
     return f'[the owner edited an earlier message to: "{body}"]'
 
 
+def reply_prefix(m: dict) -> str:
+    """The swipe-reply prefix for one inbound record, or "" when it isn't a reply.
+
+    `(replying to: "<parent head>")` identifies the message the owner answered; when they selected PART
+    of it and replied to that (`telegram_poll.extract_reply_selection` → `reply_quote`), the selection
+    rides in the same parenthesis: `(replying to: "<parent head>" — selected: "<the selection>")`. The
+    parent quote stays first and byte-identical to the no-selection shape, so the first `"…"` is still
+    the handle `watch_ack.py --replied-to` resolves, and a non-greedy `\\(replying to: ".*?"\\)` match
+    still strips the whole prefix (it stops at the selection's closing `")`)."""
+    reply_to = (m.get("reply_to") or "").strip()
+    if not reply_to:
+        return ""
+    selection = (m.get("reply_quote") or "").strip()
+    if selection:
+        return f'(replying to: "{reply_to}" — selected: "{selection}")'
+    return f'(replying to: "{reply_to}")'
+
+
 def plain_inbound_line(m: dict) -> str:
     """The message as the warm session reads it when nothing needs annotating: the owner's text, or a file descriptor,
     with any swipe-reply prefix. Shared by the ordinary inbound path and by the in-place edit
@@ -4782,10 +4800,10 @@ def plain_inbound_line(m: dict) -> str:
     line the original produced, or the queue would hold a differently-shaped message than the one it
     is replacing."""
     line = _attachment_or_text(m)
-    reply_to = (m.get("reply_to") or "").strip()
+    prefix = reply_prefix(m)
     # An empty line is dropped by telegram_task, so don't let a bare reply-prefix stand in for a message.
-    if reply_to and line:
-        return f'(replying to: "{reply_to}") {line}'
+    if prefix and line:
+        return f"{prefix} {line}"
     return line
 
 
@@ -4945,23 +4963,25 @@ def album_inbound_text(members: list) -> str:
     there is no second one to drift from it (the §1 argument the edit path already rests on)."""
     bodies = []
     for m in members:
-        stripped = {k: v for k, v in m.items() if k not in ("caption", "text", "reply_to")}
+        stripped = {k: v for k, v in m.items()
+                    if k not in ("caption", "text", "reply_to", "reply_quote")}
         body = _attachment_or_text(stripped)
         if body:
             bodies.append(body)
     if not bodies:
         return ""
     caption = ""
-    reply_to = ""
+    prefix = ""
     for m in members:
         if not caption:
             caption = (m.get("caption") or "").strip() or (m.get("text") or "").strip()
-        if not reply_to:
-            reply_to = (m.get("reply_to") or "").strip()
+        if not prefix:
+            # From the ONE member that carries the reply, so its selection can't pair with another's.
+            prefix = reply_prefix(m)
     head = (f"[album: {len(bodies)} attachments sent together as ONE message — "
             f"read them as one, answer once]")
-    if reply_to:
-        head = f'(replying to: "{reply_to}") {head}'
+    if prefix:
+        head = f"{prefix} {head}"
     parts = [head] + bodies + ([caption] if caption else [])
     return "\n".join(parts)
 
