@@ -153,6 +153,17 @@ class Classifiers(unittest.TestCase):
                      '[attachment: document "export.zip" saved to state/inbox/export.zip]'):
             self.assertEqual(turns.classify_origin(text), "system", text)
 
+    def test_every_force_route_directive_is_system_and_near_misses_are_the_owners(self):
+        """The force-route targets (`[force-route <alias>: …]`) are the daemon's own words, exactly like
+        `[force-fable: …]`. Built from the real producer so the two can't drift; a bracket that merely
+        starts with the phrase is still the owner's."""
+        import presence
+        for alias in presence.FORCE_ROUTE_ALIASES + ("fable",):
+            self.assertEqual(turns.classify_origin(presence.force_route_directive(alias)), "system", alias)
+        for text in ("[force-route] is what I'd call it", "[force-routes: plural]",
+                     "[force-route glm without a colon]"):
+            self.assertEqual(turns.classify_origin(text), "human", text)
+
     def test_the_owners_words_are_human_even_when_shouting(self):
         for text in ("WHY IS THIS BROKEN", "done with the report", "", "  hello  "):
             self.assertEqual(turns.classify_origin(text), "human", text)

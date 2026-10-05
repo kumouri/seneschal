@@ -161,8 +161,27 @@ class RunClaude(unittest.TestCase):
         runner = _fake_runner()
         fd.run_claude("do the thing", "claude-fable-5", "claude", 60, runner=runner)
         self.assertEqual(runner.calls[0]["cmd"], [
-            "claude", "-p", "--model", "claude-fable-5", "--output-format", "json", "do the thing",
+            "claude", "-p", "--tools", "", "--strict-mcp-config",
+            "--append-system-prompt", fd.DELEGATE_SYSTEM_NOTE,
+            "--model", "claude-fable-5", "--output-format", "json", "do the thing",
         ])
+
+    def test_default_passes_prompt_on_argv_not_stdin(self):
+        # the live Fable/force-route path is unchanged: the prompt is the last argv element, no stdin.
+        runner = _fake_runner()
+        fd.run_claude("the task", "claude-fable-5", "claude", 60, runner=runner)
+        self.assertEqual(runner.calls[0]["cmd"][-1], "the task")
+        self.assertNotIn("input", runner.calls[0]["kwargs"])
+
+    def test_prompt_on_stdin_drops_the_positional_and_feeds_stdin(self):
+        # a prompt past the command-line cap rides on stdin, never argv.
+        runner = _fake_runner()
+        fd.run_claude("a very long many-shot prompt", "claude-opus-4-8", "claude", 60,
+                      runner=runner, prompt_on_stdin=True)
+        cmd = runner.calls[0]["cmd"]
+        self.assertEqual(cmd[-1], "json")  # argv ends at --output-format json; no positional prompt
+        self.assertNotIn("a very long many-shot prompt", cmd)
+        self.assertEqual(runner.calls[0]["kwargs"]["input"], "a very long many-shot prompt")
 
     def test_scrubs_api_key_from_child_env(self):
         old = os.environ.get("ANTHROPIC_API_KEY")
@@ -300,7 +319,98 @@ class Delegate(unittest.TestCase):
         mc.save(self.dir, "opus", "fable")
         runner = _fake_runner()
         fd.delegate("task", state_dir=self.dir, model="fable", runner=runner)
-        self.assertEqual(runner.calls[0]["cmd"][3], "claude-fable-5")
+        cmd = runner.calls[0]["cmd"]
+        self.assertEqual(cmd[cmd.index("--model") + 1], "claude-fable-5")
+
+
+class DelegatesNeverReDelegate(unittest.TestCase):
+    """A live repro: an `!opus48` child, seeded with its own `[force-route …: you MUST attempt
+    to delegate …]` directive, run from the repo cwd with every tool, tried to run model_delegate.py
+    again. Three rails, each tested on its own: stripped seed, answer-only child, depth guard."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+
+    def _write_thread(self, entries):
+        with open(os.path.join(self.dir, "telegram-thread.json"), "w", encoding="utf-8") as fh:
+            json.dump(entries, fh)
+
+    def test_seed_excludes_every_directive_shape(self):
+        import presence  # the real producers, so a reworded directive can't slip past a stale copy
+        self._write_thread([
+            {"role": "user", "text": presence.FABLE_HINT_LINE + "\n\nplan my quarter"},
+            {"role": "user", "text": presence.FORCE_FABLE_DIRECTIVE + "\n\nthink hard about this"},
+            {"role": "user", "text": presence.force_route_directive("opus48")
+                + "\n\nThis is a test to see if the message gets through to Opus 4.8."},
+            {"role": "user", "text": presence.force_route_directive("gpt6sol")},
+            {"role": "assistant", "text": "an ordinary reply"},
+        ])
+        seed = fd.thread_seed(self.dir)
+        for marker in ("force-route", "force-fable", "router hint", "MUST attempt",
+                       "model_delegate.py", "fable_delegate.py"):
+            self.assertNotIn(marker, seed)
+        self.assertIn("user: plan my quarter", seed)
+        self.assertIn("user: think hard about this", seed)
+        self.assertIn("user: This is a test to see if the message gets through to Opus 4.8.", seed)
+        self.assertIn("assistant: an ordinary reply", seed)
+        # a turn that was ONLY a directive leaves no empty "user:" line behind
+        self.assertNotIn("user: \n", seed)
+
+    def test_her_own_brackets_are_not_stripped(self):
+        self._write_thread([{"role": "user", "text": "[job posting] this one looks decent"}])
+        self.assertIn("[job posting] this one looks decent", fd.thread_seed(self.dir))
+
+    def test_child_is_answer_only_from_a_neutral_cwd(self):
+        runner = _fake_runner()
+        fd.run_claude("q", "claude-fable-5", "claude", 60, runner=runner)
+        cmd, kw = runner.calls[0]["cmd"], runner.calls[0]["kwargs"]
+        i = cmd.index("--tools")
+        self.assertEqual(cmd[i + 1], "", "--tools \"\" disables every built-in tool")
+        self.assertTrue(cmd[i + 2].startswith("--"), "--tools is variadic; the prompt must not follow it")
+        self.assertIn("--strict-mcp-config", cmd)
+        self.assertNotIn("--mcp-config", cmd)
+        self.assertEqual(cmd[-1], "q")
+        cwd = os.path.realpath(kw["cwd"])
+        repo = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(fd.__file__)), "..", ".."))
+        self.assertTrue(os.path.isdir(cwd))
+        self.assertFalse(os.path.normcase(cwd).startswith(os.path.normcase(repo) + os.sep),
+                         "the child must not run inside the repo (its CLAUDE.md would load)")
+        self.assertFalse(os.path.exists(os.path.join(cwd, "CLAUDE.md")))
+
+    def test_child_env_stamps_depth_one_level_deeper(self):
+        old = os.environ.pop(fd.DELEGATE_DEPTH_ENV, None)
+        try:
+            self.assertEqual(fd.child_env()[fd.DELEGATE_DEPTH_ENV], "1")
+            os.environ[fd.DELEGATE_DEPTH_ENV] = "1"
+            self.assertEqual(fd.child_env()[fd.DELEGATE_DEPTH_ENV], "2")
+        finally:
+            os.environ.pop(fd.DELEGATE_DEPTH_ENV, None)
+            if old is not None:
+                os.environ[fd.DELEGATE_DEPTH_ENV] = old
+
+    def test_depth_parsing_fails_closed(self):
+        self.assertEqual(fd.delegate_depth({}), 0)
+        self.assertEqual(fd.delegate_depth({fd.DELEGATE_DEPTH_ENV: "0"}), 0)
+        self.assertEqual(fd.delegate_depth({fd.DELEGATE_DEPTH_ENV: "2"}), 2)
+        self.assertEqual(fd.delegate_depth({fd.DELEGATE_DEPTH_ENV: "yes"}), 1)
+        self.assertIsNone(fd.recursion_refusal("fable_delegate", {}))
+
+    def test_guard_refuses_at_depth_one_without_spawning(self):
+        mc.save(self.dir, "claude-opus-5-5", "claude-fable-5-1")
+        runner = _fake_runner()
+        old = os.environ.get(fd.DELEGATE_DEPTH_ENV)
+        os.environ[fd.DELEGATE_DEPTH_ENV] = "1"
+        try:
+            ok, msg = fd.delegate("task", state_dir=self.dir, runner=runner)
+        finally:
+            if old is None:
+                os.environ.pop(fd.DELEGATE_DEPTH_ENV, None)
+            else:
+                os.environ[fd.DELEGATE_DEPTH_ENV] = old
+        self.assertFalse(ok)
+        self.assertIn("already a delegate", msg)
+        self.assertNotIn("\n", msg)
+        self.assertEqual(runner.calls, [])
 
 
 class DefaultConversationId(unittest.TestCase):

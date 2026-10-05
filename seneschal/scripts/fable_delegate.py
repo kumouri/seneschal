@@ -48,14 +48,31 @@ Usage:
   python fable_delegate.py --state-dir "C:\\...\\seneschal\\state" --model claude-fable-5 "..."
 
 Exit codes: 0 = success (the delegate's answer is on stdout); 2 = refused or failed (message on stderr).
+
+**A delegate ANSWERS; it never re-delegates.** A force-routed child `claude -p` — seeded with a thread
+tail still carrying the `[force-route …: you MUST attempt to delegate …]` directive, run from the repo
+cwd so it loaded the repo CLAUDE.md, and holding the full tool set — has tried to run the delegate
+script AGAIN; only a permission prompt stopped the recursion. Three independent rails, each sufficient
+on its own:
+  1. `thread_seed` strips every `[force-fable: …]` / `[force-route <alias>: …]` / `[router hint: …]`
+     directive out of the tail (`DIRECTIVE_RE`) — the child never reads an instruction to delegate.
+  2. `run_claude` runs the child ANSWER-ONLY: `--tools ""` (the CLI's own "disable all built-in
+     tools" form) + `--strict-mcp-config` (no MCP servers either), from `neutral_cwd()` — a stable
+     empty directory outside the repo, so the repo CLAUDE.md is never auto-discovered — plus a
+     one-line `--append-system-prompt` saying it IS the delegate. The codex targets run the same way
+     (read-only sandbox, empty cwd).
+  3. `SENESCHAL_DELEGATE_DEPTH` — `child_env()` stamps it (depth + 1) on every delegate child, and
+     `delegate()` here and in `model_delegate.py` refuse with one clear line at depth >= 1.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
+import tempfile
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
@@ -81,13 +98,72 @@ LEGACY_THREAD_FILE = "telegram-thread.json"
 # console child of a console-less parent otherwise steals focus with a fresh visible window). 0 off Windows.
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
+# The recursion guard (module docstring, rail 3). Set on every delegate child; a delegate script run
+# with it at >= 1 refuses instead of spawning another model.
+DELEGATE_DEPTH_ENV = "SENESCHAL_DELEGATE_DEPTH"
+
+# Rail 1: the synthesized directive/hint shapes presence.py prepends to an inbound turn —
+# FORCE_FABLE_DIRECTIVE, force_route_directive(), FABLE_HINT_LINE. None of them contains a "]" inside,
+# so a non-greedy span to the first "]" is the whole marker.
+DIRECTIVE_RE = re.compile(r"\[(?:force-fable|force-route [a-z0-9]+|router hint):[^\]]*\]\s*", re.I)
+
+# Rail 2: the claude CLI flags that make a delegate answer-only. `--tools ""` disables every built-in
+# tool; `--strict-mcp-config` with no `--mcp-config` loads no MCP server. `--tools` is variadic, so it
+# must be followed by another option, never the prompt.
+CLAUDE_ANSWER_ONLY_ARGS = ["--tools", "", "--strict-mcp-config"]
+DELEGATE_SYSTEM_NOTE = (
+    "You are the delegate for ONE forwarded turn of the assistant's conversation. You have no tools. "
+    "Answer the request directly in plain text. You are the model it was routed to — never try to "
+    "delegate, force-route or run model_delegate.py / fable_delegate.py yourself."
+)
+NEUTRAL_CWD_NAME = "seneschal-delegate-cwd"
+
+
+def delegate_depth(environ=None) -> int:
+    """How deep in a delegation chain this process is — 0 at the warm session. Fails CLOSED: a set but
+    unparseable value counts as 1, since the only thing that sets it is a delegate spawn."""
+    env = os.environ if environ is None else environ
+    raw = (env.get(DELEGATE_DEPTH_ENV) or "").strip()
+    if not raw:
+        return 0
+    try:
+        return max(int(raw), 0)
+    except ValueError:
+        return 1
+
+
+def recursion_refusal(script: str, environ=None) -> str | None:
+    """None at depth 0; otherwise the one-line refusal a delegate gets if it tries to delegate again."""
+    depth = delegate_depth(environ)
+    if depth < 1:
+        return None
+    return (f"{script} refused: this process is already a delegate ({DELEGATE_DEPTH_ENV}={depth}) — "
+            "a delegate answers the turn itself and never re-delegates.")
+
 
 def child_env() -> dict:
     """Same subscription-billing rule as presence.child_env: scrub
-    ANTHROPIC_API_KEY so this call always bills the logged-in Claude subscription, never metered API."""
+    ANTHROPIC_API_KEY so this call always bills the logged-in Claude subscription, never metered API.
+    Also stamps the recursion guard one level deeper than this process."""
     env = os.environ.copy()
     env.pop("ANTHROPIC_API_KEY", None)
+    env[DELEGATE_DEPTH_ENV] = str(delegate_depth() + 1)
     return env
+
+
+def neutral_cwd() -> str:
+    """A stable, empty directory outside the repo for a delegate child to run in, so the repo's
+    CLAUDE.md (which tells a session how to force-route) is never auto-discovered. Stable rather than a
+    fresh mkdtemp per call because `claude` keys its session store by cwd — one directory, not one
+    per delegation. Nothing is ever written into it (the child has no tools)."""
+    path = os.path.join(tempfile.gettempdir(), NEUTRAL_CWD_NAME)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def strip_directives(text: str) -> str:
+    """Remove every force-route / force-fable / router-hint marker from one turn's text."""
+    return DIRECTIVE_RE.sub("", text or "").strip()
 
 
 def _load_json(path: str, default):
@@ -119,7 +195,11 @@ def thread_seed(state_dir: str, max_turns: int = THREAD_TAIL_TURNS,
     CLI from inside a turn that may belong to a private-chat topic, and nothing on that invocation
     carries the topic; plumbing one would mean putting a thread id in the warm session's prompt for it
     to copy, i.e. a fact it can get wrong. So a delegation raised inside a topic is seeded with the
-    main chat's tail — honest context, just not topic-scoped."""
+    main chat's tail — honest context, just not topic-scoped.
+
+    **Directive markers are stripped** (`strip_directives`): the turn that force-routed THIS delegation
+    is in the tail with its `[force-route …: you MUST attempt to delegate …]` line, and a delegate
+    reading it has tried to delegate again. A turn that was nothing but a directive is dropped."""
     thread = _load_json(os.path.join(state_dir, THREAD_DIR, "main.json"), None)
     if thread is None:
         thread = _load_json(os.path.join(state_dir, LEGACY_THREAD_FILE), [])
@@ -130,7 +210,10 @@ def thread_seed(state_dir: str, max_turns: int = THREAD_TAIL_TURNS,
     for t in reversed(thread[-max_turns:]):
         if not isinstance(t, dict):
             continue
-        line = f"{t.get('role', '?')}: {t.get('text', '')}"
+        text = strip_directives(str(t.get("text", "")))
+        if not text:
+            continue
+        line = f"{t.get('role', '?')}: {text}"
         if used + len(line) > char_budget:
             break
         lines.append(line)
@@ -175,7 +258,7 @@ def parse_result_json(stdout: str) -> tuple[str | None, dict | None]:
 
 
 def run_claude(prompt: str, model: str, claude_bin: str, timeout: int,
-               runner=subprocess.run) -> tuple[bool, str, dict | None]:
+               runner=subprocess.run, prompt_on_stdin: bool = False) -> tuple[bool, str, dict | None]:
     """One `claude -p --model <model> --output-format json <prompt>` one-shot. `runner` is swappable
     (tests pass a fake with subprocess.run's signature) so this is testable with NO real `claude` spawn
     and NO network. Returns (ok, text, usage) — `text` is the delegate's answer on success, a short error
@@ -185,13 +268,25 @@ def run_claude(prompt: str, model: str, claude_bin: str, timeout: int,
     answer and nothing else, which would leave `delegate` no usage to record — and Fable is the one token
     budget that hard-blocks, so it is the single worst place in the system to meter nothing. The json
     mode carries the same `usage` block the daemon's stream-json mode already parses; `usage` is None
-    only if that ever stops being true."""
+    only if that ever stops being true.
+
+    **Answer-only** (module docstring, rail 2): no tools, no MCP, a neutral cwd outside the repo, and a
+    system note naming it the delegate.
+
+    **`prompt_on_stdin` (default False).** With it False the prompt is the final argv element exactly as
+    the live Fable/force-route path has always passed it. With it True the positional prompt is DROPPED
+    and the text is fed on stdin instead (`claude -p` reads the prompt from stdin when none is on argv) —
+    the only way a prompt past Windows's ~32,767-char command-line cap can reach a Claude target."""
+    cmd = [claude_bin, "-p", *CLAUDE_ANSWER_ONLY_ARGS, "--append-system-prompt", DELEGATE_SYSTEM_NOTE,
+           "--model", model, "--output-format", "json"]
+    kwargs = dict(capture_output=True, text=True, encoding="utf-8", errors="replace",
+                  timeout=timeout, env=child_env(), cwd=neutral_cwd(), creationflags=_NO_WINDOW)
+    if prompt_on_stdin:
+        kwargs["input"] = prompt
+    else:
+        cmd.append(prompt)
     try:
-        proc = runner(
-            [claude_bin, "-p", "--model", model, "--output-format", "json", prompt],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=timeout, env=child_env(), creationflags=_NO_WINDOW,
-        )
+        proc = runner(cmd, **kwargs)
     except (OSError, subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
         return False, f"fable delegate failed to run: {e}", None
     out = (proc.stdout or "").strip()
@@ -209,12 +304,14 @@ def run_claude(prompt: str, model: str, claude_bin: str, timeout: int,
     return True, text, usage
 
 
-def append_transcript_badge(state_dir: str, text: str, source: str = "cockpit") -> None:
+def append_transcript_badge(state_dir: str, text: str, source: str = "cockpit",
+                            model: str = DEFAULT_MODEL) -> None:
     """Best-effort transcript tee so the cockpit chat pane's per-turn model badge shows the delegation
     seam (cockpit-spec.md: "badged in the transcript ... the seams stay visible"). Fail-open — a broken
-    tee must never turn a successful delegate call into a reported failure."""
+    tee must never turn a successful delegate call into a reported failure. `model` defaults to Fable;
+    `model_delegate.py` passes the real model of whichever force-route target answered."""
     try:
-        ev = cockpit_pipe.chat_event("assistant_output", source=source, model=DEFAULT_MODEL,
+        ev = cockpit_pipe.chat_event("assistant_output", source=source, model=model,
                                      text=text[:4000])
         cockpit_pipe.append_transcript_event(state_dir, ev)
     except Exception:  # noqa: BLE001
@@ -233,6 +330,9 @@ def delegate(task: str, state_dir: str = DEFAULT_STATE_DIR, model: str = DEFAULT
     refused-by-governor, and run-failure alike. NEVER raises; the CLI below is the only thing that turns
     `ok` into an exit code.
     """
+    refusal = recursion_refusal("fable_delegate")
+    if refusal:
+        return False, refusal
     cfg = model_config.load(state_dir)
     ceiling = cfg.get("max_routable_model")
     backend = cfg.get("backend") or model_config.DEFAULT_BACKEND

@@ -102,7 +102,10 @@ router's **fable arm** (`fable_arm_classify`, a hint line only), the warm sessio
 `chat.send` (see `strip_force_fable` / `cockpit_task.on_chat_send`) — bypasses the classifier, never the
 approval gate. The ceiling binds every trigger: when it isn't Fable-tier, the fable arm doesn't even run
 (`model_config.admits_fable`), and `fable_delegate.py` itself refuses the call regardless of how it was
-triggered.
+triggered. **Other force-route targets** — `!opus48`, `!glm`, `!gpt54`/`!gpt56sol`/
+`!gpt6astra`/`!gpt6sol`/`!gpt61sol` — come off `model_delegate.TARGETS` (`strip_force_route` /
+`force_route_directive`) and run through `model_delegate.py`: explicit-prefix only, never a router
+trigger, so the ceiling governs only the Claude one among them.
 
 **Shipped defaults.** With no persona, no store and no Telegram configured the daemon still boots: the
 grounding renders generic identity phrases, `resolve_store_mcp` forwards no MCP, the Telegram task idles
@@ -251,6 +254,7 @@ import jobs  # durable background jobs — detached survivors + the daemon-owned
 import log_rotation  # the one door every rotating state/logs/ file goes through (log-rotation-spec.md)
 import merge_guard as mg  # the merge gate — THIS daemon is the only writer of an approval record
 import model_config  # the two-dial model config (v3, cockpit-spec.md "Model dials & Fable delegation")
+import model_delegate  # the force-route target registry (!fable, !opus48, !glm, !gpt…) — see apply_force_route
 import dream_steps  # Dream's step ledger — which nightly steps actually ran, and how long ago
 import mouth  # the assertions log — what the assistant has actually said to the owner (docs/mouth-spec.md)
 import outbox_common as ob  # the write-behind outbox (Notion backend only) — this daemon owns its flush
@@ -917,8 +921,11 @@ that promise. Every flag (`--wake`/`--lease`/`--retry`/`--goal`/`--analyze`), th
 `jobs.py list`/`status`/`cancel`/`mail`: seneschal/docs/background-jobs-spec.md.
 Delegating to Fable: you ALWAYS own this conversation — delegation is a subprocess call-out
 (`python seneschal/scripts/fable_delegate.py "<task>"`), never a handoff, and never bypasses the
-act-low/ask-high gate. A "[router hint: ... FABLE-LEVEL ...]" or "[force-fable: ...]" line above a
-message is self-explanatory where it appears and names the script; your own mid-turn judgment (deep
+act-low/ask-high gate. A "[router hint: ... FABLE-LEVEL ...]", "[force-fable: ...]" or "[force-route
+<target>: ...]" line above a message is self-explanatory where it appears and names the script (the
+last sends one turn to another model — another Claude tier, an open-weights model, a GPT — via
+model_delegate.py, ONLY when {owner} typed the prefix; never reach for those unprompted); your own
+mid-turn judgment (deep
 synthesis, long-horizon planning, hard multi-step debugging) may also call it unprompted. The script
 enforces the max-routable-model ceiling, and Oikonomos, the budget governor, may also refuse (a Fable
 quota, delegation concurrency, or Fable's token budget) — relay any refusal to {owner} honestly, handle
@@ -1955,7 +1962,7 @@ def take_arrival_marker(midturn_arrivals: list, text: str) -> str | None:
     return ARRIVAL_MARKER_LINE
 
 
-# --------------------------------------------------------------------------- force-route (!fable)
+# --------------------------------------------------------------------------- force-route (!fable, !glm, !gpt…)
 
 # A leading "!fable" (any case, an optional ":"/"," and whitespace after) on ANY inbound channel —
 # Telegram/Discord typed literally, or synthesized by cockpit_task.on_chat_send when the browser's
@@ -1984,18 +1991,61 @@ def strip_force_fable(text: str) -> tuple[bool, str]:
     return True, text[m.end():].strip()
 
 
+# The other force-route targets — `!opus48`, `!glm`, `!gpt54`, `!gpt56sol`, `!gpt6astra`, `!gpt6sol`,
+# `!gpt61sol` — ONE registry, `model_delegate.TARGETS`, which this regex is built from, so a new target is
+# a registry row and nothing here. Same leading-token-only shape as FORCE_FABLE_PREFIX_RE. Longest alias
+# first so an alternation can't stop at a shorter prefix (`\b` already refuses `!gpt6` inside `!gpt6sol`;
+# the order makes that not depend on it). `fable` is kept out: it keeps its own regex, directive and
+# marker byte-for-byte.
+FORCE_ROUTE_ALIASES = tuple(sorted((a for a in model_delegate.TARGETS if a != "fable"),
+                                   key=len, reverse=True))
+FORCE_ROUTE_PREFIX_RE = re.compile(
+    r"^\s*!(" + "|".join(re.escape(a) for a in FORCE_ROUTE_ALIASES) + r")\b[:,]?\s*", re.IGNORECASE)
+
+
+def force_route_directive(alias: str) -> str:
+    """The MUST-delegate directive for one target — FORCE_FABLE_DIRECTIVE's shape. `[force-route
+    <alias>: ` is the marker `turns._SYSTEM_MARKER_RE` recognises; keep them in step."""
+    if alias == "fable":
+        return FORCE_FABLE_DIRECTIVE
+    t = model_delegate.TARGETS[alias]
+    ceiling = ("If the max-routable-model ceiling refuses it" if t.backend == "claude-cli"
+               else "The model ceiling doesn't apply to a non-Claude target the owner named. If it fails")
+    return (
+        f"[force-route {alias}: the owner force-routed this turn to {t.label} (!{alias}) — you MUST "
+        f"attempt to delegate it via `python seneschal/scripts/model_delegate.py --target {alias} "
+        f"\"<task>\"` and relay {t.label}'s answer as {t.label}'s, not yours. {ceiling} (missing "
+        "credentials, model rejected, any error), relay its message plainly and handle the turn "
+        "yourself. Force-route bypasses the router classifier, never the approval gate — any "
+        "outbound/destructive result from the delegate's answer still drafts-and-holds.]"
+    )
+
+
+def strip_force_route(text: str) -> tuple[str | None, str]:
+    """Detect + strip ANY leading force-route prefix. Returns (alias or None, remaining_text); `!fable`
+    comes back as "fable" via `strip_force_fable`, unchanged."""
+    forced, clean = strip_force_fable(text)
+    if forced:
+        return "fable", clean
+    m = FORCE_ROUTE_PREFIX_RE.match(text or "")
+    if not m:
+        return None, text or ""
+    return m.group(1).lower(), text[m.end():].strip()
+
+
 def apply_force_route(channel: str, text: str, log) -> str:
-    """If `text` carries the force-route prefix, strip it and replace it with the explicit MUST-delegate
+    """If `text` carries a force-route prefix, strip it and replace it with the explicit MUST-delegate
     directive the warm session's grounding tells it to honor (GROUNDING's delegation section) — a pure
     text transform applied once at enqueue time (see `_enqueue_inbound`), so it needs no persisted-queue
     schema change and survives a restart exactly like any other inbound text. A bare `!fable` with
     nothing after it still produces a valid (if task-less) directive; the warm session can ask the
     owner what they meant."""
-    forced, clean = strip_force_fable(text)
-    if not forced:
+    alias, clean = strip_force_route(text)
+    if alias is None:
         return text
-    log(f"• force-route: '!fable' detected on a {channel} message — directive injected")
-    return f"{FORCE_FABLE_DIRECTIVE}\n\n{clean}" if clean else FORCE_FABLE_DIRECTIVE
+    log(f"• force-route: '!{alias}' detected on a {channel} message — directive injected")
+    directive = force_route_directive(alias)
+    return f"{directive}\n\n{clean}" if clean else directive
 
 
 # --------------------------------------------------------------------------- private turn (!private)
@@ -7290,7 +7340,7 @@ def _cockpit_inbox_text(it: dict) -> str:
     text = (it.get("text") or "").strip()
     if not text:
         return ""
-    if it.get("force_fable") and not strip_force_fable(text)[0] and not is_status_command(text):
+    if it.get("force_fable") and strip_force_route(text)[0] is None and not is_status_command(text):
         text = f"{FORCE_FABLE_TRIGGER} {text}".strip()
     return text
 
@@ -7435,11 +7485,12 @@ async def cockpit_task(state: DaemonState, args, log) -> None:
         # v3: `force_fable` (the composer's "Send to Fable" toggle) now ACTUALLY forces — synthesized as
         # the SAME `!fable` prefix Telegram/Discord force-route on, so `_enqueue_inbound`'s single
         # detection path (`apply_force_route`) handles all three channels uniformly. A guard avoids a
-        # double prefix if the owner also typed `!fable` themselves with the toggle on.
+        # double prefix if the owner also typed `!fable` — or any other force-route prefix, which then
+        # wins over the toggle — themselves with the toggle on.
         # `!status` is a daemon command, never a prompt — don't let a left-on "Send to Fable" toggle
         # turn it into `!fable !status` and spend a Fable delegation asking a model to guess at the
         # daemon's own vitals.
-        if frame.get("force_fable") and not strip_force_fable(text)[0] and not is_status_command(text):
+        if frame.get("force_fable") and strip_force_route(text)[0] is None and not is_status_command(text):
             text = f"{FORCE_FABLE_TRIGGER} {text}".strip()
         await _enqueue_inbound(state, args, log, [("cockpit", text, 0)])
 
