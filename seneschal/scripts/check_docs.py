@@ -22,7 +22,8 @@ first pass, not one visit at a time.
    type or similar slash-bearing non-path token, or allowlist it in `seneschal/context-pointers.json`
    with a `reason`.
 3. **`check_rulings.py`** — an added line matching `\\bruling\\b`/`\\bruled\\b` (case-insensitive)
-   demands a row in `seneschal/docs/rulings.md` in the same diff. What trips it: "...without a
+   demands a row in `seneschal/docs/rulings.md` in the same diff, unless the same text was removed
+   elsewhere in that diff (a verbatim move is exempt). What trips it: "...without a
    ruling" describes the ABSENCE of a decision, not a decision that was made. Do instead: say what is
    actually meant (e.g. "the owner's explicit approval"), or if the word is truly incidental, mark the
    line `<!-- check-rulings: not-a-ruling — <reason> -->`.

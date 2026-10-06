@@ -376,6 +376,146 @@ class ScanTests(unittest.TestCase):
         self.assertEqual(result["findings"], [])
 
 
+class MoveAwareTests(unittest.TestCase):
+    """Dream's learnings retirement moves CLOSED proposals verbatim
+    between two Markdown files; their text quoted an old decision, so the gate went red on text that
+    was only relocated. An exact move is exempt; an edit, an extra copy, or a marker problem on a
+    line that did NOT move is judged exactly as before."""
+
+    QUOTED = "- Applied: the owner ruled 2026-01-03 that the archive keeps the reasoning."
+    EDITED = "- Applied: the owner ruled 2026-01-04 that the archive also keeps the dates."
+
+    def _fixture(self, files: dict) -> Fixture:
+        fx = Fixture()
+        write(fx.root, files)
+        commit(fx.root, "base content")
+        _git(fx.root, "checkout", "-q", "develop")
+        _git(fx.root, "merge", "-q", "--ff-only", "feature")
+        _git(fx.root, "checkout", "-q", "-b", "feature2")
+        return fx
+
+    def test_pure_move_between_files_is_clean(self):
+        fx = self._fixture({"seneschal/docs/proposals.md": f"# Proposals\n\n{self.QUOTED}\n",
+                            "seneschal/docs/archive.md": "# Archive\n"})
+        write(fx.root, {"seneschal/docs/proposals.md": "# Proposals\n",
+                        "seneschal/docs/archive.md": f"# Archive\n\n{self.QUOTED}\n"})
+        commit(fx.root, "retire the proposal to the archive")
+        base = cr.resolve_base(fx.root)
+        self.assertEqual(cr.added_ruling_lines(fx.root, base), {})
+        self.assertEqual(cr.moved_ruling_lines(fx.root, base),
+                         {"seneschal/docs/archive.md": [self.QUOTED]})
+        result = cr.scan(fx.root)
+        self.assertEqual(result["findings"], [])
+        self.assertEqual(result["moved"], {"seneschal/docs/archive.md": [self.QUOTED]})
+
+    def test_move_with_reindent_is_still_a_move(self):
+        """Only surrounding whitespace is ignored — a re-indented copy is the same text."""
+        fx = self._fixture({"seneschal/docs/proposals.md": f"# Proposals\n\n{self.QUOTED}\n",
+                            "seneschal/docs/archive.md": "# Archive\n"})
+        write(fx.root, {"seneschal/docs/proposals.md": "# Proposals\n",
+                        "seneschal/docs/archive.md": f"# Archive\n\n    {self.QUOTED}   \n"})
+        result = cr.scan(fx.root)
+        self.assertEqual(result["findings"], [])
+
+    def test_move_plus_an_edited_line_flags_only_the_edit(self):
+        fx = self._fixture({"seneschal/docs/proposals.md":
+                            f"# Proposals\n\n{self.QUOTED}\n\n- Applied: the archive keeps dates.\n",
+                            "seneschal/docs/archive.md": "# Archive\n"})
+        write(fx.root, {"seneschal/docs/proposals.md": f"# Proposals\n\n{self.EDITED}\n",
+                        "seneschal/docs/archive.md": f"# Archive\n\n{self.QUOTED}\n"})
+        commit(fx.root, "move one, edit another into new ruling language")
+        base = cr.resolve_base(fx.root)
+        found = cr.added_ruling_lines(fx.root, base)
+        self.assertEqual(found, {"seneschal/docs/proposals.md": [self.EDITED]})
+        result = cr.scan(fx.root)
+        self.assertIn("ruling-without-ledger-row", [f["kind"] for f in result["findings"]])
+
+    def test_an_edited_sentence_in_place_is_still_flagged(self):
+        """The ruling word added to an existing sentence: `-old`/`+new` differ, so it is not a move."""
+        fx = self._fixture({"seneschal/docs/other-spec.md": "# Other\n\nThe archive keeps the dates.\n"})
+        write(fx.root, {"seneschal/docs/other-spec.md":
+                        "# Other\n\nThe owner ruled the archive keeps the dates.\n"})
+        base = cr.resolve_base(fx.root)
+        self.assertIn("seneschal/docs/other-spec.md", cr.added_ruling_lines(fx.root, base))
+        self.assertEqual(cr.moved_ruling_lines(fx.root, base), {})
+
+    def test_multiplicity_added_three_removed_once_flags_two(self):
+        fx = self._fixture({"seneschal/docs/proposals.md": f"# Proposals\n\n{self.QUOTED}\n",
+                            "seneschal/docs/archive.md": "# Archive\n"})
+        write(fx.root, {"seneschal/docs/proposals.md": "# Proposals\n",
+                        "seneschal/docs/archive.md":
+                            f"# Archive\n\n{self.QUOTED}\n\n{self.QUOTED}\n\n{self.QUOTED}\n"})
+        commit(fx.root, "one move, two new copies")
+        base = cr.resolve_base(fx.root)
+        self.assertEqual(cr.added_ruling_lines(fx.root, base),
+                         {"seneschal/docs/archive.md": [self.QUOTED, self.QUOTED]})
+        self.assertEqual(cr.moved_ruling_lines(fx.root, base),
+                         {"seneschal/docs/archive.md": [self.QUOTED]})
+
+    def test_move_split_across_two_destination_files(self):
+        """Two lines leave one file and land in two different files — each is a move."""
+        other = "- Applied: per the 2026-01-03 ruling, closed rows move, never vanish."
+        fx = self._fixture({"seneschal/docs/proposals.md": f"# Proposals\n\n{self.QUOTED}\n\n{other}\n",
+                            "seneschal/docs/archive.md": "# Archive\n",
+                            "seneschal/docs/archive-2.md": "# Archive 2\n"})
+        write(fx.root, {"seneschal/docs/proposals.md": "# Proposals\n",
+                        "seneschal/docs/archive.md": f"# Archive\n\n{self.QUOTED}\n",
+                        "seneschal/docs/archive-2.md": f"# Archive 2\n\n{other}\n"})
+        commit(fx.root, "split the move")
+        result = cr.scan(fx.root)
+        self.assertEqual(result["findings"], [])
+        self.assertEqual(result["moved"], {"seneschal/docs/archive.md": [self.QUOTED],
+                                           "seneschal/docs/archive-2.md": [other]})
+
+    def test_move_out_of_a_deleted_file_into_an_untracked_one(self):
+        """Working-tree semantics: the source deleted outright, the destination not yet `git add`ed
+        (it arrives as gate_git's synthetic all-added hunk)."""
+        fx = self._fixture({"seneschal/docs/proposals.md": f"# Proposals\n\n{self.QUOTED}\n"})
+        os.remove(os.path.join(fx.root, "seneschal", "docs", "proposals.md"))
+        write(fx.root, {"seneschal/docs/brand-new-archive.md": f"# Archive\n\n{self.QUOTED}\n"})
+        result = cr.scan(fx.root)
+        self.assertEqual(result["findings"], [])
+        self.assertIn("seneschal/docs/brand-new-archive.md", result["moved"])
+
+    def test_a_removal_with_no_matching_addition_exempts_nothing_else(self):
+        """Removing one ruling line does not buy a pass for a DIFFERENT new one."""
+        fx = self._fixture({"seneschal/docs/proposals.md": f"# Proposals\n\n{self.QUOTED}\n"})
+        write(fx.root, {"seneschal/docs/proposals.md": f"# Proposals\n\n{self.EDITED}\n"})
+        result = cr.scan(fx.root)
+        self.assertIn("ruling-without-ledger-row", [f["kind"] for f in result["findings"]])
+
+    def test_new_marked_and_malformed_lines_behave_as_before_beside_a_move(self):
+        """Marker handling on lines that did NOT move is unchanged: a valid marker suppresses, an
+        empty reason and an unparseable marker are each still their own finding."""
+        fx = self._fixture({"seneschal/docs/proposals.md": f"# Proposals\n\n{self.QUOTED}\n",
+                            "seneschal/docs/archive.md": "# Archive\n"})
+        valid = "Not cleanly ruled out. <!-- check-rulings: not-a-ruling — the statistical idiom -->"
+        empty = "Also not ruled out. <!-- check-rulings: not-a-ruling — -->"
+        broken = "Still not ruled out. <!-- check-rulings: not-a-ruling — forgot to close it"
+        write(fx.root, {"seneschal/docs/proposals.md": "# Proposals\n",
+                        "seneschal/docs/archive.md":
+                            f"# Archive\n\n{self.QUOTED}\n\n{valid}\n\n{empty}\n\n{broken}\n"})
+        commit(fx.root, "a move beside three marker cases")
+        result = cr.scan(fx.root)
+        kinds = sorted(f["kind"] for f in result["findings"])
+        self.assertEqual(kinds, ["check-rulings-marker-empty-reason",
+                                 "check-rulings-marker-malformed-syntax"])
+        self.assertEqual(result["moved"], {"seneschal/docs/archive.md": [self.QUOTED]})
+
+
+class ParseDiffTests(unittest.TestCase):
+    def test_header_lines_vs_content_lines(self):
+        """A `---`/`+++` line inside a hunk is content, not a header (a removed line that itself
+        began with `--`); every `diff --git` resets the path."""
+        diff = ("diff --git a/a.md b/a.md\n--- a/a.md\n+++ b/a.md\n@@ -1,2 +1,1 @@\n"
+                "--- a horizontal-rule-ish line\n-gone\n+kept\n"
+                "diff --git a/b.md b/b.md\ndeleted file mode 100644\n--- a/b.md\n+++ /dev/null\n"
+                "@@ -1 +0,0 @@\n-  indented  \n")
+        added, removed = cr.parse_diff(diff)
+        self.assertEqual(added, [("a.md", "kept")])
+        self.assertEqual(removed, {"-- a horizontal-rule-ish line": 1, "gone": 1, "indented": 1})
+
+
 class LedgerShapeTests(unittest.TestCase):
     def test_well_formed_table_parses_clean(self):
         rows, findings = cr.parse_ledger_rows(LEDGER_HEADER + ledger_row() + ledger_row("2026-09-04-b"))
