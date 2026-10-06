@@ -145,7 +145,13 @@ $ClaudeConfigFile = if ($env:CLAUDE_CONFIG_DIR -and
                         (Test-Path (Join-Path $env:CLAUDE_CONFIG_DIR '.claude.json'))) {
     Join-Path $env:CLAUDE_CONFIG_DIR '.claude.json'
 } else { Join-Path $HOME '.claude.json' }
-$TaskName = 'seneschald'
+# The scheduled task Start/Stop/revive drive. SENESCHALD_TASK_NAME exists for ONE caller: the
+# integration test (test_seneschald_control.py), which runs this real script against a throwaway state
+# dir. Without it every lock-less Update in that suite takes the revive path and calls
+# Start-ScheduledTask on the LIVE `seneschald` task — on a host where the daemon is installed, one suite
+# run has fired it dozens of times, each launching run-presence.cmd against the real checkout (bounced
+# only by the healthy daemon's live lock). Nothing deployed sets it; unset is the real task.
+$TaskName = if ($env:SENESCHALD_TASK_NAME) { $env:SENESCHALD_TASK_NAME } else { 'seneschald' }
 $GitFlags = @('-c', 'core.fsmonitor=false')   # fsmonitor otherwise hangs in this repo
 
 # health_listener.py's OWN restart-request file — deliberately NOT $StateDir/control-queue.json. The
@@ -544,14 +550,14 @@ function Invoke-PresenceRevive {
     # prefers the uv venv interpreter, and carries every daemon flag. Hand-rolling that risks silently
     # flipping the daemon onto metered API billing. MultipleInstances=IgnoreNew makes a redundant start a
     # no-op rather than a second brain.
-    & $Log "revive: attempting (attempt $($verdict.next_state.revivals) in this window)..."
+    & $Log "revive: attempting task '$TaskName' (attempt $($verdict.next_state.revivals) in this window)..."
     try {
         Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop
     } catch {
         # A UAC-enabled host (or a task registered under a different principal) may refuse this. Fail
         # LOUDLY and fall through to the alert — a watchdog that quietly stops watching is worse than one
         # that never existed.
-        & $Log "revive: FAILED to start the task — $_. Falling back to alert-only."
+        & $Log "revive: FAILED to start the task '$TaskName' — $_. Falling back to alert-only."
         return $false
     }
 
