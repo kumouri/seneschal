@@ -133,7 +133,7 @@ specs and carry no status.
   in code and validated, independent of the byte cap.
 - `context-budget-collisions-spec.md` — **PARTIAL(phase 1 BUILT; `--enforce-chain` unwired; the
   phase-2 rechain helper not in this tree)** — chain-continuity for the one ledger every PR edits.
-- `concurrent-pr-collisions-spec.md` — **PARTIAL(phase 1, 2R, 2b-as-a-job, 2a's detection + §5B BUILT, run by the daemon's PR watch; phase 1.5 and 2a's report unbuilt)** — a
+- `concurrent-pr-collisions-spec.md` — **PARTIAL(phase 1, 2R, 2b-as-a-job, 2a's detection + §5B + §5A.10 BUILT, run by the daemon's PR watch; phase 1.5 and 2a's report unbuilt)** — a
   picker names which other open PR shares its files; the daemon rebases BEHIND PRs and repairs
   ledger and Markdown conflicts, keeping both sides (§5A.9); a PR a still-running job opened is a
   draft until that job ends (§5B, `job_pr_draft.py`).

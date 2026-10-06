@@ -1,6 +1,6 @@
 # Spec — concurrent pull requests: name the overlap before the tap, repair the wreckage after the merge
 
-**Status:** `PARTIAL(phase 1, 2R, 2b-as-a-job, 2a's detection rows and §5B BUILT as modules; phase 1.5 and 2a's report unbuilt; §7 held pending 2a)`
+**Status:** `PARTIAL(phase 1, 2R, 2b-as-a-job, 2a's detection rows, §5B and §5A.10 BUILT as modules; phase 1.5 and 2a's report unbuilt; §7 held pending 2a)`
 — the design below describes the whole system. What exists: `pr_overlap.py` + `merge_guard.overlap_band`
 (phase 1), `check_context_budget.py`'s `reconcile()` (§1.4's measure-don't-sum rule, report-only),
 `pr_rebase.py` (2R), `pr_repair.py` (2b as a delegated job, plus 2a's detection rows in
@@ -742,6 +742,51 @@ branch's tip, then for each open, non-draft, same-repository PR based on the bas
 **Every detection is a 2a row.** Each `CONFLICTING` and `BEHIND` detection is appended to
 `state/pr-repair-log.jsonl` (schema `seneschal.pr-repair/1`) with §5A.7's columns and
 `rebaser_live: true`. The report that computes 2a's fraction from those rows is unbuilt.
+
+### 5A.10 A PR a running job owns is not repaired or rebased under it
+
+**The failure.** A job asked to rebase three stacked PRs in turn ran `git rebase` on the first one,
+which stopped on a conflict — and **a stopped rebase is a detached HEAD**. The watcher's next pass asked
+§5B's in-flight map for the worktree's branch, got `HEAD`, found no owner, and launched a repair of the
+same PR; that repair job found the branch checked out elsewhere and stood down. A pass later the first
+PR was correctly drafted (§5B working), but nothing had the *second* PR's branch checked out yet, so a
+repair of it was launched too — and it pushed a merge that the owning job later had to overwrite with
+`--force-with-lease`. The ledger held exactly one `repair_launched` per PR; the defect was ownership
+blindness, twice.
+
+**What was built:**
+
+1. **A worktree stopped mid-rebase is on the branch it is rewriting.**
+   `job_pr_draft._current_branch` reads the rebase's own head-name file (git's rebase-merge directory,
+   or rebase-apply for the `am` backend) on a detached HEAD, via `git rev-parse --git-path`. That fixes
+   the first half, for all three watchers, since `pr_sweep` and `pr_rebase` read the same map.
+2. **A job can say which PRs it owns: `jobs.py start --pr N`** (repeatable). It is stamped as the
+   record's `prs: [N]`. `job_pr_draft.list_pr_owners` reads every ACTIVE job's `prs`, or, when the job
+   stamped none, every `#N` in its title or `origin.goal` — a brief that forgets the flag is §5B.2's
+   non-binding-prose shape, so the prose is still read. A false match only holds the watcher off that
+   PR until the job ends. `pr_repair.py` skips the repair of a CONFLICTING PR, and the server-side
+   rebase of a BEHIND one, that a live job owns. It writes one `skipped_owned` ledger row per
+   `(pr, head, job)` and names the job in its held list on every pass. Its own repair jobs pass
+   `--pr N`. **It does not draft an owned PR:** drafting stays tied to §5B's branch signal, a narrower
+   act on a looser one.
+3. **A launch is claimed before it happens.** The pass read the ledger once, at its start, and wrote
+   `repair_launched` only after `jobs.py start` returned, so a second pass overlapping a launch (a
+   hand-run `pr_repair.py` beside the daemon's, or a restart between the job's creation and the ledger
+   row) could launch the same repair. `pr_repair.claim_launch` now takes an `O_EXCL` lock
+   (`state/pr-repair-launch.lock`, stolen after 120 s, fail-closed). Under it, it re-reads the ledger,
+   the claim file, the running repair jobs and the PR owners fresh, then writes a claim keyed
+   `(pr, base sha)` to `state/pr-repair-launching.json`. The claim is released once the outcome is on
+   the ledger. A launcher that raises leaves it standing for `LAUNCH_INTENT_TTL` (15 min), and the job
+   it may have started carries `--pr N`.
+
+**The quiet window is the watcher's one predicate.** `pr_repair` used to read the bare
+`merge_guard.in_quiet_hours`, so a conflicted PR could sit held all night while the owner was on
+Telegram approving pickers. It now reads `merge_guard.quiet_window` — the window, stood down by the
+owner's own recent activity, exactly as `pr_sweep` asks — and its report names the instant that stood
+it down (`awake_override`).
+
+**Named gap:** `pr_sweep.py` still reads only the branch map. So a PR a job owns but has not checked
+out can still get a merge picker, which `picker_retire` takes down when the job moves the head.
 
 ---
 

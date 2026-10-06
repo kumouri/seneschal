@@ -526,7 +526,8 @@ ASK_ON_GREEN_QUIET_HOURS = True
 #: any sensor. Fails toward QUIET — an unreadable turns file means no evidence, and no evidence means
 #: the window holds.
 #:
-#: **Scoped to the PR pickers and the red-CI notices riding the same pass** (`picker_quiet_hours`).
+#: **Scoped to the PR pickers, the red-CI notices riding the same pass, and `pr_repair`'s
+#: conflict-repair launches and notices** (`quiet_window` / `picker_quiet_hours`).
 #: `in_quiet_hours` itself — the window — is unchanged, and reminders never read it: `sentinel`'s
 #: curfew is its own gate, and this override does not reach it. `False` here restores the window as
 #: an unconditional hold.
@@ -2386,21 +2387,29 @@ def awake_evidence(state_dir: str = DEFAULT_STATE_DIR, now=None):
         return None
 
 
-def picker_quiet_hours(state_dir: str = DEFAULT_STATE_DIR, now=None) -> bool:
-    """Should a PR picker (or a red-CI notice) be HELD right now? :func:`in_quiet_hours`, unless
-    :func:`awake_evidence` says the owner is up (:data:`AWAKE_OVERRIDE`).
+def quiet_window(state_dir: str = DEFAULT_STATE_DIR, now=None):
+    """`(hold, awake)`: should the small hours HOLD a Telegram-facing action right now, and the instant
+    of the owner's own activity that stood the window down (`None` when it did not).
+    :func:`in_quiet_hours`, unless :func:`awake_evidence` says the owner is up (:data:`AWAKE_OVERRIDE`).
 
-    The turns file is only read inside the window, so the rest of the day costs nothing. **These
-    two functions are the only definition of "hold the picker"**: `ask_on_green` below calls this one,
-    and `pr_sweep.sweep` composes the same two calls itself for its short-circuit and its red arm,
-    only so its report can name the instant that stood the window down. Two reads within one pass
-    can only disagree in one direction — the file is append-only and `now` is pinned, so a second
-    read may find the owner awake where the first did not, never the reverse — except when the file
-    turns unreadable between them, and then the guard's refusal records nothing, so it is a
-    deferral, exactly as before."""
+    The turns file is only read inside the window, so the rest of the day costs nothing. **This is the
+    only definition of "hold it"**: :func:`picker_quiet_hours` is its boolean, `pr_sweep.sweep` calls
+    it for its short-circuit and its red arm, and `pr_repair.sweep` for its repair launches and notices
+    (reading the bare window there once held a conflicted PR all night while the owner was on Telegram
+    approving pickers). The callers that report take the pair so their report can name the instant
+    that stood the window down. Two reads within one pass can only disagree in one direction — the
+    file is append-only and `now` is pinned, so a second read may find the owner awake where the first
+    did not, never the reverse — except when the file turns unreadable between them, and then the
+    guard's refusal records nothing, so it is a deferral, exactly as before."""
     if not in_quiet_hours(now):
-        return False
-    return awake_evidence(state_dir, now) is None
+        return False, None
+    awake = awake_evidence(state_dir, now)
+    return awake is None, awake
+
+
+def picker_quiet_hours(state_dir: str = DEFAULT_STATE_DIR, now=None) -> bool:
+    """Should a PR picker (or a red-CI notice) be HELD right now? :func:`quiet_window`'s boolean."""
+    return quiet_window(state_dir, now)[0]
 
 
 def ask_log_path(state_dir: str) -> str:

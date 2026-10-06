@@ -12,8 +12,9 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -233,6 +234,59 @@ class ConflictRepairTest(Harness):
     def test_quiet_hours_defer_launch_and_notice(self):
         report = self.run_pass(FakeGh([row()]), now=THREE_AM)
         self.assertEqual((self.launches, self.sent), ([], []))
+        self.assertTrue(any("quiet" in d for d in report["deferred"]))
+        self.assertNotIn("awake_override", report)
+
+    # ----- the quiet window stands down while the owner is demonstrably awake (merge_guard.quiet_window);
+    # reading the bare window once held a conflicted PR all night while the owner was on Telegram.
+
+    def _owner_turn(self, minutes_ago, text="still up — approving things"):
+        import turns
+        turns.record_turn(self.state, surface="telegram", speaker="owner", text=text,
+                          now=THREE_AM - timedelta(minutes=minutes_ago))
+
+    def test_the_owner_is_awake_so_the_repair_launches_inside_the_window(self):
+        self._owner_turn(10)
+        report = self.run_pass(FakeGh([row()]), now=THREE_AM)
+        self.assertEqual(self.launches, [(860, BASE1, ("seneschal/context-budget.json",))])
+        self.assertEqual(report["awake_override"], "2026-01-15T07:50:00Z")
+        self.assertFalse(any("quiet" in d for d in report["deferred"]))
+        self.assertIn("quiet window stood down", pr_repair.summary_line(report))
+
+    def test_the_owner_is_awake_so_the_refusal_notice_sends_inside_the_window(self):
+        self._owner_turn(10)
+        self.paths = ["seneschal/scripts/presence.py"]
+        self.run_pass(FakeGh([row()]), now=THREE_AM)
+        self.assertEqual(self.launches, [])
+        self.assertEqual(len(self.sent), 1)
+
+    def test_a_stale_message_keeps_the_window(self):
+        self._owner_turn(45)
+        report = self.run_pass(FakeGh([row()]), now=THREE_AM)
+        self.assertEqual((self.launches, self.sent), ([], []))
+        self.assertTrue(any("quiet" in d for d in report["deferred"]))
+        self.assertNotIn("awake_override", report)
+
+    def test_a_job_notice_on_the_owners_channel_is_not_the_owner(self):
+        self._owner_turn(2, text='[job finished: "fix(x): y" — done in 3m]')
+        report = self.run_pass(FakeGh([row()]), now=THREE_AM)
+        self.assertEqual(self.launches, [])
+        self.assertTrue(any("quiet" in d for d in report["deferred"]))
+
+    def test_an_unreadable_turns_file_keeps_the_window(self):
+        self._owner_turn(1)
+        with mock.patch("turns.awake_since", side_effect=OSError("locked")):
+            report = self.run_pass(FakeGh([row()]), now=THREE_AM)
+        self.assertEqual((self.launches, self.sent), ([], []))
+        self.assertTrue(any("quiet" in d for d in report["deferred"]))
+
+    def test_the_pass_reads_the_same_predicate_pr_sweep_does(self):
+        """Reuse, not a copy: stubbing the ONE helper both watchers call moves this pass too."""
+        import merge_guard as mg
+        with mock.patch.object(mg, "quiet_window", return_value=(True, None)) as qw:
+            report = self.run_pass(FakeGh([row()]), now=NOON)
+        qw.assert_called_once_with(self.state, NOON)
+        self.assertEqual(self.launches, [])
         self.assertTrue(any("quiet" in d for d in report["deferred"]))
 
     def test_one_launch_per_pass(self):
@@ -658,6 +712,196 @@ class AbsenceTest(unittest.TestCase):
 
     def test_the_repair_pass_never_uses_the_soft_cap_override(self):
         self.assertNotIn("--over-soft-cap\"", self.src("pr_repair.py"))
+
+
+class OwnershipAndSingleFlightTest(Harness):
+    """§5A.10. The failure: a job rebasing #880, #881 and #882 in turn had the watcher launch repairs
+    of #880 (the job was mid-rebase, detached) and #881 (the job had not reached it yet). Both are 'a live job owns this PR'; the second half is single-flight."""
+
+    def write_job(self, job_id, status="running", title="a job", prs=None, goal=None):
+        os.makedirs(os.path.join(self.state, "jobs"), exist_ok=True)
+        rec = {"schema": "seneschal.job/1", "id": job_id, "title": title, "status": status,
+               "argv": ["claude", "-p", "x"], "origin": {"goal": goal} if goal else {}}
+        if prs is not None:
+            rec["prs"] = prs
+        with open(os.path.join(self.state, "jobs", f"{job_id}.json"), "w", encoding="utf-8") as fh:
+            json.dump(rec, fh)
+
+    def intents(self):
+        return pr_repair._load_intents(self.state)
+
+    # ---- 1. an in-flight job that owns the PR suppresses the repair
+
+    def test_a_running_job_stamped_with_the_pr_suppresses_the_repair(self):
+        self.write_job("20260101-010045-0001", title="stack rebase", prs=[860, 861])
+        report = self.run_pass(FakeGh([row()]))
+        self.assertEqual(self.launches, [])
+        self.assertTrue(any("20260101-010045-0001" in d for d in report["deferred"]), report)
+        owned = [r for r in self.log() if r["event"] == "skipped_owned"]
+        self.assertEqual(len(owned), 1)
+        self.assertEqual((owned[0]["pr"], owned[0]["job_id"], owned[0]["via"], owned[0]["class"]),
+                         (860, "20260101-010045-0001", "prs", "conflicting"))
+
+    def test_the_skip_is_ledgered_once_per_head_and_job_not_every_pass(self):
+        self.write_job("j-own", prs=[860])
+        gh = FakeGh([row()])
+        self.run_pass(gh)
+        self.run_pass(gh)
+        self.run_pass(gh)
+        self.assertEqual(len([r for r in self.log() if r["event"] == "skipped_owned"]), 1)
+
+    def test_a_job_that_names_the_pr_only_in_its_title_suppresses_the_repair(self):
+        self.write_job("20260101-010045-0001",
+                       title="Rebase #859/#860/#861 after #858; renumber cadence lint to 2k")
+        self.run_pass(FakeGh([row()]))
+        self.assertEqual(self.launches, [])
+        self.assertEqual([r["via"] for r in self.log() if r["event"] == "skipped_owned"], ["title"])
+
+    def test_ownership_is_checked_before_any_classification_spend(self):
+        self.write_job("j-own", prs=[860])
+        gh = FakeGh([row()])
+        classified = []
+        pr_repair.sweep(self.state, now=NOON, runner=gh,
+                        classifier=lambda b, h: classified.append(h) or ["x.md"],
+                        launcher=self.launcher, sender=self.sender,
+                        verifier=lambda *a: self.approval, store_loader=lambda: self.store)
+        self.assertEqual(classified, [])
+        self.assertFalse([c for c in gh.calls if c[:3] == ["gh", "pr", "view"]])
+
+    def test_an_owned_behind_pr_is_not_rebased_under_the_job(self):
+        self.write_job("j-own", prs=[860])
+        gh = FakeGh([row(mergeable="MERGEABLE", state="BEHIND")])
+        report = self.run_pass(gh)
+        self.assertEqual(gh.updates(), [])
+        self.assertTrue(any("j-own" in w for w in report["waiting"]), report)
+
+    def test_an_unowned_pr_beside_an_owned_one_is_still_repaired(self):
+        self.write_job("j-own", prs=[860])
+        self.run_pass(FakeGh([row(860), row(861)]))
+        self.assertEqual([pr for pr, _, _ in self.launches], [861])
+
+    # ---- 3. a terminal prior job does not suppress
+
+    def test_a_terminal_prior_job_does_not_suppress(self):
+        for status in ("done", "failed", "cancelled", "timed-out", "ended-unknown"):
+            with self.subTest(status=status):
+                shutil.rmtree(self.state, ignore_errors=True)
+                os.makedirs(self.state)
+                self.launches.clear()
+                self.write_job("j-old", status=status, title="Rebase #860 after #859", prs=[860])
+                self.run_pass(FakeGh([row()]))
+                self.assertEqual(len(self.launches), 1)
+
+    # ---- 2. single-flight: two passes launch at most one repair
+
+    def test_a_second_pass_while_the_first_launch_is_still_in_flight_launches_nothing(self):
+        """The ~80 s case: pass B runs while pass A's `jobs.py start` has not returned yet (so
+        nothing is on the ledger and no job record exists). Simulated by running B from inside A's
+        launcher."""
+        gh = FakeGh([row()])
+        inner = {}
+
+        def launcher(row_, base, paths):
+            self.launches.append((row_["number"], base, tuple(paths)))
+            if "report" not in inner:
+                inner["report"] = self.run_pass(gh)
+            return {"ok": True, "job_id": "job-1"}
+
+        pr_repair.sweep(self.state, now=NOON, runner=gh, classifier=lambda b, h: ["x.md"],
+                        launcher=launcher, sender=self.sender, verifier=lambda *a: self.approval,
+                        store_loader=lambda: self.store)
+        self.assertEqual(len(self.launches), 1)
+        self.assertTrue(any("in flight" in d for d in inner["report"]["deferred"]), inner["report"])
+        self.assertEqual(len([r for r in self.log() if r["event"] == "repair_launched"]), 1)
+
+    def test_two_consecutive_passes_launch_one_and_the_claim_is_released(self):
+        gh = FakeGh([row()])
+        self.run_pass(gh)
+        self.assertEqual(self.intents(), {})
+        self.run_pass(gh)
+        self.assertEqual(len(self.launches), 1)
+
+    def test_a_claim_left_by_a_launcher_that_died_blocks_until_its_ttl(self):
+        pr_repair._save_intents(self.state, {pr_repair._intent_key(860, BASE1): {
+            "pr": 860, "base_sha": BASE1, "head_sha": HEAD,
+            "at": pr_repair._stamp(NOON - timedelta(minutes=5)), "pid": 1}})
+        report = self.run_pass(FakeGh([row()]))
+        self.assertEqual(self.launches, [])
+        self.assertTrue(any("in flight" in d for d in report["deferred"]), report)
+        self.run_pass(FakeGh([row()]), now=NOON + pr_repair.LAUNCH_INTENT_TTL)
+        self.assertEqual(len(self.launches), 1)
+
+    def test_an_expired_claim_on_another_pr_is_pruned_by_the_next_claim(self):
+        stale = pr_repair._intent_key(999, BASE1)
+        pr_repair._save_intents(self.state, {stale: {
+            "pr": 999, "base_sha": BASE1, "head_sha": HEAD,
+            "at": pr_repair._stamp(NOON - pr_repair.LAUNCH_INTENT_TTL), "pid": 1}})
+        ok, _ = pr_repair.claim_launch(self.state, row(), BASE1, NOON, lambda: {})
+        self.assertTrue(ok)
+        self.assertEqual(set(self.intents()), {pr_repair._intent_key(860, BASE1)})
+
+    def test_a_launcher_that_raises_leaves_its_claim_standing(self):
+        def launcher(row_, base, paths):
+            self.launches.append(row_["number"])
+            raise RuntimeError("jobs.py wedged mid-start")
+
+        report = pr_repair.sweep(self.state, now=NOON, runner=FakeGh([row()]),
+                                 classifier=lambda b, h: ["x.md"], launcher=launcher,
+                                 sender=self.sender, verifier=lambda *a: self.approval,
+                                 store_loader=lambda: self.store)
+        self.assertTrue(report["errors"])
+        self.assertIn(pr_repair._intent_key(860, BASE1), self.intents())
+        self.launches.clear()
+        self.run_pass(FakeGh([row()]))
+        self.assertEqual(self.launches, [])
+
+    def test_a_refused_launch_releases_its_claim_so_the_next_pass_retries(self):
+        self.launch_result = {"ok": False, "capped": True, "job_id": None, "error": "cap"}
+        self.run_pass(FakeGh([row()]))
+        self.assertEqual(self.intents(), {})
+        self.launch_result = {"ok": True, "job_id": "job-2"}
+        self.run_pass(FakeGh([row()]))
+        self.assertEqual(len(self.launches), 2)
+        self.assertEqual(len([r for r in self.log() if r["event"] == "repair_launched"]), 1)
+
+    def test_a_held_launch_lock_means_no_launch_and_a_stale_one_is_stolen(self):
+        lock = os.path.join(self.state, pr_repair.LAUNCH_LOCK_FILE)
+        with open(lock, "w", encoding="utf-8") as fh:
+            fh.write("4242")
+        report = self.run_pass(FakeGh([row()]))
+        self.assertEqual(self.launches, [])
+        self.assertTrue(any("launch lock" in d for d in report["deferred"]), report)
+        old = time.time() - pr_repair.LAUNCH_LOCK_STALE_SEC - 5
+        os.utime(lock, (old, old))
+        self.run_pass(FakeGh([row()]))
+        self.assertEqual(len(self.launches), 1)
+        self.assertFalse(os.path.exists(lock))
+
+    def test_the_claim_re_reads_ownership_fresh_not_the_pass_snapshot(self):
+        """A job that starts owning the PR after the pass's start-of-pass read still stops the launch."""
+        calls = {"n": 0}
+
+        def owners():
+            calls["n"] += 1
+            return {} if calls["n"] == 1 else {860: {"job_id": "j-late", "via": "prs"}}
+
+        report = self.run_pass(FakeGh([row()]), owners_loader=owners)
+        self.assertEqual(self.launches, [])
+        self.assertTrue(any("j-late" in d for d in report["deferred"]), report)
+
+    def test_the_repair_job_itself_is_stamped_with_its_pr(self):
+        seen = []
+
+        def run(argv):
+            seen.append(argv)
+            return 0, json.dumps({"id": "job-1"}), ""
+
+        res = pr_repair.launch_repair(self.state, row(), BASE1, ["x.md"], claude_bin="claude",
+                                      runner=run)
+        self.assertTrue(res["ok"])
+        argv = seen[0]
+        self.assertEqual(argv[argv.index("--pr") + 1], "860")
+        self.assertLess(argv.index("--pr"), argv.index("--"))
 
 
 if __name__ == "__main__":

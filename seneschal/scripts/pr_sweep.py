@@ -678,18 +678,17 @@ def sweep(repos=None, state_dir: str = mg.DEFAULT_STATE_DIR, asker=None, lister=
     # wake anyone, and both leave the morning queue honest instead of hours stale. The cost is one
     # `gh pr list` per repo per pass overnight, read-only, far inside GitHub's hourly budget.
     #
-    # **And it stands down while the owner is demonstrably awake.** `mg.awake_evidence` is the
-    # guard's own reading of `turns.jsonl` — an owner message, tap, reaction or attachment within the
+    # **And it stands down while the owner is demonstrably awake.** `mg.quiet_window` is the
+    # guard's own reading — the window, then `turns.jsonl` for an owner message, tap, reaction or attachment within the
     # awake window, never a job notice — and it fails toward QUIET. `quiet_hours` then reads False,
     # because it means *the window is holding this pass*, and `awake_override` names the instant
     # that stood it down. The red arm below reads the same flag, so it stands down too: a red notice
-    # is quieter than a picker, and it shares the window.
+    # is quieter than a picker, and it shares the window. `pr_repair` reads the same helper.
     try:
-        window = bool(mg.in_quiet_hours(now))
-        awake = mg.awake_evidence(state_dir, now) if window else None
+        hold, awake = mg.quiet_window(state_dir, now)
         if awake is not None:
             report["awake_override"] = awake.isoformat().replace("+00:00", "Z")
-        report["quiet_hours"] = window and awake is None
+        report["quiet_hours"] = bool(hold)
     except Exception as e:  # noqa: BLE001 — cannot tell the hour ⇒ carry on, exactly as the guard does
         report["errors"].append(f"quiet-hours check failed (sweeping anyway): {e!r}")
 
