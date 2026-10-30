@@ -102,7 +102,10 @@ router's **fable arm** (`fable_arm_classify`, a hint line only), the warm sessio
 `chat.send` (see `strip_force_fable` / `cockpit_task.on_chat_send`) — bypasses the classifier, never the
 approval gate. The ceiling binds every trigger: when it isn't Fable-tier, the fable arm doesn't even run
 (`model_config.admits_fable`), and `fable_delegate.py` itself refuses the call regardless of how it was
-triggered.
+triggered. **Other force-route targets** — `!opus48`, `!glm`, `!gpt54`/`!gpt56sol`/
+`!gpt6astra`/`!gpt6sol`/`!gpt61sol` — come off `model_delegate.TARGETS` (`strip_force_route` /
+`force_route_directive`) and run through `model_delegate.py`: explicit-prefix only, never a router
+trigger, so the ceiling governs only the Claude one among them.
 
 **Shipped defaults.** With no persona, no store and no Telegram configured the daemon still boots: the
 grounding renders generic identity phrases, `resolve_store_mcp` forwards no MCP, the Telegram task idles
@@ -192,7 +195,16 @@ attribution and never the turn.
 
 `TURN_IDLE_GAP_SEC=600` — a hang is SILENT, not slow, and a total cap kills the long healthy turns. A
 watchdog kills the child and the EXISTING mid-turn-death path takes over; a hung turn is the ONE
-delivered outcome that does NOT pop the queue. See ../docs/hung-turn-deadline-spec.md.
+delivered outcome that does NOT pop the queue. The gap is armed BEFORE the stdin write: a prompt over
+the 4 KB Windows pipe buffer blocks until the child reads, and a child wedged before it reads stdin
+otherwise parked the drainer in `write()` with no deadline at all. See ../docs/hung-turn-deadline-spec.md.
+
+**An outside backstop sits behind it.** `TurnBackstop` + `turn_backstop_watch` run on the EVENT LOOP,
+spawned by the drainer beside each send and cancelled in the same `finally`: no stream event for
+`TURN_BACKSTOP_SEC` (30 min, never under 2x the session's own gap) kills the child, routes the turn down
+the existing timeout path, and pings the owner that the inner watchdog failed. It shares no code with
+`_TurnWatchdog` — different thread, clock, beat source and kill site — so one bug can't disable both.
+Spec: "The outside backstop".
 
 ### The tick writes vitals once a minute
 
@@ -242,6 +254,7 @@ import jobs  # durable background jobs — detached survivors + the daemon-owned
 import log_rotation  # the one door every rotating state/logs/ file goes through (log-rotation-spec.md)
 import merge_guard as mg  # the merge gate — THIS daemon is the only writer of an approval record
 import model_config  # the two-dial model config (v3, cockpit-spec.md "Model dials & Fable delegation")
+import model_delegate  # the force-route target registry (!fable, !opus48, !glm, !gpt…) — see apply_force_route
 import dream_steps  # Dream's step ledger — which nightly steps actually ran, and how long ago
 import mouth  # the assertions log — what the assistant has actually said to the owner (docs/mouth-spec.md)
 import outbox_common as ob  # the write-behind outbox (Notion backend only) — this daemon owns its flush
@@ -323,7 +336,8 @@ SLOT_MAX_RETRIES = 8  # give up relaunching a failed slot after this many bad ex
 #      network blip that names no reset — backs off instead: `SLOT_BACKOFF_BASE_SEC * 2**(attempt-1)`,
 #      capped at `SLOT_BACKOFF_CAP_SEC`. See `slot_backoff_seconds`.
 # Both stay bounded by the two EXISTING backstops — `SLOT_MAX_RETRIES` above and `--slot-catchup-min`
-# (default 180 min, see `classify_slots`) — unchanged by this: this only adds a WAIT between attempts,
+# (default 180 min, see `classify_slots`; a `CATCHUP_UNBOUNDED` slot — the Daily Journal —
+# has only the first, plus the date rollover) — unchanged by this: this only adds a WAIT between attempts,
 # never a new attempt, and a slot held past its catch-up window is stamped `too_late` and abandoned for
 # the day exactly as before, regardless of how long it was still holding.
 #
@@ -356,6 +370,17 @@ MAX_TURN_ATTEMPTS = 3
 # **The idle-gap length is 10 minutes.** (Defined in
 # backends/claude_cli.py and re-exported above — TURN_IDLE_GAP_SEC — since it's the claude-cli
 # backend's own dial; codex_cli.py holds its own CODEX_TURN_GAP_SEC, currently the same value.)
+#
+# **The outside backstop behind it: 30 minutes.** If a turn goes this long with NO stream event, the
+# idle-gap watchdog above has failed (a bug), so the event loop kills the child itself. It can only catch
+# a failed watchdog and never competes with the idle gap: `turn_backstop_sec()` floors it at 2x the
+# session's own gap, so raising the gap can't make the backstop fire first. See TurnBackstop below and
+# docs/hung-turn-deadline-spec.md "The outside backstop".
+TURN_BACKSTOP_SEC = 30 * 60.0
+# After the backstop kills the child, how long the turn gets to come back before the backstop says the
+# kill did NOT release it (the worker thread is stuck somewhere a dead pipe can't reach) and that only
+# a `reseneschald` will. One extra log line + one extra ping; it changes nothing else.
+TURN_BACKSTOP_RELEASE_SEC = 60.0
 # The maximum a defer-until-idle control may be held before it applies anyway (P2). A deploy that never
 # lands is worse than a turn cut short: an unbounded hold is how Path A silently stops deploying — the
 # same failure class as seneschald-update's branch drift. Deliberately far above
@@ -511,11 +536,36 @@ def active_mcp_configs(args) -> list:
     getattr so a partial args namespace (e.g. tests) still works. Returns [] when nothing is wired."""
     return [c for c in (getattr(args, "notion_mcp", None), getattr(args, "slack_mcp", None)) if c]
 
+# --- Per-slot catch-up policy -----------------------------------------------------------------------
+# A slot missed at its time (machine down/asleep) fires late on the next loop. HOW late is the slot's
+# own `catchup` key:
+#   CATCHUP_WINDOW (the default when the key is absent) — only within `--slot-catchup-min` of its time,
+#     else it is skipped for the day. Right for anything time-keyed: a 06:30 Brief read at 11 pm is noise.
+#   CATCHUP_UNBOUNDED — no cliff: if it hasn't run for today's local date it runs on the next loop,
+#     however late. Right for date-keyed work that is simply WRONG until it has happened.
+# The Daily Journal is the one unbounded slot. A machine that was down until mid-morning used to log
+# `slot 'daily-journal' skipped (past 05:00 + 180m catch-up)`, stamp it done, and leave the page never
+# rolled over — yesterday unarchived, no carry-over — until the owner noticed hours later. Its work
+# (archive yesterday, rebuild carry-over, tracker rows) is keyed on the date, not the hour. Dream keeps
+# the window, but note what that window actually is: 22:00 + 180 min runs past midnight, so its
+# effective cliff is the DATE ROLLOVER, not the 180 min — and a Dream still unrun at midnight used to be
+# lost with no log line at all. It is not made unbounded because a 00:30 run would be stamped for the
+# NEW date and then suppress that night's own Dream; `missed_yesterday` below is what makes that loss
+# audible instead. Same for the Wrap's 7 minutes past midnight (21:07 + 180 min).
+#
+# Every skip — past the window, retries exhausted, or a whole day missed — is recorded as `skipped` in
+# `state/slot-status.json` (beside `slots.json`, which keeps its bare-date format for every old reader)
+# and told to the owner in ONE plain Telegram line through the Mouth, once per (slot, date). See
+# `_flush_slot_skip_notices`. Before this, the only trace was a presence.log line nobody reads.
+CATCHUP_WINDOW = "window"
+CATCHUP_UNBOUNDED = "unbounded"
+
 # Heavyweight scheduled runs the daemon owns itself (replacing separate Task Scheduler entries).
 # Times are the MACHINE-LOCAL wall clock — assumed to match the owner's timezone (startup warns via
 # warn_tz_mismatch when identity.owner.timezone says otherwise). Each fires at most once per local day;
-# a run that's missed (machine asleep at its time) fires late on the next loop IF still within the
-# catch-up window, else it's skipped for the day. These run the orchestrator/journal.
+# a run that's missed (machine asleep at its time) fires late on the next loop per its `catchup` policy
+# (above) — within the catch-up window by default, else skipped for the day and said out loud. These
+# run the orchestrator/journal.
 # Reminders are NOT fixed slots anymore: the four Morning/Midday/Evening/Bedtime reminder slots were
 # retired for arbitrary per-reminder times — a once-per-local-day `maybe_seed_day` (date-rollover
 # triggered, below) seeds each ⏰ row's exact fire time(s) into the queue and the ~5s delivery tick fires
@@ -523,7 +573,7 @@ def active_mcp_configs(args) -> list:
 # seneschal/docs/reminder-exact-time-scheduling-spec.md + references/reminders-policy.md.
 # Prompts carry the {tz} identity token; the runnable SLOTS below is rendered by build_slots().
 SLOTS_TEMPLATE = [
-    {"name": "daily-journal", "at": "05:00",
+    {"name": "daily-journal", "at": "05:00", "catchup": CATCHUP_UNBOUNDED,
      "prompt": "Run the Daily Journal (subagents/journal-steward/daily-journal-steward/SKILL.md). "
                "Use {tz}. Run silently."},
     # `context` / `on_complete` are CODE hooks around the run (`owi_unknowns.py`'s docstring): the
@@ -556,6 +606,10 @@ SLOTS_TEMPLATE = [
                "journal-presence satisfy-only backstop (auto-tick if the owner journaled after the "
                "Wrap check; no bedtime nudge). Use {tz}. Run silently."},
 ]
+# How a skip notice names a slot to the owner (`slot_skip_notice_text`). A name missing here falls back to
+# the raw slot name — still readable, never a KeyError.
+SLOT_LABELS = {"daily-journal": "the Daily Journal", "morning-brief": "the morning Brief",
+               "eod-wrap": "the Wrap", "dream": "Dream", "reminders-seed": "the reminders seed"}
 
 # **THE ENUMERATION RULE, and it binds SLOTS as well as SEED_PROMPT below.** A slot prompt that lists
 # a mode's steps becomes that run's scope: the prompt arrives first and the mode file reads as
@@ -867,8 +921,11 @@ that promise. Every flag (`--wake`/`--lease`/`--retry`/`--goal`/`--analyze`), th
 `jobs.py list`/`status`/`cancel`/`mail`: seneschal/docs/background-jobs-spec.md.
 Delegating to Fable: you ALWAYS own this conversation — delegation is a subprocess call-out
 (`python seneschal/scripts/fable_delegate.py "<task>"`), never a handoff, and never bypasses the
-act-low/ask-high gate. A "[router hint: ... FABLE-LEVEL ...]" or "[force-fable: ...]" line above a
-message is self-explanatory where it appears and names the script; your own mid-turn judgment (deep
+act-low/ask-high gate. A "[router hint: ... FABLE-LEVEL ...]", "[force-fable: ...]" or "[force-route
+<target>: ...]" line above a message is self-explanatory where it appears and names the script (the
+last sends one turn to another model — another Claude tier, an open-weights model, a GPT — via
+model_delegate.py, ONLY when {owner} typed the prefix; never reach for those unprompted); your own
+mid-turn judgment (deep
 synthesis, long-horizon planning, hard multi-step debugging) may also call it unprompted. The script
 enforces the max-routable-model ceiling, and Oikonomos, the budget governor, may also refuse (a Fable
 quota, delegation concurrency, or Fable's token budget) — relay any refusal to {owner} honestly, handle
@@ -1905,7 +1962,7 @@ def take_arrival_marker(midturn_arrivals: list, text: str) -> str | None:
     return ARRIVAL_MARKER_LINE
 
 
-# --------------------------------------------------------------------------- force-route (!fable)
+# --------------------------------------------------------------------------- force-route (!fable, !glm, !gpt…)
 
 # A leading "!fable" (any case, an optional ":"/"," and whitespace after) on ANY inbound channel —
 # Telegram/Discord typed literally, or synthesized by cockpit_task.on_chat_send when the browser's
@@ -1934,18 +1991,61 @@ def strip_force_fable(text: str) -> tuple[bool, str]:
     return True, text[m.end():].strip()
 
 
+# The other force-route targets — `!opus48`, `!glm`, `!gpt54`, `!gpt56sol`, `!gpt6astra`, `!gpt6sol`,
+# `!gpt61sol` — ONE registry, `model_delegate.TARGETS`, which this regex is built from, so a new target is
+# a registry row and nothing here. Same leading-token-only shape as FORCE_FABLE_PREFIX_RE. Longest alias
+# first so an alternation can't stop at a shorter prefix (`\b` already refuses `!gpt6` inside `!gpt6sol`;
+# the order makes that not depend on it). `fable` is kept out: it keeps its own regex, directive and
+# marker byte-for-byte.
+FORCE_ROUTE_ALIASES = tuple(sorted((a for a in model_delegate.TARGETS if a != "fable"),
+                                   key=len, reverse=True))
+FORCE_ROUTE_PREFIX_RE = re.compile(
+    r"^\s*!(" + "|".join(re.escape(a) for a in FORCE_ROUTE_ALIASES) + r")\b[:,]?\s*", re.IGNORECASE)
+
+
+def force_route_directive(alias: str) -> str:
+    """The MUST-delegate directive for one target — FORCE_FABLE_DIRECTIVE's shape. `[force-route
+    <alias>: ` is the marker `turns._SYSTEM_MARKER_RE` recognises; keep them in step."""
+    if alias == "fable":
+        return FORCE_FABLE_DIRECTIVE
+    t = model_delegate.TARGETS[alias]
+    ceiling = ("If the max-routable-model ceiling refuses it" if t.backend == "claude-cli"
+               else "The model ceiling doesn't apply to a non-Claude target the owner named. If it fails")
+    return (
+        f"[force-route {alias}: the owner force-routed this turn to {t.label} (!{alias}) — you MUST "
+        f"attempt to delegate it via `python seneschal/scripts/model_delegate.py --target {alias} "
+        f"\"<task>\"` and relay {t.label}'s answer as {t.label}'s, not yours. {ceiling} (missing "
+        "credentials, model rejected, any error), relay its message plainly and handle the turn "
+        "yourself. Force-route bypasses the router classifier, never the approval gate — any "
+        "outbound/destructive result from the delegate's answer still drafts-and-holds.]"
+    )
+
+
+def strip_force_route(text: str) -> tuple[str | None, str]:
+    """Detect + strip ANY leading force-route prefix. Returns (alias or None, remaining_text); `!fable`
+    comes back as "fable" via `strip_force_fable`, unchanged."""
+    forced, clean = strip_force_fable(text)
+    if forced:
+        return "fable", clean
+    m = FORCE_ROUTE_PREFIX_RE.match(text or "")
+    if not m:
+        return None, text or ""
+    return m.group(1).lower(), text[m.end():].strip()
+
+
 def apply_force_route(channel: str, text: str, log) -> str:
-    """If `text` carries the force-route prefix, strip it and replace it with the explicit MUST-delegate
+    """If `text` carries a force-route prefix, strip it and replace it with the explicit MUST-delegate
     directive the warm session's grounding tells it to honor (GROUNDING's delegation section) — a pure
     text transform applied once at enqueue time (see `_enqueue_inbound`), so it needs no persisted-queue
     schema change and survives a restart exactly like any other inbound text. A bare `!fable` with
     nothing after it still produces a valid (if task-less) directive; the warm session can ask the
     owner what they meant."""
-    forced, clean = strip_force_fable(text)
-    if not forced:
+    alias, clean = strip_force_route(text)
+    if alias is None:
         return text
-    log(f"• force-route: '!fable' detected on a {channel} message — directive injected")
-    return f"{FORCE_FABLE_DIRECTIVE}\n\n{clean}" if clean else FORCE_FABLE_DIRECTIVE
+    log(f"• force-route: '!{alias}' detected on a {channel} message — directive injected")
+    directive = force_route_directive(alias)
+    return f"{directive}\n\n{clean}" if clean else directive
 
 
 # --------------------------------------------------------------------------- private turn (!private)
@@ -2016,6 +2116,125 @@ def turn_timeout_notice(gap_sec: float = TURN_IDLE_GAP_SEC) -> str:
     span = f"{int(round(mins))} minutes" if mins >= 1.5 else f"{int(round(gap_sec))} seconds"
     return (f"That one hung — {span} without a word out of me, so I cut the turn off rather than "
             "leave you sitting there waiting on it.")
+
+
+def turn_backstop_sec(session) -> float:
+    """The backstop deadline for a turn on `session`: `TURN_BACKSTOP_SEC`, never under 2x the
+    session's own idle gap. Read per turn, like the gap itself, so a re-ruled or per-session gap can't
+    make the backstop fire before the watchdog it backs up. A gap that disables the watchdog (zero,
+    negative, unreadable) leaves the plain backstop standing — it's the only deadline left."""
+    try:
+        gap = float(getattr(session, "turn_gap_sec", TURN_IDLE_GAP_SEC))
+    except (TypeError, ValueError):
+        gap = TURN_IDLE_GAP_SEC
+    return max(TURN_BACKSTOP_SEC, 2.0 * gap)
+
+
+class TurnBackstop:
+    """The outside half of the turn deadline (docs/hung-turn-deadline-spec.md "The outside backstop").
+    One per turn, owned by the drainer.
+
+    `wrap(on_event)` is what the drainer hands `session.send()`: every stream event the backend parses
+    beats this clock before reaching the tee. `turn_backstop_watch` reads it from the event loop. It
+    deliberately shares nothing with `_TurnWatchdog` — not the thread (the event loop, which a real
+    wedge showed stays alive while the drainer's worker thread is stuck), not the clock,
+    not the beat (presence's own callback, not the backend's line loop), not the kill site. So a bug
+    that disables the watchdog leaves this one standing."""
+
+    def __init__(self, deadline_sec: float):
+        self.deadline_sec = deadline_sec
+        self.last = time.monotonic()  # armed at construction: a turn that never emits is still timed
+        self.fired = False
+
+    def beat(self) -> None:
+        self.last = time.monotonic()  # one store; runs on the worker thread for every event
+
+    def silent_for(self) -> float:
+        return time.monotonic() - self.last
+
+    def wrap(self, on_event):
+        def _on_event(ev):
+            self.beat()
+            if on_event is not None:
+                on_event(ev)
+        return _on_event
+
+
+def arm_turn_backstop(state: "DaemonState", args, log, turn_id: str):
+    """Arm a backstop for one send: returns `(backstop, task)`. The caller hands `backstop.wrap(...)`
+    to `session.send()` as its `on_event` and cancels `task` in the `finally` that ends the send."""
+    backstop = TurnBackstop(turn_backstop_sec(state.session))
+    return backstop, asyncio.ensure_future(turn_backstop_watch(state, args, log, backstop, turn_id))
+
+
+def turn_backstop_alert(silent_sec: float, gap_sec: float) -> str:
+    """The one Telegram line the backstop sends. It says the INNER watchdog failed, because that is
+    what a backstop firing means — the timeout notice the turn itself gets is a separate message."""
+    return (f"⚠️ Turn backstop fired: a turn went {silent_sec / 60.0:.0f} min with no output and my "
+            f"{gap_sec / 60.0:.0f}-min idle-gap watchdog never cut it off — that's a bug in the "
+            "watchdog. I killed the turn; presence.log has the details (TURN BACKSTOP).")
+
+
+async def turn_backstop_watch(state: "DaemonState", args, log, backstop: TurnBackstop,
+                              turn_id: str) -> None:
+    """Sleep until `backstop` has seen no stream event for its deadline, then kill the warm child.
+
+    Cancelled by the drainer the moment the turn's send returns, which is how a turn the inner
+    watchdog already ended (or a turn that simply finished) is never touched. Firing marks
+    `backstop.fired` — the drainer reads it to route the turn down the EXISTING timeout path (notice,
+    RESPAWN_TURN_TIMEOUT, kept queued, counted toward MAX_TURN_ATTEMPTS) — and sets the session's
+    `backstop_killed`, which keeps the backend's first-turn fallback ladder from respawning and
+    re-sending into a fresh deadline. Never raises: a backstop that can crash is one more thing to
+    back up."""
+    while True:
+        remaining = backstop.deadline_sec - backstop.silent_for()
+        if remaining <= 0:
+            break
+        await asyncio.sleep(remaining)
+    backstop.fired = True
+    silent = backstop.silent_for()
+    session = state.session
+    try:
+        gap = float(getattr(session, "turn_gap_sec", TURN_IDLE_GAP_SEC))
+    except (TypeError, ValueError):
+        gap = TURN_IDLE_GAP_SEC
+    try:
+        log(f"!! TURN BACKSTOP fired: turn {turn_id} produced no output for {silent:.0f}s; the "
+            f"{gap:.0f}s idle-gap watchdog should have ended it and did not (a bug). Killing the warm "
+            "child (docs/hung-turn-deadline-spec.md \"The outside backstop\").")
+        if session is not None:
+            try:
+                session.backstop_killed = True
+            except Exception:  # noqa: BLE001 — a session that refuses the flag still gets killed
+                pass
+        proc = getattr(session, "proc", None)
+        if proc is None:
+            log("!! TURN BACKSTOP: no child process to kill — the turn may stay wedged until reseneschald")
+        else:
+            try:
+                proc.kill()  # closes the pipes: a blocked read ends, a blocked write raises
+            except Exception as e:  # noqa: BLE001
+                log(f"!! TURN BACKSTOP: kill failed ({e!r}) — the turn may stay wedged until reseneschald")
+        # The kill comes first; the ping can wait on the network. A cancel landing during the send
+        # (the kill released the turn) doesn't stop the send — the worker thread finishes it.
+        if not await asyncio.to_thread(deliver_reply, "telegram", turn_backstop_alert(silent, gap),
+                                       args, log, kind="alert"):
+            log("!! TURN BACKSTOP: the Telegram ping did not land")
+        await asyncio.sleep(TURN_BACKSTOP_RELEASE_SEC)
+        # Still not cancelled: the kill did not give the drainer its turn back.
+        log(f"!! TURN BACKSTOP: turn {turn_id} still in flight {TURN_BACKSTOP_RELEASE_SEC:.0f}s after "
+            "the kill — the worker thread is stuck somewhere a dead pipe can't reach; needs reseneschald")
+        await asyncio.to_thread(
+            deliver_reply, "telegram",
+            "⚠️ The backstop's kill didn't free the stuck turn. I need a `reseneschald` to recover.",
+            args, log, kind="alert")
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001 — see the docstring
+        try:
+            log(f"!! TURN BACKSTOP: handler error {e!r}")
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def is_status_command(text: str) -> bool:
@@ -3665,10 +3884,16 @@ def slot_on_complete(slot_name: str, state_dir: str, log) -> bool:
         return False
 
 
+def slot_catchup(slot: dict) -> str:
+    """A slot's catch-up policy — `CATCHUP_WINDOW` unless it declares otherwise (see `SLOTS`)."""
+    return slot.get("catchup") or CATCHUP_WINDOW
+
+
 def classify_slots(slots: list, now_local: datetime, fired: dict, window_min: int):
     """Split not-yet-fired-today slots into (to_run, too_late). A slot is due once its local time has
     arrived; if we're more than `window_min` past it (e.g. the machine was asleep through its window),
-    it's stamped-but-skipped so a 6:30 brief never fires at 11pm. Pure → unit-tested."""
+    it's stamped-but-skipped so a 6:30 brief never fires at 11pm — UNLESS the slot is
+    `CATCHUP_UNBOUNDED`, which is never too late on its own date. Pure → unit-tested."""
     today = now_local.strftime("%Y-%m-%d")
     now_min = now_local.hour * 60 + now_local.minute
     to_run, too_late = [], []
@@ -3678,8 +3903,121 @@ def classify_slots(slots: list, now_local: datetime, fired: dict, window_min: in
         start = parse_hhmm(s["at"])
         if now_min < start:
             continue  # not yet
-        (to_run if now_min <= start + window_min else too_late).append(s)
+        if slot_catchup(s) == CATCHUP_UNBOUNDED or now_min <= start + window_min:
+            to_run.append(s)
+        else:
+            too_late.append(s)
     return to_run, too_late
+
+
+def missed_yesterday(slots: list, now_local: datetime, fired: dict, status: dict) -> list:
+    """Slots whose whole local day YESTERDAY went by with neither a run nor a recorded skip — the
+    midnight cliff, which `classify_slots` never sees because by the time it looks the date has already
+    rolled. Returns `[(slot, last_fired_date)]`. Pure → unit-tested.
+
+    Only a slot with SOME prior `slots.json` stamp counts (a fresh install has missed nothing), and one
+    already recorded in `status` for yesterday or later is done — that is the once-per-(slot, date)
+    guard. Only yesterday is reported: after a week away one line saying "hasn't run since <date>" is
+    the useful fact, seven are not. The caller excludes a slot still RUNNING across midnight — its reap
+    stamps it with its launch date, so it isn't missed."""
+    yesterday = (now_local - timedelta(days=1)).strftime("%Y-%m-%d")
+    out = []
+    for s in slots:
+        last = fired.get(s["name"])
+        if not isinstance(last, str) or last >= yesterday:
+            continue  # never stamped (fresh install), or it ran/skipped yesterday or today
+        rec = status.get(s["name"])
+        if isinstance(rec, dict) and str(rec.get("date") or "") >= yesterday:
+            continue  # already recorded (and so already told) for yesterday
+        out.append((s, last))
+    return out
+
+
+SLOT_STATUS_FILE = "slot-status.json"
+
+
+def _load_slot_status(state_dir: str) -> dict:
+    data = load_json(os.path.join(state_dir, SLOT_STATUS_FILE), {})
+    return data if isinstance(data, dict) else {}
+
+
+def _record_slot_status(state_dir: str, name: str, date: str, status: str, now_local: datetime,
+                        log=None, reason: str | None = None) -> None:
+    """Write `slot-status.json[name] = {date, status, at[, reason, notified]}` — the `ran` / `skipped`
+    distinction `slots.json`'s bare date cannot carry. A `skipped` row starts `notified: false`, which
+    is what `_flush_slot_skip_notices` looks for. **Never raises**: this is the audit trail beside the
+    stamp, and it must not cost the stamp (already written) or the scheduler tick."""
+    try:
+        data = _load_slot_status(state_dir)
+        rec = {"date": date, "status": status, "at": now_local.isoformat(timespec="seconds")}
+        if reason:
+            rec["reason"] = reason
+        if status == "skipped":
+            rec["notified"] = False
+        data[name] = rec
+        save_json(os.path.join(state_dir, SLOT_STATUS_FILE), data)
+    except Exception as e:  # noqa: BLE001
+        if log is not None:
+            log(f"! slot-status write failed for '{name}' ({status}): {e}")
+
+
+def slot_outcome(state_dir: str, name: str, date: str) -> str | None:
+    """What happened to slot `name` on local `date`: `"ran"`, `"skipped"`, or `None` (nothing recorded
+    — not due yet, still running, or the daemon never looked). A `slots.json` stamp with no matching
+    `slot-status.json` row (written before the status file existed, or the status write failed) returns `"stamped"`:
+    it fired OR was skipped, and there is no telling which — the exact ambiguity this file exists to end."""
+    rec = _load_slot_status(state_dir).get(name)
+    if isinstance(rec, dict) and rec.get("date") == date and rec.get("status") in ("ran", "skipped"):
+        return rec["status"]
+    fired = load_json(os.path.join(state_dir, "slots.json"), {})
+    if isinstance(fired, dict) and fired.get(name) == date:
+        return "stamped"
+    return None
+
+
+def slot_skip_notice_text(pending: list, today: str) -> str:
+    """ONE plain line naming every not-yet-told skip in `pending` (`[(name, record)]`) and saying it can
+    run late on request. Plain text on purpose — never a picker: running a skipped slot late is a
+    judgement the owner makes on reading it, not a decision the daemon is waiting on."""
+    rows = [(SLOT_LABELS.get(name, name), "today" if rec.get("date") == today else "yesterday",
+             rec.get("reason") or "skipped") for name, rec in pending]
+    if len(rows) == 1:
+        label, when, reason = rows[0]
+        return f"Heads up: {label} did not run {when} — {reason}. I can run it late if you want — just ask."
+    listed = "; ".join(f"{label} ({when} — {reason})" for label, when, reason in rows)
+    return f"Heads up, these did not run: {listed}. I can run any of them late — just ask."
+
+
+def _flush_slot_skip_notices(state_dir: str, log, now_local: datetime) -> None:
+    """Tell the owner about every `skipped` slot-status row not yet told, in one Telegram line through the
+    Mouth (`mouth.enqueue`, the durable queue).
+
+    **At most once per (slot, date)**: a row is marked `notified` only once the enqueue returned an item,
+    so a failed enqueue retries on the next loop instead of being stamped as told on the strength of a
+    message nobody got. Only today's and yesterday's rows are eligible — a stale row from a long outage
+    is history, not news. Called every tick from `maybe_run_slots`, which also covers a give-up
+    `reap_finished_slots` recorded on a tick with nothing else due. Never raises."""
+    try:
+        data = _load_slot_status(state_dir)
+        today = now_local.strftime("%Y-%m-%d")
+        yesterday = (now_local - timedelta(days=1)).strftime("%Y-%m-%d")
+        pending = [(n, r) for n, r in data.items()
+                   if isinstance(r, dict) and r.get("status") == "skipped" and r.get("notified") is False
+                   and r.get("date") in (today, yesterday)]
+        if not pending:
+            return
+        pending.sort(key=lambda nr: (str(nr[1].get("date")), str(nr[1].get("at"))))
+        item = mouth.enqueue(state_dir, surface="telegram", kind="nudge", speaker="daemon",
+                             text=slot_skip_notice_text(pending, today))
+        if item is None:
+            log("! slot skip notice could not be queued — retries next loop")
+            return
+        for _, rec in pending:
+            rec["notified"] = True
+        save_json(os.path.join(state_dir, SLOT_STATUS_FILE), data)
+        log(f"• slot skip notice queued: {', '.join(n for n, _ in pending)}")
+    except Exception as e:  # noqa: BLE001 — a notice must never take the scheduler tick down
+        log(f"! slot skip notice failed: {e}")
 
 
 def maybe_run_slots(state_dir: str, args, log, children: list | None = None,
@@ -3698,7 +4036,8 @@ def maybe_run_slots(state_dir: str, args, log, children: list | None = None,
     done-for-the-day and never retried, silently skipping (e.g.) the whole morning nudge batch. Instead
     the launched proc is registered in `slot_children`; `reap_finished_slots` stamps it only when it
     exits **0**, and on a non-zero exit leaves it unstamped so the next loop relaunches it — bounded by
-    the same catch-up window (`--slot-catchup-min`), after which `classify_slots` gives up and stamps it.
+    the same catch-up window (`--slot-catchup-min`), after which `classify_slots` gives up and stamps it
+    (a `CATCHUP_UNBOUNDED` slot has no such window; `SLOT_MAX_RETRIES` alone bounds it).
 
     **A slot on hold (`slot_hold_until`, set by `reap_finished_slots` on a failed exit) is skipped
     silently here**, exactly like a not-yet-due slot: the hold was already logged once, with its reason,
@@ -3710,7 +4049,13 @@ def maybe_run_slots(state_dir: str, args, log, children: list | None = None,
     reads and a scheduled slot's read burst hit the same bucket (~3 req/s on Notion), so overlapping
     them 429s.
     Chat is priority and is never delayed — only the slot waits (it stays unstamped and retries next
-    loop, exactly like the in-flight-headless case)."""
+    loop, exactly like the in-flight-headless case).
+
+    **A skip is never silent.** A slot routed to `too_late`, or one whose whole day went by
+    unrun (`missed_yesterday`), is recorded `skipped` in `slot-status.json` and told to the owner in one
+    Telegram line (`_flush_slot_skip_notices`) — once per (slot, date). A slot still RUNNING
+    (`slot_children`) is excluded from both: a Brief launched at 09:25 and still going at 09:31 is late,
+    not skipped, and used to be logged as skipped mid-run."""
     if args.no_slots or args.stub_brain or args.fake_inbox is not None:
         return
     if warm_busy:
@@ -3720,16 +4065,25 @@ def maybe_run_slots(state_dir: str, args, log, children: list | None = None,
     if not isinstance(fired, dict):
         fired = {}
     now_local = datetime.now()  # machine-local wall clock (assumed to match the owner's timezone)
-    to_run, too_late = classify_slots(SLOTS, now_local, fired, args.slot_catchup_min)
-    if not to_run and not too_late:
-        return
+    running = set(slot_children or ())
     today = now_local.strftime("%Y-%m-%d")
-    stamp = local_stamp()
-    changed = False
+    yesterday = (now_local - timedelta(days=1)).strftime("%Y-%m-%d")
+    idle_slots = [s for s in SLOTS if s["name"] not in running]
+    for s, last in missed_yesterday(idle_slots, now_local, fired, _load_slot_status(state_dir)):
+        log(f"• slot '{s['name']}' never ran on {yesterday} (last stamped {last})")
+        _record_slot_status(state_dir, s["name"], yesterday, "skipped", now_local, log,
+                            reason=f"no run or skip was recorded all day (last ran {last})")
+    to_run, too_late = classify_slots(idle_slots, now_local, fired, args.slot_catchup_min)
     for s in too_late:  # missed its window — stamp so it doesn't linger, but don't run
         fired[s["name"]] = today
-        changed = True
+        save_json(path, fired)  # the stamp first: the status row + notice ride on it, never replace it
         log(f"• slot '{s['name']}' skipped (past {s['at']} + {args.slot_catchup_min}m catch-up)")
+        _record_slot_status(state_dir, s["name"], today, "skipped", now_local, log,
+                            reason=f"past its {s['at']} + {args.slot_catchup_min}m catch-up window")
+    _flush_slot_skip_notices(state_dir, log, now_local)
+    if not to_run:
+        return
+    stamp = local_stamp()
     for s in to_run:
         if slot_hold_until is not None:
             hold = slot_hold_until.get(s["name"])
@@ -3760,6 +4114,7 @@ def maybe_run_slots(state_dir: str, args, log, children: list | None = None,
                                         stdout=log_fh, stderr=subprocess.STDOUT)
             finally:
                 log_fh.close()  # the child holds its own duplicated handle now — see _open_slot_log
+            proc.slot_date = today  # reap stamps THIS date, even if the run exits after midnight
             if children is not None:
                 children.append(proc)
             if slot_children is not None:
@@ -3767,8 +4122,6 @@ def maybe_run_slots(state_dir: str, args, log, children: list | None = None,
             log(f"• slot '{s['name']}' launched ({s['at']} local)")
         except Exception as e:  # noqa: BLE001
             log(f"! slot '{s['name']}' launch failed: {e}")
-    if changed:
-        save_json(path, fired)
 
 
 def _stamp_slot(state_dir: str, name: str, today: str) -> None:
@@ -3787,7 +4140,9 @@ def reap_finished_slots(slot_children: dict, state_dir: str, log, slot_retries: 
     """Stamp a slot done only once its `claude -p` run has actually **finished cleanly** (exit 0).
 
     Called at the top of each loop, before `maybe_run_slots` re-evaluates what's due. For every tracked
-    slot child that has exited: exit 0 → stamp `slots.json[name] = today` (done for the day); non-zero →
+    slot child that has exited: exit 0 → stamp `slots.json[name] = today` (done for the day — "today"
+    being the date it was LAUNCHED for, `proc.slot_date`) and record `ran` in `slot-status.json`,
+    while a give-up records `skipped` there, which the next tick tells the owner about; non-zero →
     leave it unstamped and log loudly, so the next loop relaunches it (a failed morning run retries
     instead of silently vanishing). Two independent backstops keep a persistently-broken slot from
     relaunching forever: `--slot-catchup-min` (once the slot is that far past its time, `classify_slots`
@@ -3818,14 +4173,20 @@ def reap_finished_slots(slot_children: dict, state_dir: str, log, slot_retries: 
     if slot_hold_until is None:
         slot_hold_until = {}
     now_local = now_local or datetime.now()
-    today = now_local.strftime("%Y-%m-%d")
     for name, proc in list(slot_children.items()):
         rc = proc.poll()
         if rc is None:
             continue  # still running
         del slot_children[name]
+        # The date the run was LAUNCHED for, not the date it exited on: a Daily Journal launched at
+        # 23:50 and finishing at 00:10 is yesterday's run — stamping it today would silently suppress
+        # today's. Falls back to the exit date for a proc launched without the attribute.
+        today = getattr(proc, "slot_date", None)
+        if not isinstance(today, str) or not today:
+            today = now_local.strftime("%Y-%m-%d")
         if rc == 0:
             _stamp_slot(state_dir, name, today)
+            _record_slot_status(state_dir, name, today, "ran", now_local, log)
             slot_retries.pop(name, None)
             slot_hold_until.pop(name, None)
             log(f"• slot '{name}' completed")
@@ -3842,6 +4203,9 @@ def reap_finished_slots(slot_children: dict, state_dir: str, log, slot_retries: 
             slot_retries.pop(name, None)
             slot_hold_until.pop(name, None)
             log(f"! slot '{name}' run failed (exit {rc}) {max_retries}x — giving up for today")
+            # A give-up is a skip too — `maybe_run_slots`'s next tick tells the owner (never silent).
+            _record_slot_status(state_dir, name, today, "skipped", now_local, log,
+                                reason=f"it failed {max_retries} times and I stopped retrying")
             continue
         reset_at = parse_slot_reset_time(_read_slot_log_tail(state_dir, name), now_local)
         if reset_at is not None:
@@ -3915,6 +4279,7 @@ def maybe_seed_day(state_dir: str, args, log, children: list | None = None,
                                     stdout=log_fh, stderr=subprocess.STDOUT)
         finally:
             log_fh.close()  # the child holds its own duplicated handle now — see _open_slot_log
+        proc.slot_date = today  # a seed that exits after midnight still stamps the day it seeded
         if children is not None:
             children.append(proc)
         if slot_children is not None:
@@ -4775,6 +5140,24 @@ def _edit_line(m: dict) -> str:
     return f'[the owner edited an earlier message to: "{body}"]'
 
 
+def reply_prefix(m: dict) -> str:
+    """The swipe-reply prefix for one inbound record, or "" when it isn't a reply.
+
+    `(replying to: "<parent head>")` identifies the message the owner answered; when they selected PART
+    of it and replied to that (`telegram_poll.extract_reply_selection` → `reply_quote`), the selection
+    rides in the same parenthesis: `(replying to: "<parent head>" — selected: "<the selection>")`. The
+    parent quote stays first and byte-identical to the no-selection shape, so the first `"…"` is still
+    the handle `watch_ack.py --replied-to` resolves, and a non-greedy `\\(replying to: ".*?"\\)` match
+    still strips the whole prefix (it stops at the selection's closing `")`)."""
+    reply_to = (m.get("reply_to") or "").strip()
+    if not reply_to:
+        return ""
+    selection = (m.get("reply_quote") or "").strip()
+    if selection:
+        return f'(replying to: "{reply_to}" — selected: "{selection}")'
+    return f'(replying to: "{reply_to}")'
+
+
 def plain_inbound_line(m: dict) -> str:
     """The message as the warm session reads it when nothing needs annotating: the owner's text, or a file descriptor,
     with any swipe-reply prefix. Shared by the ordinary inbound path and by the in-place edit
@@ -4782,10 +5165,10 @@ def plain_inbound_line(m: dict) -> str:
     line the original produced, or the queue would hold a differently-shaped message than the one it
     is replacing."""
     line = _attachment_or_text(m)
-    reply_to = (m.get("reply_to") or "").strip()
+    prefix = reply_prefix(m)
     # An empty line is dropped by telegram_task, so don't let a bare reply-prefix stand in for a message.
-    if reply_to and line:
-        return f'(replying to: "{reply_to}") {line}'
+    if prefix and line:
+        return f"{prefix} {line}"
     return line
 
 
@@ -4945,23 +5328,25 @@ def album_inbound_text(members: list) -> str:
     there is no second one to drift from it (the §1 argument the edit path already rests on)."""
     bodies = []
     for m in members:
-        stripped = {k: v for k, v in m.items() if k not in ("caption", "text", "reply_to")}
+        stripped = {k: v for k, v in m.items()
+                    if k not in ("caption", "text", "reply_to", "reply_quote")}
         body = _attachment_or_text(stripped)
         if body:
             bodies.append(body)
     if not bodies:
         return ""
     caption = ""
-    reply_to = ""
+    prefix = ""
     for m in members:
         if not caption:
             caption = (m.get("caption") or "").strip() or (m.get("text") or "").strip()
-        if not reply_to:
-            reply_to = (m.get("reply_to") or "").strip()
+        if not prefix:
+            # From the ONE member that carries the reply, so its selection can't pair with another's.
+            prefix = reply_prefix(m)
     head = (f"[album: {len(bodies)} attachments sent together as ONE message — "
             f"read them as one, answer once]")
-    if reply_to:
-        head = f'(replying to: "{reply_to}") {head}'
+    if prefix:
+        head = f"{prefix} {head}"
     parts = [head] + bodies + ([caption] if caption else [])
     return "\n".join(parts)
 
@@ -6399,15 +6784,20 @@ async def drainer_task(state: DaemonState, args, log, make_session, idle_sec: fl
                           session_id=getattr(state.session, "session_id", None))
         state.session_busy = True
         _push_cockpit_status(state, args)  # push AFTER flipping busy, so this snapshot says in-flight
+        backstop, backstop_task = None, None
         try:
             # The send blocks a worker thread on the child's stdout until this turn's result event —
             # the event loop stays free, so reminders/polls/controls keep running underneath.
             on_event = _make_stream_tee(state, args, log, channel, turn_id)
+            # The outside backstop (hung-turn-deadline-spec.md): every event beats it on
+            # the way to the tee, and a watcher on the event loop kills the child if none arrives for
+            # its deadline — which, floored at 2x the gap, means the idle-gap watchdog has failed.
+            backstop, backstop_task = arm_turn_backstop(state, args, log, turn_id)
             # `cold_retry_text` is passed ONLY on a resumed spawn — it's the grounding to fall back to
             # if the resume doesn't take, and it means nothing otherwise. Keeping it off the common
             # path also keeps `send(text, on_event=...)` the whole interface a session type has to
             # implement, which several test doubles rely on.
-            send_kwargs = {"on_event": on_event}
+            send_kwargs = {"on_event": backstop.wrap(on_event)}
             if cold_prompt is not None:
                 send_kwargs["cold_retry_text"] = cold_prompt
             # Phase 2: a thin wrapper over session.send() that also owns the interrupt-and-continue
@@ -6416,6 +6806,10 @@ async def drainer_task(state: DaemonState, args, log, make_session, idle_sec: fl
             # for why that makes this call byte-for-outcome-identical to the plain send() it replaces.
             reply, folded = await interleave_live_send(state, args, log, prompt, send_kwargs)
         finally:
+            # First, before anything that could raise: the turn is over, so the backstop stands down.
+            # This cancel is what keeps it off a turn the idle-gap watchdog already ended.
+            if backstop_task is not None:
+                backstop_task.cancel()
             state.session_busy = False
             # Phase 0: close the turn window and write the resolution row for every verdict that
             # landed inside it. In the `finally` so every way out of the send — a reply, a dead
@@ -6432,8 +6826,16 @@ async def drainer_task(state: DaemonState, args, log, make_session, idle_sec: fl
         # test double and the stub implement `send` and not much else.
         timed_out = reply is None and bool(getattr(state.session, "timed_out", False))
         timed_out_gap = getattr(state.session, "turn_gap_sec", TURN_IDLE_GAP_SEC)
+        # The backstop's kill is a timeout too — the same notice, reason and kept-queued path — but
+        # one the inner watchdog never reported, so its own deadline is the silence the owner was told of.
+        # Only when the watchdog did NOT fire: if both somehow did, the watchdog's reading stands.
+        by_backstop = reply is None and not timed_out and backstop is not None and backstop.fired
+        if by_backstop:
+            timed_out, timed_out_gap = True, backstop.deadline_sec
         if reply is None:  # session died/errored — reset and apologize
-            log(f"! warm session {'hung and was killed' if timed_out else 'died'} mid-turn "
+            how = ("hung and was killed by the TURN BACKSTOP" if by_backstop
+                   else "hung and was killed" if timed_out else "died")
+            log(f"! warm session {how} mid-turn "
                 f"({_session_vitals(state.session)})")
             _end_session(state, args, log,                      # neither is resumable, deliberately
                          RESPAWN_TURN_TIMEOUT if timed_out else RESPAWN_TURN_ERROR)
@@ -6542,10 +6944,13 @@ async def drainer_task(state: DaemonState, args, log, make_session, idle_sec: fl
                 retry_ask = channel_declare.retry_prompt(missing_channel=missing_channel,
                                                          missing_marker=missing_marker)
                 state.session_busy = True
+                c_backstop, c_task = arm_turn_backstop(state, args, log, turn_id)
                 try:
                     corrective = await asyncio.to_thread(
-                        functools.partial(state.session.send, retry_ask, on_event=on_event))
+                        functools.partial(state.session.send, retry_ask,
+                                          on_event=c_backstop.wrap(on_event)))
                 finally:
+                    c_task.cancel()
                     state.session_busy = False
                 if corrective is None:
                     # The channel-check itself hung or died — fail open, stop retrying. `reply` (the
@@ -6935,7 +7340,7 @@ def _cockpit_inbox_text(it: dict) -> str:
     text = (it.get("text") or "").strip()
     if not text:
         return ""
-    if it.get("force_fable") and not strip_force_fable(text)[0] and not is_status_command(text):
+    if it.get("force_fable") and strip_force_route(text)[0] is None and not is_status_command(text):
         text = f"{FORCE_FABLE_TRIGGER} {text}".strip()
     return text
 
@@ -7080,11 +7485,12 @@ async def cockpit_task(state: DaemonState, args, log) -> None:
         # v3: `force_fable` (the composer's "Send to Fable" toggle) now ACTUALLY forces — synthesized as
         # the SAME `!fable` prefix Telegram/Discord force-route on, so `_enqueue_inbound`'s single
         # detection path (`apply_force_route`) handles all three channels uniformly. A guard avoids a
-        # double prefix if the owner also typed `!fable` themselves with the toggle on.
+        # double prefix if the owner also typed `!fable` — or any other force-route prefix, which then
+        # wins over the toggle — themselves with the toggle on.
         # `!status` is a daemon command, never a prompt — don't let a left-on "Send to Fable" toggle
         # turn it into `!fable !status` and spend a Fable delegation asking a model to guess at the
         # daemon's own vitals.
-        if frame.get("force_fable") and not strip_force_fable(text)[0] and not is_status_command(text):
+        if frame.get("force_fable") and strip_force_route(text)[0] is None and not is_status_command(text):
             text = f"{FORCE_FABLE_TRIGGER} {text}".strip()
         await _enqueue_inbound(state, args, log, [("cockpit", text, 0)])
 

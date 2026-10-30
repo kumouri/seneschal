@@ -279,7 +279,14 @@ literal text you supplied.
 
 **⑦ Reply parameters, both directions.**
 Inbound, `extract_reply_to` keeps a truncated **text descriptor** of a swipe-reply and discards
-`message_id` and any thread id. That field is a free, exact, zero-friction thread selector — one
+`message_id` and any thread id. **It also keeps the selection of a partial-quote reply** — select
+part of a message, then Reply — which Telegram delivers as `message.quote` (`text`, `position`,
+`is_manual`): `extract_reply_selection` passes a manual quote's `text` through verbatim as
+`reply_quote` and the warm session reads `(replying to: "<parent head>" — selected: "<the
+selection>")`. `position` is not carried (a UTF-16 offset means nothing to a reader) and a
+server-added quote is not a selection. A reply to a message in another chat or topic
+(`external_reply`) gets a descriptor too — the server-added quote's text when there is one.
+`message_id` is still discarded. That field is a free, exact, zero-friction thread selector — one
 swipe, never leaving the chat — and it is the prerequisite for ⑤ and the precise override for ①.
 Outbound, **the assistant has never sent a reply at all**: `ReplyParameters` (7.0) offers `quote` (an
 exact substring of the parent — *"The message will fail to send if the quote isn't found in the

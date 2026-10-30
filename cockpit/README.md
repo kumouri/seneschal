@@ -75,7 +75,8 @@ cockpit/
       MealsPanel.tsx   the health/workout/meal panel group
     src/components/ArchonsPanel.tsx, ArchonRestartButton.tsx   the archon tile row (labelled by each
       entry's REAL status) + the confirm-gated per-site Restart button
-    src/components/JobsPanel.tsx   durable background jobs — read-only, alarms only on an undelivered push
+    src/components/JobsPanel.tsx   durable background jobs — read-only over the jobs, alarms only on an undelivered
+                                   push; its one write is the caps control (jobCaps.ts)
     src/components/TracePanel.tsx   the session trace — a collapsible section under the chat pane,
       NOT a grid tile (see "Trace panel" below)
     src/components/DocStatusPanel.tsx   the Open-specs ledger tile (derived, read-only)
@@ -218,6 +219,7 @@ session in `oidc` mode or `COCKPIT_DEV_NO_AUTH=1` in dev mode (mode precedence: 
 | `GET /presence` | `state/presence-context.json` | Passthrough (`at_place`/`activity`/`asleep`/`since`). |
 | `GET /reminders` | `state/reminders.json` | Summarized: pending count + next 5 by `due_at`. |
 | `GET /jobs?limit=N&tail_lines=M` | `state/jobs/*.json` + `*.log` | Durable background jobs: everything running (never truncated) + the last N finished, each with a short log tail; `awaiting_push` counts terminal jobs whose completion push hasn't landed. Missing dir -> `{"available": false}`. Read-only — there is no cancel route (`jobs.py cancel` is a decision, not a click). |
+| `GET /job-caps`, `POST /job-caps` | `state/job-caps.json` + a `jobs.py caps --json` subprocess for the live count | The two concurrency caps, the owner's to set. The POST (auth + CSRF, audited) writes through the same `job_caps.save` the CLI uses; a rejected pair 400s and is never clamped; lowering a cap cancels nothing. |
 | `GET /jobs/{job_id}` | `state/jobs/<id>.json` + `.log` | One job with a longer log tail; the id is validated against a strict alphabet before any filesystem access. |
 | `GET /usage` | `state/metrics.jsonl` | Best-effort turns/tokens per day/model. Always `"estimated": true` (`tokens_available` tells the UI whether the schema carried tokens). |
 | `GET /status` | daemon pipe (live) or `state/sessions/*.json` (fallback) | Once at least one `status` frame has arrived over the pipe, this returns that live snapshot (turn-in-flight, model, queue depth) — either way, honestly labeled `"pipe": "up"\|"down"`. The backend sends a `status.get` **on every pipe connect** (the daemon only pushes status when its own state changes, so an idle daemon would otherwise never volunteer one and the fallback would stick while the pipe read "up"). The fallback is about the DAEMON being silent, never about the warm session being down — only the live frame can say `session_up: false`. |
@@ -350,7 +352,14 @@ than silently failing.
   running jobs and any finished job without a landed push are never collapsible, and the predicate is
   a positive proof of "safe to hide", so an unexpected field shape fails toward showing too much.
 - **No cancel button, by decision.** Cancelling is `jobs.py cancel` — a decision, not a dashboard
-  click. This panel observes only.
+  click. The panel observes the jobs; **its one write is the caps control** at the top: *"N of M agent
+  jobs in flight"*, two number inputs (soft per session, hard total) and Save, through
+  `GET`/`POST /api/job-caps`. It cannot touch a running job — lowering a cap cancels nothing, which the
+  hint under the inputs says every time. `jobCaps.ts` + `jobCaps.test.ts`.
+- **What each job runs on** (`background-jobs-spec.md` §3.16): `subscription · harness · model` under
+  the row, a **non-LLM** badge, and a dashed **LLM?** badge for a job the classifier could not place.
+  All of it comes off the `runtime` stamp `jobs.py` wrote at start; a record without one shows `—`.
+  `jobRuntime.ts` + `jobRuntime.test.ts`.
 - The **Status** panel additionally shows `jobs_active` off the pipe's status frame, since background
   jobs outlive the warm session: "no warm session" must not read as "nothing running". It also shows
   the Notion write-behind outbox (`outbox_pending` / `outbox_dead` / `outbox_oldest_sec`; Notion

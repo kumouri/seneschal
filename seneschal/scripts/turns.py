@@ -117,7 +117,10 @@ _append_lock = threading.Lock()
 # space because `presence.py`'s notice is always `[the owner reacted {emoji} …]`, never a bare
 # `[the owner reacted]`. Matching more loosely than the thing that writes it is how this pattern
 # reaches the owner's words.
-_SYSTEM_MARKER_RE = re.compile(r"^\s*\[(job finished|the owner reacted |attachment:|force-fable)", re.I)
+# `force-route <alias>:` is `presence.force_route_directive` (!opus48, !glm, !gpt…); `force-fable` stays
+# its own alternative because `!fable`'s directive is unchanged.
+_SYSTEM_MARKER_RE = re.compile(
+    r"^\s*\[(job finished|the owner reacted |attachment:|force-fable|force-route [a-z0-9]+:)", re.I)
 
 # `[attachment: document "notes.pdf" saved to <state>/inbox/x.pdf] the caption here`
 # and its two failure variants, all built by `presence._attachment_or_text`.
@@ -289,8 +292,8 @@ def read_turns(state_dir: str | None = None, limit: int | None = None,
 # something.** `_SYSTEM_MARKER_RE` answers "did the owner COMPOSE this?", and for a 👍 or a dropped
 # photo the honest answer is no. `awake_since` asks a different question — "was the owner holding
 # their phone?" — and there the answer is yes: a reaction and an attachment are both the owner's
-# thumb on the screen, just as a picker tap (origin `human`) is. `[job finished:` and `[force-fable`
-# are the daemon talking to itself on the owner's channel and are deliberately NOT here. Same
+# thumb on the screen, just as a picker tap (origin `human`) is. `[job finished:`, `[force-fable` and
+# `[force-route` are the daemon talking to itself on the owner's channel and are deliberately NOT here. Same
 # exact-producer rule as the pattern above: each alternative matches what `presence.py` writes.
 _PRESENCE_MARKER_RE = re.compile(r"^\s*\[(the owner reacted |attachment:)", re.I)
 

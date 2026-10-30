@@ -120,7 +120,7 @@ USAGE:
 
 Prints a one-line JSON result:
   {ok, count, messages:[{update_id,kind,message_id,chat_id,chat_type,from,text,date,caption?,
-                         attachment?,reply_to?,edit_date?,callback_id?,data?,
+                         attachment?,reply_to?,reply_quote?,edit_date?,callback_id?,data?,
                          message_thread_id?,is_topic_message?,media_group_id?}], next_offset}
 where `kind` is "message" | "edit" | "reaction" | "callback" and `attachment` is
 {kind,file_name,mime_type,file_size,local_path?,too_large?,error?,file_id?,refetchable?}.
@@ -181,6 +181,12 @@ UNSUPPORTED_KINDS = ("location", "venue", "contact", "poll", "dice")
 # How much of a swipe-replied-to message we quote back. Enough to identify it, not enough to crowd out
 # the actual reply.
 REPLY_QUOTE_CHARS = 300
+# How much of a PARTIAL-QUOTE reply's selection we pass through (select part of a message, then Reply —
+# `message.quote`). Deliberately generous and separate from REPLY_QUOTE_CHARS: the parent head above only
+# has to identify the message, but the selection IS what the owner is answering, so it goes through verbatim.
+# 4096 is Telegram's own message-length ceiling, so no selection of a real message can reach it; the cap
+# exists only so a malformed payload cannot flood the line.
+REPLY_SELECTION_CHARS = 4096
 # The Bot API's getFile download ceiling. Bigger files simply cannot come down this path — see
 # the "drop it on the machine" branch in fetch_attachment().
 FILE_LIMIT_BYTES = 20 * 1024 * 1024
@@ -325,16 +331,42 @@ def resolve_text(msg: dict) -> str:
     return text if text else (describe_unsupported(msg) or "")
 
 
+def _quote_text(msg: dict, *, manual: bool) -> str:
+    """`message.quote.text`, stripped, when the quote's `is_manual` matches `manual`; else empty.
+
+    `is_manual` is documented as *"True, if the quote was chosen manually by the message sender.
+    Otherwise, the quote was added automatically by the server"* — absent, not false, in the automatic
+    case, so it is compared with `is True` (the same shape `is_topic_message` gets in main())."""
+    quote = msg.get("quote")
+    if not isinstance(quote, dict):
+        return ""
+    if (quote.get("is_manual") is True) != manual:
+        return ""
+    text = quote.get("text")
+    return text.strip() if isinstance(text, str) else ""
+
+
 def extract_reply_to(msg: dict) -> str | None:
     """A short descriptor of the message the owner swipe-replied to, or None.
 
     Telegram hands us the whole quoted message; we keep just enough to identify which one it was. A
     quoted *attachment* has no text of its own, so it gets a synthesized descriptor rather than
-    disappearing into an empty quote."""
+    disappearing into an empty quote.
+
+    A reply to a message in ANOTHER chat or topic arrives as `external_reply` instead of
+    `reply_to_message` (Bot API 7.0). `ExternalReplyInfo` carries no text of its own — only media
+    fields — so its text, when there is any, comes from a server-added (non-manual) `quote`; a manual
+    one is the owner's selection and belongs to `extract_reply_selection`, not here."""
     parent = msg.get("reply_to_message")
-    if not isinstance(parent, dict):
-        return None
-    quoted = (parent.get("text") or parent.get("caption") or "").strip()
+    if isinstance(parent, dict):
+        quoted = (parent.get("text") or parent.get("caption") or "").strip()
+        fallback = "an earlier message"
+    else:
+        parent = msg.get("external_reply")
+        if not isinstance(parent, dict):
+            return None
+        quoted = _quote_text(msg, manual=False)
+        fallback = "a message in another chat or topic"
     if not quoted:
         media = extract_media(parent)
         if media:
@@ -342,10 +374,35 @@ def extract_reply_to(msg: dict) -> str | None:
             name = safe_filename(media.get("file_name"), "")
             quoted = f'a {media["kind"]}' + (f" named {name}" if name else "")
         else:
-            quoted = "an earlier message"
+            quoted = fallback
     if len(quoted) > REPLY_QUOTE_CHARS:
         quoted = quoted[:REPLY_QUOTE_CHARS].rstrip() + "…"
     return quoted
+
+
+def extract_reply_selection(msg: dict) -> str | None:
+    """The part of the parent the owner SELECTED before replying (a partial-quote reply), or None.
+
+    Telegram lets the owner highlight one sentence of a message and Reply to just that; the update then
+    carries `message.quote` = `{text, position, is_manual}`. `extract_reply_to` only ever sees the
+    parent's whole text cut to its first REPLY_QUOTE_CHARS, so without this a reply to one sentence
+    read as a reply to the whole message — and a sentence past char 300 never reached the assistant.
+
+    Only a MANUAL quote is a selection. A server-added one (`is_manual` absent) is a snapshot of the
+    parent, not something the owner chose, so it is not reported as one here. Kept verbatim (ends stripped)
+    up to REPLY_SELECTION_CHARS. A selection identical to the whole parent adds nothing and is dropped;
+    `position` is not carried — the text is the referent, and a UTF-16 offset means nothing to a reader."""
+    selected = _quote_text(msg, manual=True)
+    if not selected:
+        return None
+    parent = msg.get("reply_to_message")
+    if isinstance(parent, dict):
+        whole = (parent.get("text") or parent.get("caption") or "").strip()
+        if whole and selected == whole:
+            return None
+    if len(selected) > REPLY_SELECTION_CHARS:
+        selected = selected[:REPLY_SELECTION_CHARS].rstrip() + "…"
+    return selected
 
 
 def extract_thread_id(msg: dict):
@@ -825,6 +882,12 @@ def main() -> int:
         reply_to = extract_reply_to(msg)
         if reply_to:
             item["reply_to"] = reply_to
+            # Additive, and only alongside `reply_to`: the part of it the owner selected, when they replied to
+            # a selection rather than the whole message. `reply_to` itself is unchanged by it, so
+            # anything that resolves the parent by that quote (watch_ack.py --replied-to) still does.
+            selection = extract_reply_selection(msg)
+            if selection:
+                item["reply_quote"] = selection
         thread_id = extract_thread_id(msg)
         if thread_id is not None:
             item["message_thread_id"] = thread_id

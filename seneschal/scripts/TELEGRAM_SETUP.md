@@ -329,8 +329,10 @@ routing a tap back into the warm session arrives with the daemon's inbound wirin
 `telegram_ask.py resolve` is the door.)
 
 > **Slash commands (`/status` and friends) are not built.** The bot's directives use a `!` prefix
-> (`!status`, `!fable`, `!private`), and whether slash commands should sit *beside* those or *replace*
-> them is an open decision, not a detail — so it was left out rather than guessed at (§6b.8).
+> (`!status`, `!fable`, `!private`, and the other force-route targets — `!opus48`, `!glm`, `!gpt54`,
+> `!gpt56sol`, `!gpt6astra`, `!gpt6sol`, `!gpt61sol`; `python seneschal/scripts/model_delegate.py --list`
+> prints them with each one's verification status), and whether slash commands should sit *beside*
+> those or *replace* them is an open decision, not a detail — so it was left out rather than guessed at (§6b.8).
 
 To send one by hand:
 

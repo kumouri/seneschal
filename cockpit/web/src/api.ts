@@ -10,6 +10,7 @@ import type {
   GovernorConfigResponse,
   HealthResponse,
   HealthSummaryResponse,
+  JobCapsResponse,
   JobDetailResponse,
   JobsResponse,
   SeneschaldHealthResponse,
@@ -117,6 +118,16 @@ export const getMeals = () => request<MealsResponse>('/meals')
 
 // Jobs panel (seneschal/docs/background-jobs-spec.md) — read-only; no cancel/start bindings by design.
 export const getJobs = (limit = 40) => request<JobsResponse>(`/jobs?limit=${limit}`)
+
+/** The two concurrency caps + the live agent-job count (the values are the owner's to set). The POST
+ *  goes through the same writer as `jobs.py caps set`; lowering a cap cancels nothing. */
+export const getJobCaps = () => request<JobCapsResponse>('/job-caps')
+export const postJobCaps = (softPerSession: number, hardGlobal: number) =>
+  request<JobCapsResponse>('/job-caps', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ soft_per_session: softPerSession, hard_global: hardGlobal }),
+  })
 export const getJob = (jobId: string, tailLines = 60) =>
   request<JobDetailResponse>(`/jobs/${encodeURIComponent(jobId)}?tail_lines=${tailLines}`)
 

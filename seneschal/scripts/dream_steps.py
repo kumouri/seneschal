@@ -101,6 +101,10 @@ STEPS = {
     # 2 days, not 14 (the register's own dormancy window): the whole point is catching a gate the
     # DAY it is met, not weeks later when its evidence may be stale. See observation_gate.py.
     "2i": {"label": "observation-gate scan", "owner": "observation_gate.py", "max_age_days": 2},
+    # 7 days: an unparseable ⏰ Cadence already fails open (due every day), so a lint that stops
+    # running costs a missing one-tap fix, never a missed reminder. `reminders_cadence_lint.py`.
+    "2k": {"label": "reminder cadence lint", "owner": "reminders_cadence_lint.py",
+           "max_age_days": 7},
     "rollup": {"label": "salience rollup (weekly)", "owner": "salience_rollup.py",
                "max_age_days": 21},
 }

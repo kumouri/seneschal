@@ -80,8 +80,23 @@ and breaks no row. Converting a select-typed ``Cadence`` property to free text (
 expressions become *typeable*) is an optional later step with no data migration, because the strings
 survive verbatim; run ``--audit`` first. Runbook: ``seneschal/docs/reminder-cadence-mechanism-spec.md``.
 
+## Free text, enforced in code
+
+A free-text ``Cadence`` field (always so on the filesystem backends; on Notion once the select is
+retyped) checks nothing — a select at least checked spelling, and the first time a reminder needs a
+value nobody enumerated (``3 per week``, stepping up to 4, 5, 6) is the moment it would be typed by
+hand. Two rails replace the select:
+
+* **Canonicalize on write** — :func:`canonical_text` / ``--canonical``. Every ``Cadence`` value the
+  assistant writes goes through it first; it prints the one write spelling
+  (:meth:`Cadence.write_spelling`) or exits 2 with the parser's message, and **a refusal is never
+  written**. Legacy options are their own write spelling, so no live row changes.
+* **Lint nightly** — ``reminders_cadence_lint.py``, a Dream step: one Telegram picker per row whose
+  value still does not parse, recommending :func:`suggest`'s fix.
+
 Usage::
 
+  python reminders_cadence.py --canonical "3x/week"      # -> 3 per week   (exit 2 on a refusal)
   python reminders_cadence.py --parse "every 11 days"
   python reminders_cadence.py --gaps "2 per week"
   python reminders_cadence.py --due "2 per week" --last-ack 2026-08-31 --today 2026-09-03
@@ -117,6 +132,10 @@ Invariants worth knowing before an edit:
   through ``tz_common`` when a caller omits it, with a machine-local fallback.)
 * ``--audit`` IS THE MIGRATION PRE-FLIGHT: it parses every live row out of the id cache and EXITS 1 IF
   ANY FAIL, and it should run before a ``Cadence`` store property is retyped.
+* ``--canonical`` IS THE WRITE GATE: on a free-text property nothing but this checks a value before it
+  lands. :func:`suggest` only ever returns a spelling that itself canonicalizes — a repair the parser
+  would refuse is not a fix — and its word/typo vocabulary is repair-only: :func:`parse` never reads
+  it, so "twice a week" stays a finding rather than becoming a second accepted spelling.
 """
 from __future__ import annotations
 
@@ -180,6 +199,11 @@ ONE_OFF = "one-off"
 
 SHAPES = (DAILY, WEEKDAYS, INTERVAL, RATE, WEEKLY, MULTIPLE, ONE_OFF)
 
+#: The write spelling of the five magnitude-free shapes — exactly the select's own option names, so
+#: canonicalizing a legacy value is the identity. See :meth:`Cadence.write_spelling`.
+_WRITE_SPELLINGS = {DAILY: "Daily", WEEKDAYS: "Weekdays", WEEKLY: "Weekly",
+                    MULTIPLE: "Multiple/day", ONE_OFF: "One-off"}
+
 
 class CadenceError(ValueError):
     """An expression this grammar refuses. The message is written to be shown to the owner verbatim —
@@ -219,13 +243,29 @@ class Cadence:
                 "canonical": self.canonical()}
 
     def canonical(self) -> str:
-        """The one spelling this module would write. Round-trips through :func:`parse`."""
+        """The lower-case machine spelling the JSON outputs carry. Round-trips through :func:`parse`.
+        **Not what gets written to the store** — that is :meth:`write_spelling`."""
         if self.shape == INTERVAL:
             return "every %d days" % self.n
         if self.shape == RATE:
             return "%d per %d days" % (self.n, self.d)
         return {DAILY: "daily", WEEKDAYS: "weekdays", WEEKLY: "weekly",
                 MULTIPLE: "multiple/day", ONE_OFF: "one-off"}[self.shape]
+
+    def write_spelling(self) -> str:
+        """The ONE spelling a ⏰ ``Cadence`` value is written in.
+
+        It is the house style the select always held, so **every legacy option is its own write
+        spelling** — ``Daily`` stays ``Daily``, ``Every 4 days`` stays ``Every 4 days`` — and no live
+        row changes when this starts being enforced. An interval nobody enumerated follows the same
+        family (``Every 11 days``); a rate over a week says ``week`` (``3 per week``), any other period
+        says its days (``3 per 10 days``). Round-trips through :func:`parse` to an equal :class:`Cadence`."""
+        if self.shape == INTERVAL:
+            return "Every %d days" % self.n
+        if self.shape == RATE:
+            return ("%d per week" % self.n if self.d == 7
+                    else "%d per %d days" % (self.n, self.d))
+        return _WRITE_SPELLINGS[self.shape]
 
 
 def _owner_today() -> date:
@@ -274,7 +314,11 @@ def next_rate_day(n: int, d: int, after: date) -> date:
 
 _WS_RE = re.compile(r"\s+")
 _INTERVAL_RE = re.compile(r"^every\s+(?P<num>\d+(?:\.\d+)?)\s*(?:days?|d)$")
-_RATE_RE = re.compile(r"^(?P<num>\d+(?:\.\d+)?)\s*(?:per|/|x)\s*(?P<period>.+)$")
+#: The rate separator. ``per`` / ``/`` / ``x`` since phase 1; also the forms a
+#: free-text property invites — ``3x/week``, ``3x per week``, ``3 times a week`` — which only WIDEN
+#: what parses: nothing that parsed before reads differently.
+_RATE_RE = re.compile(r"^(?P<num>\d+(?:\.\d+)?)\s*"
+                      r"(?:(?:x|times?)\s*(?:per\b|/|an?\b)?|per\b|/)\s*(?P<period>.+)$")
 _PERIOD_NUM_RE = re.compile(r"^(?P<num>\d+(?:\.\d+)?)\s*(?:days?|d)?$")
 
 #: Whole-string synonyms for the five magnitude-free shapes. Kept deliberately short: this is a
@@ -292,6 +336,7 @@ _LITERALS = {
 #: Named periods for a rate. ``day`` is deliberately ABSENT — "3 per day" is intraday and belongs to
 #: ``Multiple/day`` + ``Times``; :func:`_period_days` refuses it by name rather than by arithmetic.
 _PERIODS = {"week": 7, "wk": 7, "fortnight": 14, "month": 30, "year": 365}
+
 
 
 def _normalize(text) -> str:
@@ -414,6 +459,89 @@ def try_parse(text):
         return None
 
 
+def canonical_text(text) -> str:
+    """CANONICALIZE ON WRITE: the spelling a ⏰ ``Cadence`` value is written in, or
+    :class:`CadenceError` — whose message is the parser's own, naming the spelling that works.
+
+    **Every write of a ``Cadence`` value goes through this first, and a refusal is never written.**
+    On a free-text ``Cadence`` field no select checks spelling; this does, and it checks meaning
+    too. ``3x/week``, ``3/week`` and ``3 per 7`` all come back ``3 per week``; a
+    legacy option comes back as itself."""
+    return parse(text).write_spelling()
+
+
+#: Word forms :func:`suggest` repairs. **A repair vocabulary, not grammar** — :func:`parse` never
+#: reads these, so "twice a week" stays unparseable in the store (and gets asked about) rather than
+#: quietly becoming a second accepted spelling.
+_WORD_NUMBERS = {"once": "1x", "twice": "2x", "thrice": "3x", "one": "1", "two": "2", "three": "3",
+                 "four": "4", "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9",
+                 "ten": "10"}
+_REPAIR_VOCAB = ("every", "day", "days", "week", "weeks", "weekly", "daily", "weekdays", "weekday",
+                 "per", "times", "fortnight", "month", "year", "multiple", "once", "twice")
+
+
+def _repair(s: str) -> str:
+    """A normalized, unparseable string with the obvious slips mended: a misspelt keyword
+    (``evrey`` -> ``every``, closest match at >= 0.8), a word number, ``every other day``."""
+    import difflib  # only the lint's repair path pays for it
+    words = []
+    for tok in s.split(" "):
+        if tok and not tok[0].isdigit() and tok not in _REPAIR_VOCAB:
+            close = difflib.get_close_matches(tok, _REPAIR_VOCAB, n=1, cutoff=0.8)
+            tok = close[0] if close else tok
+        words.append(_WORD_NUMBERS.get(tok, tok))
+    out = " ".join(words)
+    # "once a week" is `weekly`, not `1 per week` — the two differ on a late ack (§4 of the spec),
+    # and the plain phrase means the one the select always offered.
+    out = re.sub(r"^1x (?:a|per|every) (day|week)$",
+                 lambda m: "daily" if m.group(1) == "day" else "weekly", out)
+    return re.sub(r"\bevery other (day|week)\b",
+                  lambda m: "every 2 days" if m.group(1) == "day" else "every 14 days", out)
+
+
+def suggest(text):
+    """The fix the assistant would recommend for a ``Cadence`` value, in its write spelling — or ``None``
+    when no spelling says what the value seems to mean. Never raises.
+
+    A value that parses suggests its own write spelling. A fractional interval suggests the rate
+    :func:`parse`'s refusal names (``every 3.5 days`` -> ``2 per week``); anything denser than daily
+    suggests ``Multiple/day`` (which also needs ``Times`` set). Otherwise one :func:`_repair` pass,
+    and only a repair that then PARSES is offered — a guess the parser refuses is not a fix."""
+    try:
+        return canonical_text(text)
+    except CadenceError:
+        pass
+    s = _normalize(text)
+    if not s:
+        return None
+    m = _INTERVAL_RE.match(s)
+    if m:
+        val = _as_fraction(m.group("num"))
+        if val.denominator != 1 and val > 0:
+            spelling = _rate_spelling(val)
+            return canonical_text(spelling) if spelling else _WRITE_SPELLINGS[MULTIPLE]
+        return None  # `every 0 days`: no cadence is implied
+    m = _RATE_RE.match(s)
+    if m:
+        cnt = _as_fraction(m.group("num"))
+        period = m.group("period").strip()
+        if cnt.denominator == 1 and cnt >= 1:
+            if period in ("day", "days", "d"):
+                return _WRITE_SPELLINGS[MULTIPLE]
+            try:
+                if int(cnt) > _period_days(period, text):
+                    return _WRITE_SPELLINGS[MULTIPLE]
+            except CadenceError:
+                pass
+    repaired = _repair(s)
+    if repaired != s:
+        try:
+            return canonical_text(repaired)
+        except CadenceError:
+            return None
+    return None
+
+
 def is_multi_fire(text) -> bool:
     """Does this cadence fire many times a day?
 
@@ -516,6 +644,12 @@ def id_cache_cadences(state_dir: str = DEFAULT_STATE_DIR) -> list:
 
     This is the **migration pre-flight**: run ``--audit`` on the daemon's checkout to prove every
     live row parses BEFORE anyone retypes the store property. Total — an absent cache is ``[]``."""
+    return [(r["title"], r["cadence"]) for r in id_cache_rows(state_dir)]
+
+
+def id_cache_rows(state_dir: str = DEFAULT_STATE_DIR) -> list:
+    """:func:`id_cache_cadences` with the page id kept: ``[{"title", "id", "cadence"}]``, the id
+    normalized to 32 hex. The nightly lint keys its once-per-value rule on the id."""
     rows = []
     try:
         with open(os.path.join(state_dir, ID_CACHE_FILE), "r", encoding="utf-8") as fh:
@@ -528,11 +662,12 @@ def id_cache_cadences(state_dir: str = DEFAULT_STATE_DIR) -> list:
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
         if len(cells) < 5:
             continue
-        if not _HEX32_RE.match(cells[1].strip("`").replace("-", "").lower()):
+        page_id = cells[1].strip("`").replace("-", "").lower()
+        if not _HEX32_RE.match(page_id):
             continue
         title = cells[0].strip("`* ")
         if title:
-            rows.append((title, cells[4]))
+            rows.append({"title": title, "id": page_id, "cadence": cells[4]})
     return rows
 
 
@@ -563,6 +698,9 @@ def _as_date(s):
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="⏰ cadence — parse, spread, and test due-ness.")
     ap.add_argument("--parse", metavar="CADENCE", help="parse one expression and print it")
+    ap.add_argument("--canonical", metavar="CADENCE",
+                    help="print the spelling to WRITE to the store (plain text), exit 0; exit 2 with "
+                         "the parser's message on a value that must not be written")
     ap.add_argument("--gaps", metavar="CADENCE", help="print a rate's even-spread gap sequence")
     ap.add_argument("--due", metavar="CADENCE", help="is a row with this cadence due?")
     ap.add_argument("--last-ack", help="Last Acknowledged, YYYY-MM-DD")
@@ -579,6 +717,17 @@ def main(argv=None) -> int:
                     help="with --audit: read one cadence per line from stdin instead")
     ap.add_argument("--state-dir", default=DEFAULT_STATE_DIR)
     args = ap.parse_args(argv)
+
+    if args.canonical is not None:
+        try:
+            print(canonical_text(args.canonical))
+            return 0
+        except CadenceError as exc:
+            print("! %s" % exc, file=sys.stderr)
+            fix = suggest(args.canonical)
+            if fix:
+                print("! suggested fix, if it says what was meant: %r" % fix, file=sys.stderr)
+            return 2
 
     try:
         if args.parse:

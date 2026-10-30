@@ -22,7 +22,8 @@ answers exactly what the old `..HEAD` form answered; the difference exists only 
   a **synthetic new-file hunk appended for every untracked file** matching the pathspecs, in git's
   own `--- /dev/null` / `+++ b/<path>` / `+line` shape, so a caller's existing `+`-line parser reads
   it unchanged. Bytes are decoded as UTF-8 with replacement — the callers scan prose for words, and
-  a `text=True` handle would use the platform's legacy code page on Windows.
+  a `text=True` handle would use the platform's legacy code page on Windows. It is the WHOLE `-U0`
+  diff, `-` lines included: `check_rulings.py` reads them to tell a verbatim move from new text.
 * `working_tree_paths(root, *pathspecs)` — `git ls-files` ∪ `git ls-files --others
   --exclude-standard`: every path that will be tracked once the author commits what is in front of
   them. A tree-scanning gate that enumerates `git ls-files` alone reads an un-added `test_x.py` as

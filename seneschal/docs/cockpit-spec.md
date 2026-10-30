@@ -547,9 +547,27 @@ on every terminal state. This surfaces the same ledger, read-only.
   is deliberately not counted.
 - **`available: false` ≠ empty.** A missing `state/jobs/` dir ("I can't see jobs at all") and a
   present-but-empty one ("nothing has run lately") are different facts and get different empty states.
-- **Read-only, by decision — there is no cancel button.** Cancelling is `jobs.py cancel`; a dashboard
-  button would make killing in-flight work a one-click accident. The panel observes; the daemon and the
-  CLI act.
+- **Read-only over the JOBS, by decision — there is no cancel button.** Cancelling is `jobs.py cancel`;
+  a dashboard button would make killing in-flight work a one-click accident. The panel observes; the
+  daemon and the CLI act. **Its one write is the caps control**, which sets numbers and by
+  construction cannot touch a running job (below).
+- **The caps control** (`background-jobs-spec.md` §3.12): one block at the top of the panel, not a grid
+  tile. It shows *"N of M agent jobs in flight"* with two number inputs (soft per session, hard total)
+  and Save. `GET /api/job-caps` serves the values, their bounds (`limits`, so the browser keeps no copy
+  of them) and the live count. `POST /api/job-caps` (auth + CSRF, audited as `job_caps.update`) writes
+  through **the same `job_caps.save` (`seneschal/scripts/job_caps.py`) the CLI uses**, loaded by file
+  path (`cockpit/server/caps_control.py`) — on `doc_status.py`'s argument: same checkout, no commit
+  skew, and a second validator would be the drift the no-third-copy rule exists to prevent. The count
+  is `jobs.py caps --json` run as a subprocess (cached ~10 s, no console window), because only
+  `jobs.py`'s own liveness-checked, agent-only `concurrency()` gives the number a `start` is judged
+  against. If it cannot be had, the panel shows *unknown*, never 0. A rejected pair 400s and is never
+  clamped; a non-integer 422s. The hint under the inputs always says that **lowering a cap below what
+  is running cancels nothing**.
+- **What each job runs on** (`background-jobs-spec.md` §3.16). `jobs.py` stamps a `runtime` block at
+  start; the backend serves it field by field (`_runtime`, absent → `null`) and never derives it.
+  Under each row: `subscription · harness · model` (`main · claude-cli · default`), or `—` for a
+  record that predates the stamp, with a **non-LLM** badge and a distinct dashed **LLM?** badge for a
+  job the classifier could not place (which the caps count). `jobRuntime.ts` + `jobRuntime.test.ts`.
 - **`jobs_active` rides the pipe `status` frame** so the Status panel can say "no warm session · 2
   background jobs" — background jobs outlive the session by design, so "no session" must not read as
   "nothing running". Optional field — an older daemon omits it and the UI omits the clause rather than

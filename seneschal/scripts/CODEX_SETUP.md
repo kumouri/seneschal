@@ -87,6 +87,10 @@ immediately via Apply now — never mid-turn.
 
 ## Notes
 
+- **The `!gpt…` force-route targets use this same login** (`model_delegate.py`) but NOT this file's
+  config: they run `codex exec --ignore-user-config --sandbox read-only`, so the store grant in step 2
+  never reaches a force-routed turn. Only step 1 (the login) matters for them.
+
 - **Billing safety**: `backends/codex_cli.py`'s child env scrubs `OPENAI_API_KEY` from every codex
   spawn, mirroring the daemon's own `ANTHROPIC_API_KEY` scrub — a stray key in your shell environment
   can never silently switch this backend to metered API billing.

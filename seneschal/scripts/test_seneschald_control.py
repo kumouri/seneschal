@@ -21,7 +21,8 @@ silent-green. The health stamp is what turns that into an audible block; these t
 **Nothing here can reach a real daemon or scheduled task.** Every throwaway repo carries its own state
 dir with the deliberate-stop sentinel (`seneschald-stopped`) already dropped, so the presence-down arm's
 auto-revive is always vetoed (`deliberately-stopped`) and never calls `Start-ScheduledTask` on the
-host's real `seneschald` task. `request_control.py` resolves its default state dir from its own (copied)
+host's real `seneschald` task. Independently, `_run_update` sets `SENESCHALD_TASK_NAME` to a task that
+cannot exist, so even a case that lifts the veto (to exercise the revive path) aims at nothing. `request_control.py` resolves its default state dir from its own (copied)
 location, so a queued restart lands in the throwaway repo too.
 """
 from __future__ import annotations
@@ -43,6 +44,9 @@ import tmproot  # noqa: E402  — rmtree that clears git's read-only objects (se
 PWSH = shutil.which("pwsh")
 GIT = shutil.which("git")
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+# A scheduled task that cannot exist, so a revive attempt fails fast instead of starting the real
+# daemon (see _run_update). seneschald-control.ps1 reads it from SENESCHALD_TASK_NAME.
+FAKE_TASK_NAME = "seneschald-test-task-that-does-not-exist"
 
 
 def _pwsh_responsive() -> bool:
@@ -189,6 +193,10 @@ class SeneschaldControlUpdateTest(unittest.TestCase):
         env = dict(os.environ)
         if extra_env:
             env.update(extra_env)
+        # Set AFTER extra_env so no case can opt back into the real task. Every Update with no fresh
+        # lock takes the revive path, and without this that path calls Start-ScheduledTask on the LIVE
+        # `seneschald` task of whatever host runs the suite.
+        env["SENESCHALD_TASK_NAME"] = FAKE_TASK_NAME
         return subprocess.run(
             [PWSH, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, "-Action", "Update"],
             cwd=repo, env=env, capture_output=True, text=True, timeout=180,
@@ -402,6 +410,20 @@ class SeneschaldControlUpdateTest(unittest.TestCase):
         self.assertEqual(self._sync_args(repo), "sync --frozen --extra cockpit")
         self.assertFalse(os.path.exists(os.path.join(repo, "seneschal", "state", "seneschald-health.json")),
                          "dot-sourcing must not run Update")
+
+    def test_a_lockless_update_never_starts_the_real_seneschald_task(self):
+        """No lock reads as a dead daemon, so this cycle MUST take the revive path — and the revive must
+        aim at the throwaway task, never the live one. The log line proves both halves: the attempt
+        happened, and it failed on the fake name."""
+        repo = self._make_repo()
+        state = os.path.join(repo, "seneschal", "state")
+        self.assertFalse(os.path.exists(os.path.join(state, "presence.lock")))
+        # Lift the harness's own veto, so the second guard — the fake task name — is the one tested.
+        os.remove(os.path.join(state, "seneschald-stopped"))
+        self._run_update(repo)
+        log = self._log(repo)
+        self.assertIn("presence: DOWN", log)
+        self.assertIn(f"revive: FAILED to start the task '{FAKE_TASK_NAME}'", log)
 
     # ------------------------------------------------- the credential guard (seneschald-revive-spec.md §9)
     #

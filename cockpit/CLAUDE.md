@@ -32,7 +32,8 @@ stdlib-only — survives a broken venv/daemon/backend; `assertion.py` is the one
 runs it yet, so the README's "Running it locally" steps start the backend.
 
 The panel decisions a future edit could silently undo, which is why they are here rather than only
-in the spec: the **Jobs panel is read-only with NO cancel route BY DECISION**; it alarms only on
+in the spec: the **Jobs panel has NO cancel route BY DECISION** — its one write is the caps control,
+which sets numbers and cannot touch a running job; it alarms only on
 `awaiting_push` (a finished job whose completion push never landed); running jobs are never
 truncated by `limit` and finished ones sort by when they ENDED; and `outbox_*` renders **only when
 non-zero** (Notion backend only — filesystem backends have no outbox).
@@ -74,7 +75,9 @@ the difference is not an inconsistency.** `jobs.py` reimplements because it pars
 daemon on a different commit may have written. Here the parser and the documents ship in the SAME
 commit — the backend is reading the checkout it runs from — so there is no skew to tolerate, and a
 duplicated parser would be exactly the second source of truth the ledger exists to abolish. The
-import is guarded: unreachable parser → `available: false` with a reason.
+import is guarded: unreachable parser → `available: false` with a reason. `caps_control.py` loads
+`seneschal/scripts/job_caps.py` the same way, for the same reason, **by file path** —
+`seneschal/scripts/` on `sys.path` would shadow this package's own `jobs`/`governor`.
 
 **A panel that measures its own width uses a `@container` query, never `@media`.** A viewport
 breakpoint never fires on a wide desktop while the panel's actual container is narrow, and the

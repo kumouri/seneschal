@@ -9,7 +9,8 @@ Every route under /api except /api/health and /api/auth/status is gated behind `
 COCKPIT_DEV_NO_AUTH=1 dev stub, else 503 (see `auth.auth_mode`'s precedence). Every mutating route
 ALSO depends on `require_csrf` (a no-op outside real-auth mode). The writes in this app are the
 daemon restart enqueue, the per-archon-site restart enqueue (`POST /api/archons/{id}/restart`, below),
-the model-config PUT (v3), the governor-config PUT (v3.5), their audit-log lines (control.py), the
+the model-config PUT (v3), the governor-config PUT (v3.5), the job-caps POST (caps_control.py — the
+Jobs panel's one write; it still has no cancel route), their audit-log lines (control.py), the
 chat-fallback inbox append (_append_inbox_fallback, below), and — v5 — the session/pending-login
 cookies auth.py's login/callback/logout routes set — everything else is a tolerant read over
 `seneschal/state/*` (readers.py, transcript.py, governor.py, archons.py, trace.py) or the docs tree
@@ -95,10 +96,12 @@ from typing import Any, Optional
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictInt
 
 from . import archons as archons_mod
-from . import auth, control, emotes, governor, health, jobs, model_config, oidc, readers, transcript
+from . import (
+    auth, caps_control, control, emotes, governor, health, jobs, model_config, oidc, readers, transcript,
+)
 from . import doc_status, trace
 from . import session as session_mod
 from .auth import require_auth
@@ -299,6 +302,40 @@ def api_job(job_id: str, tail_lines: int = jobs.DEFAULT_DETAIL_LINES):
     """One job with a longer log tail. The id arrives from the URL, so `jobs.read_job` validates it
     against a strict alphabet before touching the filesystem (the path-traversal guard)."""
     return jobs.read_job(get_state_dir(), job_id, tail_lines)
+
+
+class JobCapsUpdate(BaseModel):
+    soft_per_session: StrictInt  # "3", 3.0 and true are refused (422), never coerced
+    hard_global: StrictInt
+
+
+@app.get("/api/job-caps", dependencies=[Depends(require_auth)])
+def api_get_job_caps():
+    """The two concurrency caps in force, their bounds (`limits`, so the browser keeps no copy of
+    them — ruling 3), and the live agent-job count measured by `jobs.py caps --json` itself, so the
+    number shown is the one a `start` is judged against. Not under `/api/jobs/` — that prefix is the
+    per-job route's `{job_id}`. Tolerant: an unloadable writer is `available: false`; a failed count
+    is `in_flight: null` with `count_error`."""
+    return caps_control.read_caps(get_state_dir())
+
+
+@app.post("/api/job-caps", dependencies=[Depends(require_auth), Depends(require_csrf)])
+def api_post_job_caps(body: JobCapsUpdate):
+    """Set the caps through the SAME writer `jobs.py caps set` uses (`save` in
+    `seneschal/scripts/job_caps.py`, atomic). A pair it rejects — soft < 1, hard < soft, hard above the
+    ceiling — 400s and writes nothing; it is never clamped. Lowering a cap below the live count cancels
+    nothing. Audited like every other mutating route."""
+    state_dir = get_state_dir()
+    try:
+        data = caps_control.save_caps(state_dir, body.soft_per_session, body.hard_global)
+    except caps_control.CapsUnavailable as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    control.append_audit(state_dir, "job_caps.update", {
+        "soft_per_session": data["soft_per_session"], "hard_global": data["hard_global"],
+    })
+    return data
 
 
 @app.get("/api/presence", dependencies=[Depends(require_auth)])

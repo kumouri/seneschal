@@ -880,7 +880,10 @@ class NoSecondClassifierTest(SweepCase):
 
     def test_the_quiet_window_is_the_guards_predicate_not_a_second_copy(self):
         src = source("pr_sweep.py")
-        self.assertIn("mg.in_quiet_hours", src)
+        # `mg.quiet_window`: the window + awake override as ONE helper, which `pr_repair` calls too,
+        # so the two watchers cannot drift apart on what "hold it" means.
+        self.assertIn("mg.quiet_window", src)
+        self.assertNotIn("mg.awake_evidence", src)
         self.assertNotIn("CURFEW", src)
 
     def test_module_scope_imports_only_stdlib_and_siblings(self):

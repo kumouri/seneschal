@@ -141,6 +141,17 @@ On a Dream run:
    unnoticed (a gate met weeks before anyone saw it), and a `stale` row means the data being waited on
    may no longer be relevant. Never touches a row that isn't `observation`, never closes an item,
    idempotent — a night with nothing to flip is a night with nothing to report.
+2k. **Lint the ⏰ cadences (act-low; asks, never writes — `docs/reminder-cadence-mechanism-spec.md`
+   §7.5).** A free-text `Cadence` can hold a typo. Read every active ⏰ row with **the Reminders SEED's
+   own active-rows query** (`subagents/reminders/SKILL.md` — the same data source, widened to every row
+   whose `Status` is not `Finished`; a data read, never a schema fetch), write `[{"id", "title",
+   "cadence"}]` to a scratch file **outside the repo**, then `python scripts/reminders_cadence_lint.py
+   --rows-json <file>`. If the store can't be read tonight, run it with no `--rows-json` — it reads
+   `state/reminders-id-cache.md` instead — and say which source it used. It sends one picker per
+   unparseable row (at most once per distinct value per 7 days) and stamps `dream_steps.py` step `2k`
+   itself. **Put every `asked` and `errors` row in tonight's Run Log entry**; a non-zero exit is
+   reported, never retried, and never blocks the rest of Dream. Answering a tap is the warm session's
+   job: `references/reminders-policy.md` → "Writing a Cadence".
 2b. **Refresh the semantic index (act-low, local — Retrieval advisor phase B).** Incrementally update the
    local RAG index so tomorrow's retrieval has today's history. Fetch journal/notes entries
    new-or-changed since the last index **from the store** (`store-query`/`store-search` the journal &

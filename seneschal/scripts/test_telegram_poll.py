@@ -14,7 +14,11 @@ as an empty message and was dropped before it ever reached the warm session. Wha
 No network: getFile/download are stubbed. Run:
   python -m unittest seneschal.scripts.test_telegram_poll   (or)   python test_telegram_poll.py
 """
+import contextlib
+import io
+import json
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -192,6 +196,142 @@ class ExtractReplyTo(unittest.TestCase):
 
     def test_malformed_parent_is_ignored(self):
         self.assertIsNone(tp.extract_reply_to({"text": "hi", "reply_to_message": "not-a-dict"}))
+
+
+class ExtractReplySelection(unittest.TestCase):
+    """A partial-quote reply — the owner selected part of a message and replied to THAT."""
+
+    PARENT = ("Three things landed today. The PR merged. The printer is idle. "
+              "And the therapist digest went out at 06:02.")
+
+    def _reply(self, **quote):
+        return {"text": "wait, which PR?", "reply_to_message": {"text": self.PARENT},
+                **({"quote": quote} if quote else {})}
+
+    def test_manual_quote_is_the_selection_verbatim(self):
+        msg = self._reply(text="The PR merged.", position=26, is_manual=True)
+        self.assertEqual(tp.extract_reply_selection(msg), "The PR merged.")
+        # The parent handle is untouched by it — the referent stays findable.
+        self.assertEqual(tp.extract_reply_to(msg), self.PARENT)
+
+    def test_no_quote_means_no_selection(self):
+        self.assertIsNone(tp.extract_reply_selection(self._reply()))
+        self.assertIsNone(tp.extract_reply_selection({"text": "hi"}))
+
+    def test_server_added_quote_is_not_a_selection(self):
+        """`is_manual` absent (or anything but True) = the server added it; the owner chose nothing."""
+        self.assertIsNone(tp.extract_reply_selection(self._reply(text="The PR merged.", position=26)))
+        self.assertIsNone(tp.extract_reply_selection(
+            self._reply(text="The PR merged.", position=26, is_manual=False)))
+        self.assertIsNone(tp.extract_reply_selection(
+            self._reply(text="The PR merged.", position=26, is_manual="true")))
+
+    def test_selection_past_the_parent_head_cap_still_arrives(self):
+        """The whole point: a sentence beyond REPLY_QUOTE_CHARS used to never reach the assistant at all."""
+        tail = "the one sentence the owner actually meant"
+        msg = {"text": "this", "reply_to_message": {"text": "x" * 500 + " " + tail},
+               "quote": {"text": tail, "position": 501, "is_manual": True}}
+        self.assertNotIn(tail, tp.extract_reply_to(msg))
+        self.assertEqual(tp.extract_reply_selection(msg), tail)
+
+    def test_selection_is_not_cut_at_the_parent_cap(self):
+        long_sel = "y" * (tp.REPLY_QUOTE_CHARS * 3)
+        msg = {"text": "k", "reply_to_message": {"text": long_sel + " and more"},
+               "quote": {"text": long_sel, "position": 0, "is_manual": True}}
+        self.assertEqual(tp.extract_reply_selection(msg), long_sel)
+
+    def test_runaway_selection_is_capped_with_an_ellipsis(self):
+        msg = {"text": "k", "reply_to_message": {"text": "p"},
+               "quote": {"text": "z" * (tp.REPLY_SELECTION_CHARS + 50), "is_manual": True}}
+        sel = tp.extract_reply_selection(msg)
+        self.assertEqual(len(sel), tp.REPLY_SELECTION_CHARS + 1)
+        self.assertTrue(sel.endswith("…"))
+
+    def test_selecting_the_whole_parent_adds_nothing(self):
+        msg = self._reply(text=self.PARENT, position=0, is_manual=True)
+        self.assertIsNone(tp.extract_reply_selection(msg))
+
+    def test_selection_on_a_media_parent(self):
+        """A captioned photo: the owner selects part of the CAPTION; the parent is still identified."""
+        msg = {"text": "this bit", "reply_to_message": {
+                   "photo": [{"file_id": "f", "file_unique_id": "u", "file_size": 1}],
+                   "caption": "the print plate before the second layer"},
+               "quote": {"text": "second layer", "position": 27, "is_manual": True}}
+        self.assertEqual(tp.extract_reply_to(msg), "the print plate before the second layer")
+        self.assertEqual(tp.extract_reply_selection(msg), "second layer")
+
+    def test_malformed_quote_is_ignored(self):
+        for quote in ("not-a-dict", {"is_manual": True}, {"text": 7, "is_manual": True},
+                      {"text": "   ", "is_manual": True}):
+            msg = {"text": "k", "reply_to_message": {"text": "p"}, "quote": quote}
+            self.assertIsNone(tp.extract_reply_selection(msg), quote)
+
+
+class ExternalReply(unittest.TestCase):
+    """A reply to a message in another chat or TOPIC arrives as `external_reply`, not
+    `reply_to_message` — it used to carry no reply context at all."""
+
+    def test_external_reply_with_a_manual_quote(self):
+        msg = {"text": "yes, that one", "external_reply": {"message_id": 3, "chat": {"id": 555}},
+               "quote": {"text": "Merge #891?", "position": 0, "is_manual": True}}
+        self.assertEqual(tp.extract_reply_to(msg), "a message in another chat or topic")
+        self.assertEqual(tp.extract_reply_selection(msg), "Merge #891?")
+
+    def test_external_reply_server_quote_becomes_the_parent_head(self):
+        msg = {"text": "ok", "external_reply": {"message_id": 3},
+               "quote": {"text": "Merge #891? CI is green.", "position": 0}}
+        self.assertEqual(tp.extract_reply_to(msg), "Merge #891? CI is green.")
+        self.assertIsNone(tp.extract_reply_selection(msg))
+
+    def test_external_reply_to_media_is_described(self):
+        msg = {"text": "?", "external_reply": {
+            "document": {"file_id": "f", "file_unique_id": "u", "file_name": "notes.pdf"}}}
+        self.assertEqual(tp.extract_reply_to(msg), "a document named notes.pdf")
+
+    def test_same_chat_reply_wins_over_external(self):
+        msg = {"text": "?", "reply_to_message": {"text": "here"}, "external_reply": {"message_id": 3}}
+        self.assertEqual(tp.extract_reply_to(msg), "here")
+
+
+class ReplySelectionThroughMain(unittest.TestCase):
+    """`main()` end to end, wire mocked: the selection rides out as `reply_quote`, additively."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def _run(self, message):
+        argv = ["telegram_poll.py", "--offset-file", os.path.join(self.dir, "telegram-offset"),
+                "--custom-emoji-cache", os.path.join(self.dir, "custom-emoji-cache.json")]
+        out = io.StringIO()
+        # `clear=True` so a real TELEGRAM_ALLOWED_CHAT_IDS on the host can't change the verdict, and
+        # `get_updates` mocked so nothing here can reach the wire the live daemon is holding.
+        with mock.patch.object(tp, "get_updates", return_value=[{"update_id": 1, "message": message}]), \
+                mock.patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "not-a-real-token"}, clear=True), \
+                mock.patch.object(sys, "argv", argv), \
+                contextlib.redirect_stdout(out):
+            tp.main()
+        return json.loads(out.getvalue().strip().splitlines()[-1])["messages"][0]
+
+    def _message(self, **over):
+        base = {"message_id": 9, "chat": {"id": 555, "type": "private"}, "from": {"username": "c"},
+                "date": 1, "text": "which PR?",
+                "reply_to_message": {"text": "The PR merged. Printer idle."}}
+        base.update(over)
+        return base
+
+    def test_selection_present(self):
+        item = self._run(self._message(quote={"text": "The PR merged.", "position": 0,
+                                              "is_manual": True}))
+        self.assertEqual(item["reply_to"], "The PR merged. Printer idle.")
+        self.assertEqual(item["reply_quote"], "The PR merged.")
+
+    def test_selection_absent_serializes_as_before(self):
+        self.assertNotIn("reply_quote", self._run(self._message()))
+
+    def test_server_quote_is_not_carried(self):
+        self.assertNotIn("reply_quote", self._run(self._message(
+            quote={"text": "The PR merged.", "position": 0})))
 
 
 class SafeFilename(unittest.TestCase):
@@ -384,6 +524,30 @@ class ReplyContextInLine(unittest.TestCase):
         self.assertTrue(line.startswith('(replying to: "a document named notes.pdf")'))
         self.assertIn("/s/p.jpg", line)
         self.assertTrue(line.endswith("this one"))
+
+    def test_selection_rides_inside_the_reply_prefix(self):
+        line = pr.telegram_inbound_text({"text": "which PR?",
+                                         "reply_to": "The PR merged. Printer idle.",
+                                         "reply_quote": "The PR merged."})
+        self.assertEqual(
+            line, '(replying to: "The PR merged. Printer idle." — selected: "The PR merged.") which PR?')
+
+    def test_selection_without_a_parent_is_not_rendered(self):
+        """`reply_quote` only ever rides alongside `reply_to`; alone it has no referent to hang on."""
+        self.assertEqual(pr.telegram_inbound_text({"text": "hm", "reply_quote": "x"}), "hm")
+
+    def test_selection_on_a_media_parent_line(self):
+        line = pr.telegram_inbound_text({"text": "this bit", "reply_to": "a photo",
+                                         "reply_quote": "second layer"})
+        self.assertEqual(line, '(replying to: "a photo" — selected: "second layer") this bit')
+
+    def test_a_partial_quote_reply_on_an_album_rides_once_with_its_own_selection(self):
+        photo = lambda n: {"text": "", "attachment": {"kind": "photo", "local_path": f"/s/{n}.jpg"}}
+        members = [photo(1), dict(photo(2), reply_to="want me to send it?", reply_quote="send it")]
+        line = pr.album_inbound_text(members)
+        self.assertTrue(line.startswith(
+            '(replying to: "want me to send it?" — selected: "send it") [album:'))
+        self.assertEqual(line.count("send it"), 2)  # once in the head, once as the selection
 
     def test_bare_reply_to_an_empty_message_stays_empty(self):
         """telegram_task drops empty lines; a prefix must not resurrect a message with no content."""

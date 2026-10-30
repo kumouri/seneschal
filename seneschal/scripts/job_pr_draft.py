@@ -20,7 +20,12 @@ reliably; this is code.
 - :func:`list_running_worktree_branches` — every branch a currently-RUNNING `--worktree` job has
   checked out, `{branch: job_id}`. A PR sweeper calls :func:`inflight_job_for` against this map and
   skips a matching PR exactly as it skips a draft — before ever asking about it, repairing it or
-  rebasing it.
+  rebasing it. A worktree stopped mid-rebase counts as on the branch being rebased
+  (:func:`_rebasing_branch`).
+- :func:`list_pr_owners` — every PR a currently-ACTIVE job says it is working on, `{pr: {"job_id",
+  "via"}}`: its structured `prs` list (`jobs.py start --pr N`), else any `#N` in its title/goal.
+  `pr_repair.py` will not repair or rebase a PR one of these owns (§5A.10), whether or not the job has
+  checked the branch out yet.
 - :func:`draft_and_record` — the first time an in-flight PR is seen still open (not yet a draft),
   convert it (`gh pr ready --undo`) and record the conversion in the ONE store this module owns,
   `state/job-drafted-prs.json`, keyed `job_id` so the record survives past the git worktree being torn
@@ -44,6 +49,7 @@ completion push) and retried on the next pass — never silently swallowed into 
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -147,7 +153,15 @@ def list_running_worktree_branches(state_dir: str, *, runner=None, jobs_lister=N
 def _current_branch(path: str, *, runner) -> str | None:
     """The checked-out branch name, or `None` on detached HEAD or any read failure — a freshly-created
     job worktree is detached until the agent runs its own `checkout -b` (`job_worktree.py`'s own
-    docstring), so `None` here is common and not an error."""
+    docstring), so `None` here is common and not an error.
+
+    **A rebase in progress is NOT a detached worktree for this question**: `git rebase`
+    detaches HEAD for its whole run, and a rebase that stops on a conflict stays detached for as long
+    as the agent takes to resolve it. A job has sat mid-rebase of a feature
+    branch for under a minute, and the watcher's pass inside that minute read `HEAD`, saw no owner,
+    and launched a repair job onto the same branch. So on a detached HEAD the
+    branch the rebase will write back (`rebase-merge/head-name`, or `rebase-apply/head-name` for the
+    `am` backend) is the answer."""
     argv = ["git", "-C", path, "rev-parse", "--abbrev-ref", "HEAD"]
     try:
         code, out, _err = runner(argv)
@@ -156,7 +170,95 @@ def _current_branch(path: str, *, runner) -> str | None:
     if code != 0:
         return None
     name = (out or "").strip()
-    return None if name in ("", "HEAD") else name
+    if name == "HEAD":
+        return _rebasing_branch(path, runner=runner)
+    return name or None
+
+
+def _rebasing_branch(path: str, *, runner) -> str | None:
+    """The branch an in-progress rebase in `path` is rewriting, or `None` (no rebase, or any failure).
+    `--git-path` resolves the per-worktree git dir, which for a linked worktree is not `path/.git`."""
+    argv = ["git", "-C", path, "rev-parse", "--git-path", "rebase-merge",
+            "--git-path", "rebase-apply"]
+    try:
+        code, out, _err = runner(argv)
+    except Exception:  # noqa: BLE001
+        return None
+    if code != 0:
+        return None
+    for line in (out or "").splitlines():
+        d = line.strip()
+        if not d:
+            continue
+        if not os.path.isabs(d):
+            d = os.path.join(path, d)
+        try:
+            with open(os.path.join(d, "head-name"), encoding="utf-8") as fh:
+                ref = fh.read().strip()
+        except OSError:
+            continue
+        if ref.startswith("refs/heads/") and len(ref) > len("refs/heads/"):
+            return ref[len("refs/heads/"):]
+    return None
+
+
+#: `#N` in a title or goal — the fallback ownership signal for a job that never stamped `prs`.
+#: Not preceded by a word character or `&` (an HTML entity), so `C#9` and `&#8212;` never match.
+_PR_REF = re.compile(r"(?<![\w&])#(\d{1,6})\b")
+
+
+def list_pr_owners(state_dir: str, *, jobs_lister=None) -> dict:
+    """`{pr_number: {"job_id", "via"}}` for every ACTIVE job that says it is working on a PR —
+    `../docs/concurrent-pr-collisions-spec.md` §5A.10. The PR watcher reads this before it launches a
+    repair or a server-side rebase, because a branch checkout is not the only way a job owns a PR:
+    a job asked to rebase #880, #881 and #882 in turn has, while it worked on #880, had the
+    watcher launch a repair of #881 that it then had to overwrite.
+
+    Two signals, in order, per job:
+
+    - **`via: "prs"`** — the record's structured `prs` list (`jobs.py start --pr N`). When present it
+      is the whole answer for that job: a job that said which PRs it owns is not second-guessed from
+      its prose.
+    - **`via: "title"`** — otherwise, every `#N` in the job's `title` or `origin.goal`. A brief that
+      forgot `--pr` is exactly the prose-convention-that-does-not-bind shape
+      (`countermeasure-binding-spec.md`), so the prose is still read. A false match only holds the
+      watcher off that PR until the job ends — the safe direction.
+
+    Lowest job id wins a PR claimed twice (the older job was there first). Fail-open to `{}`, the same
+    polarity as :func:`list_running_worktree_branches`."""
+    if not state_dir:
+        return {}
+    try:
+        if jobs_lister is None:
+            import jobs as _jobs
+            jobs_lister = lambda sd: _jobs.list_jobs(sd, active_only=True)
+        records = jobs_lister(state_dir) or []
+    except Exception:  # noqa: BLE001 — see the module docstring's failure polarity
+        return {}
+    out = {}
+    for rec in sorted((r for r in records if isinstance(r, dict)), key=lambda r: str(r.get("id"))):
+        job_id = rec.get("id")
+        if not isinstance(job_id, str) or not job_id.strip():
+            continue
+        claimed, via = _structured_prs(rec.get("prs")), "prs"
+        if claimed is None:
+            origin = rec.get("origin") if isinstance(rec.get("origin"), dict) else {}
+            text = f"{rec.get('title') or ''}\n{origin.get('goal') or ''}"
+            claimed, via = {int(m) for m in _PR_REF.findall(text)}, "title"
+        for pr in claimed:
+            if pr > 0 and pr not in out:
+                out[pr] = {"job_id": job_id, "via": via}
+    return out
+
+
+def _structured_prs(value):
+    """The record's `prs` as a set of ints, or `None` when the record carries no usable list — `None`
+    and `set()` differ on purpose: an explicit empty list is not a stamp (`jobs.normalize_prs` never
+    writes one), so it falls through to the title read like a missing key."""
+    if not isinstance(value, list):
+        return None
+    got = {v for v in value if isinstance(v, int) and not isinstance(v, bool) and v > 0}
+    return got or None
 
 
 def inflight_job_for(row: dict, branches: dict) -> str | None:

@@ -34,8 +34,8 @@ specs and carry no status.
   supervised tasks under one `asyncio.gather`, each behind `_supervise`; the loop as deployed.
 - `how-to-add-a-daemon-task.md` — REFERENCE — the explicit gather-and-`_supervise` mechanism, the
   steps, and what not to do.
-- `hung-turn-deadline-spec.md` — **BUILT(P1, P2; P3 is deliberately nothing)** — a hang is a gap between
-  stream events, never a cap.
+- `hung-turn-deadline-spec.md` — **BUILT(P1, P2, the outside backstop; P3 is deliberately nothing)** — a
+  hang is a gap between stream events, never a cap; a 30-minute backstop catches a failed watchdog.
 - `seneschald-revive-spec.md` — **PARTIAL(watchdog side BUILT; the presence.py halves of §8/§9
   pending)** — revives a dead daemon; §9 catches it alive on the wrong account.
 - `stacked-pr-branch-deletion-spec.md` — **BUILT** — deleting a branch used to close every PR stacked
@@ -79,8 +79,8 @@ specs and carry no status.
 
 ## Background work
 
-- `background-jobs-spec.md` — **PARTIAL(BUILT + §3.7-§3.14)** — exactly-once completion push;
-  concurrency capped 3 soft / 5 hard, agent jobs only; §3.13 detect/resume/rescue for a job that
+- `background-jobs-spec.md` — **PARTIAL(BUILT + §3.7-§3.16)** — exactly-once completion push;
+  concurrency capped 3 soft / 5 hard (owner-settable), agent jobs only; `--account` per job; §3.13 detect/resume/rescue for a job that
   exits 0 unfinished; §3.14 a `PreToolUse` hook (`job_background_guard.py`) refusing the
   backgrounded-Bash call that causes it, before it runs.
 - `job-origin-routing-spec.md` — **PARTIAL(phases 0-3,5 BUILT)** — a wrong attribution is worse than
@@ -133,7 +133,7 @@ specs and carry no status.
   in code and validated, independent of the byte cap.
 - `context-budget-collisions-spec.md` — **PARTIAL(phase 1 BUILT; `--enforce-chain` unwired; the
   phase-2 rechain helper not in this tree)** — chain-continuity for the one ledger every PR edits.
-- `concurrent-pr-collisions-spec.md` — **PARTIAL(phase 1, 2R, 2b-as-a-job, 2a's detection + §5B BUILT, run by the daemon's PR watch; phase 1.5 and 2a's report unbuilt)** — a
+- `concurrent-pr-collisions-spec.md` — **PARTIAL(phase 1, 2R, 2b-as-a-job, 2a's detection + §5B + §5A.10 BUILT, run by the daemon's PR watch; phase 1.5 and 2a's report unbuilt)** — a
   picker names which other open PR shares its files; the daemon rebases BEHIND PRs and repairs
   ledger and Markdown conflicts, keeping both sides (§5A.9); a PR a still-running job opened is a
   draft until that job ends (§5B, `job_pr_draft.py`).
@@ -181,8 +181,8 @@ specs and carry no status.
   owner register with no screener tools; `push_call.py --talk` builds the context snapshot; P2
   inbound owner-call auth decided (caller ID + spoken passphrase) but unbuilt; P3-P4 unbuilt)** — a
   live voice conversation with the assistant, Worker-brained, not a relay to the home daemon.
-- `reminder-cadence-mechanism-spec.md` — **PARTIAL(phase 1 BUILT)** — a cadence is an expression, not
-  an enumerable list.
+- `reminder-cadence-mechanism-spec.md` — **PARTIAL(phase 1 + phase 2's code rails BUILT)** — a cadence is
+  an expression, not an enumerable list; written only in its canonical spelling, linted nightly.
 - `reminder-exact-time-scheduling-spec.md` — **BUILT** — reminders fire at arbitrary per-reminder
   times.
 - `reminder-premise-spec.md` — **PARTIAL(Phase 0 BUILT, pure; Phase 0.5 BUILT — wired into the live

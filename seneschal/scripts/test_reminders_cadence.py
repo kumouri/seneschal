@@ -17,6 +17,10 @@ What each class is guarding, since a test name alone never says why:
 ``LegacyRowsKeepFiring``     the migration's whole safety argument, asserted rather than claimed.
 ``TheMultiFireGateIsNeverNarrower`` the one live code path this change touches.
 ``TheAuditIsTheMigrationPreflight`` the artefact someone with store access runs before retyping it.
+``CanonicalizeOnWrite``      a free-text field's first rail: what gets WRITTEN. Legacy spellings are
+                             their own canonical form, so no live row moves; a refusal is an exit 2
+                             that is never written.
+``TheSuggestedFix``          what the nightly lint recommends — only ever a spelling that parses.
 """
 from __future__ import annotations
 
@@ -599,6 +603,129 @@ class TheCliSpeaksJson(unittest.TestCase):
         code, _, err = self._run(["--parse", "every 3.5 days"])
         self.assertEqual(code, 2)
         self.assertIn("2 per 7 days", err)
+
+
+class CanonicalizeOnWrite(unittest.TestCase):
+    """A free-text field's first rail: every ``Cadence`` the assistant writes is this function's
+    output, and a value it refuses is never written."""
+
+    def test_every_legacy_spelling_is_its_own_canonical_form(self):
+        """No live row changes: what the store already holds is exactly what would be written."""
+        for option in LIVE_SELECT_OPTIONS:
+            with self.subTest(option=option):
+                self.assertEqual(rc.canonical_text(option), option)
+                self.assertEqual(rc.canonical_text(option.lower()), option)
+
+    def test_the_spellings_a_text_field_invites_all_become_three_per_week(self):
+        for text in ("3x/week", "3/week", "3 per 7", "3 per 7 days", "3 x week", "3x per week",
+                     "3 times a week", "3 times per week", "  3 PER WEEK  "):
+            with self.subTest(text=text):
+                self.assertEqual(rc.canonical_text(text), "3 per week")
+
+    def test_rate_step_ups_need_nothing_added(self):
+        for n in (4, 5, 6):
+            with self.subTest(n=n):
+                self.assertEqual(rc.canonical_text("%dx/week" % n), "%d per week" % n)
+
+    def test_an_interval_nobody_enumerated_joins_the_legacy_family(self):
+        self.assertEqual(rc.canonical_text("every 11 days"), "Every 11 days")
+        self.assertEqual(rc.canonical_text("every 3.0 days"), "Every 3 days")
+        self.assertEqual(rc.canonical_text("3 per 10 days"), "3 per 10 days")
+        self.assertEqual(rc.canonical_text("7 per 7 days"), "Daily")
+
+    def test_canonicalizing_is_idempotent_and_means_the_same_cadence(self):
+        for text in LIVE_SELECT_OPTIONS + ("3x/week", "every 11 days", "2 per fortnight",
+                                           "1 per month", "mon-fri", "once"):
+            with self.subTest(text=text):
+                once = rc.canonical_text(text)
+                self.assertEqual(rc.canonical_text(once), once)
+                self.assertEqual(rc.parse(once), rc.parse(text))
+
+    def test_a_fractional_value_is_refused_and_names_the_working_spelling(self):
+        with self.assertRaises(rc.CadenceError) as ctx:
+            rc.canonical_text("every 3.5 days")
+        self.assertIn("2 per 7 days", str(ctx.exception))
+        with self.assertRaises(rc.CadenceError):
+            rc.canonical_text("1.5 per week")
+
+    def test_garbage_is_refused(self):
+        for text in ("bananas", "", "evrey 4 days", "twice a week", "every 0 days", "3 per day"):
+            with self.subTest(text=text):
+                with self.assertRaises(rc.CadenceError):
+                    rc.canonical_text(text)
+
+    def test_widening_the_rate_separator_moved_no_existing_meaning(self):
+        """The regex widened; nothing that parsed before may now read differently."""
+        for text, n, d in (("2 per week", 2, 7), ("2/7", 2, 7), ("2 x 7 days", 2, 7),
+                           ("3 per 10 days", 3, 10), ("1 per fortnight", 1, 14)):
+            with self.subTest(text=text):
+                cad = rc.parse(text)
+                self.assertEqual((cad.shape, cad.n, cad.d), (rc.RATE, n, d))
+
+    def _run(self, argv):
+        old_out, old_err = sys.stdout, sys.stderr
+        sys.stdout, sys.stderr = io.StringIO(), io.StringIO()
+        try:
+            code = rc.main(argv)
+            return code, sys.stdout.getvalue(), sys.stderr.getvalue()
+        finally:
+            sys.stdout, sys.stderr = old_out, old_err
+
+    def test_cli_prints_the_bare_spelling_and_exits_zero(self):
+        code, out, err = self._run(["--canonical", "3x/week"])
+        self.assertEqual((code, out.strip(), err), (0, "3 per week", ""))
+
+    def test_cli_refusal_exits_two_with_the_parsers_message_and_the_fix(self):
+        code, out, err = self._run(["--canonical", "every 3.5 days"])
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")  # nothing a caller could mistake for a value to write
+        self.assertIn("2 per 7 days", err)
+        self.assertIn("'2 per week'", err)
+
+    def test_cli_refuses_an_empty_value_rather_than_printing_nothing(self):
+        code, out, _ = self._run(["--canonical", ""])
+        self.assertEqual((code, out), (2, ""))
+
+
+class TheSuggestedFix(unittest.TestCase):
+    """What the nightly lint offers as its recommended option. The contract: a suggestion is always
+    a write spelling that parses, or ``None`` — never a guess the parser would refuse."""
+
+    def test_the_obvious_slips_have_obvious_fixes(self):
+        for bad, fix in (("every 3.5 days", "2 per week"), ("evrey 4 days", "Every 4 days"),
+                         ("twice a week", "2 per week"), ("three times a week", "3 per week"),
+                         ("once a week", "Weekly"), ("every other day", "Every 2 days"),
+                         ("dialy", "Daily"), ("3 per day", "Multiple/day"),
+                         ("8 per 7 days", "Multiple/day"), ("every 0.5 days", "Multiple/day")):
+            with self.subTest(bad=bad):
+                self.assertEqual(rc.suggest(bad), fix)
+
+    def test_no_fix_is_invented_when_nothing_says_what_was_meant(self):
+        for bad in ("bananas", "", "every 0 days", "1.5 per week", None):
+            with self.subTest(bad=bad):
+                self.assertIsNone(rc.suggest(bad))
+
+    def test_every_suggestion_canonicalizes_to_itself(self):
+        for bad in ("every 3.5 days", "evrey 4 days", "twice a week", "once a week", "3 per day",
+                    "every other week", "every 2.5 days"):
+            with self.subTest(bad=bad):
+                fix = rc.suggest(bad)
+                self.assertIsNotNone(fix)
+                self.assertEqual(rc.canonical_text(fix), fix)
+
+    def test_a_valid_value_suggests_its_own_write_spelling(self):
+        self.assertEqual(rc.suggest("3x/week"), "3 per week")
+
+    def test_id_cache_rows_keep_the_page_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with io.open(os.path.join(tmp, rc.ID_CACHE_FILE), "w", encoding="utf-8") as fh:
+                fh.write("| Reminder | Page id | Type | Window | Cadence | Importance |\n"
+                         "|---|---|---|---|---|---|\n"
+                         "| Evening walk | `00000000-0000-0000-0000-000000000000` | Habit | Evening "
+                         "| 3 per week | ⭐ High |\n")
+            self.assertEqual(rc.id_cache_rows(tmp),
+                             [{"title": "Evening walk", "id": "00000000000000000000000000000000",
+                               "cadence": "3 per week"}])
 
 
 if __name__ == "__main__":

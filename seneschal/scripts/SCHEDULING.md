@@ -19,10 +19,28 @@ chat + reminders + comms-peek). No hosted queue, no cloud service in the loop.
 the once-per-day reminder **seed** — a *date-rollover* trigger, `maybe_seed_day`, see below), spawning a
 fresh headless `claude -p` per run (same mechanism as the comms-peek). No separate Task Scheduler entries
 are needed — one always-on `\seneschald` owns the whole cadence. Times live in `SLOTS_TEMPLATE` in
-`presence.py`; each fires at most once per local day, and a slot missed
-while the machine was asleep fires late on the next loop **if** still within `--slot-catchup-min` (default
-180 min), else it's skipped for the day (so a 06:30 brief never fires at 11 pm). Disable with `--no-slots`;
-pick a model with `--slot-model`. The daily fired-state is `state/slots.json`.
+`presence.py`; each fires at most once per local day. A slot missed while the machine was asleep fires
+late on the next loop according to **its own catch-up policy** (the slot's `catchup` key):
+
+- **Window (the default: Brief, Wrap, Dream).** It fires late only if still within `--slot-catchup-min`
+  (default 180 min), else it's skipped for the day, so a 06:30 brief never fires at 11 pm.
+  Dream's window (22:00 + 180 min) runs past midnight, so Dream's real cliff is the date rollover.
+  That stays: a Dream run at 00:30 would be stamped for the new date and suppress that night's own run.
+- **Unbounded (the Daily Journal).** No cliff. If it hasn't run for today's local date, it runs on the
+  next loop however late, because its work (archive yesterday, rebuild carry-over, tracker rows) is keyed
+  to the date, not the hour — a machine down until mid-morning otherwise left the page un-rolled all day.
+
+**A skip is never silent.** Three things count as a skip: a slot past its window, a slot whose
+`SLOT_MAX_RETRIES` failed runs made the daemon give up, and a slot that had no run at all yesterday
+(`missed_yesterday`, the midnight cliff). Each one is recorded `skipped` in `state/slot-status.json`,
+and the owner gets **one plain Telegram line** through the Mouth. It names the slot and says it can be
+run late on request. It is never a picker, and it is sent at most once per (slot, date). A slot still
+running at its window's edge is late, not skipped. A run is stamped with the date it was **launched**
+for, so a journal that finishes after midnight doesn't suppress the next day's run.
+
+Disable with `--no-slots`; pick a model with `--slot-model`. The daily fired-state is
+`state/slots.json` (bare dates, unchanged). Whether each stamp was a run or a skip is in
+`state/slot-status.json` (`presence.slot_outcome`).
 
 > **Needs the store.** These headless runs (especially the reminder seed, which reads the ⏰ tracker)
 > require the daemon to have store access — run `/setup-store` (Notion backends wire an MCP; see
@@ -31,12 +49,12 @@ pick a model with `--slot-model`. The daily fired-state is `state/slots.json`.
 
 The slot times + prompts (edit in `presence.py`):
 
-| Slot (SLOTS name) | When (local) | What it runs |
-|-------------------|--------------|--------------|
-| `daily-journal` | 05:00 | Daily Journal steward |
-| `morning-brief` | 06:30 | Brief (chat + Telegram + Proton email + Run Log) |
-| `eod-wrap` | 21:07 | Wrap (+ journal-presence nudge-or-satisfy) |
-| `dream` | 22:00 | Dream consolidation (+ journal-presence satisfy backstop) |
+| Slot (SLOTS name) | When (local) | Catch-up | What it runs |
+|-------------------|--------------|----------|--------------|
+| `daily-journal` | 05:00 | unbounded (any time that day) | Daily Journal steward |
+| `morning-brief` | 06:30 | window | Brief (chat + Telegram + Proton email + Run Log) |
+| `eod-wrap` | 21:07 | window | Wrap (+ journal-presence nudge-or-satisfy) |
+| `dream` | 22:00 | window (effectively midnight) | Dream consolidation (+ journal-presence satisfy backstop) |
 
 > **A slot prompt that lists a mode's steps becomes that run's scope.** The prompt arrives first and the
 > mode file reads as background, so a step missing from the prompt is a step that does not happen even

@@ -19,6 +19,7 @@ import tempfile
 import unittest
 import urllib.parse
 from datetime import datetime, timedelta, timezone
+from unittest import mock
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -57,6 +58,7 @@ try:
     from fastapi.testclient import TestClient
 
     from cockpit.breakglass import assertion as bg_assertion
+    from cockpit.server import caps_control
     from cockpit.server import model_config as model_config_module
     from cockpit.server import oidc as oidc_module
     from cockpit.server._fake_oidc_server import FakeOIDCServer
@@ -841,6 +843,65 @@ class CockpitAppTests(unittest.TestCase):
         body = resp.json()
         self.assertEqual(body["rollups"]["tokens_by_model"]["day"].get("claude-opus-4-8"), 250)
 
+    # --- job caps ---------------------------------------------------------------------------------
+    # The writer's own validation/atomicity is test_caps_control.py's and seneschal/scripts/test_job_caps.py's;
+    # these prove the routes are gated, CSRF'd, audited, and 400 a bad pair without writing it.
+
+    def _stub_count(self):
+        caps_control.clear_cache()
+        patcher = mock.patch.object(caps_control, "counter",
+                                    lambda state_dir: {"global": 1, "uncounted": 0})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(caps_control.clear_cache)
+
+    def test_job_caps_requires_auth(self):
+        self.assertEqual(self.client.get("/api/job-caps").status_code, 503)
+        resp = self.client.post("/api/job-caps", json={"soft_per_session": 3, "hard_global": 6})
+        self.assertEqual(resp.status_code, 503)
+        self.assertFalse((self.state_dir / "job-caps.json").exists())
+
+    def test_job_caps_get_serves_defaults_limits_and_the_count(self):
+        self._allow()
+        self._stub_count()
+        body = self.client.get("/api/job-caps").json()
+        self.assertEqual((body["soft_per_session"], body["hard_global"]), (3, 5))
+        self.assertEqual(body["limits"]["soft_min"], 1)
+        self.assertEqual(body["in_flight"], 1)
+
+    def test_job_caps_post_writes_and_audits(self):
+        self._allow()
+        self._stub_count()
+        resp = self.client.post("/api/job-caps", json={"soft_per_session": 2, "hard_global": 4})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual((resp.json()["soft_per_session"], resp.json()["hard_global"]), (2, 4))
+        on_disk = json.loads((self.state_dir / "job-caps.json").read_text(encoding="utf-8"))
+        self.assertEqual((on_disk["hard_global"], on_disk["updated_by"]), (4, "cockpit"))
+        audit = [json.loads(line) for line in
+                 (self.state_dir / "cockpit-audit.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(audit[-1]["action"], "job_caps.update")
+        self.assertEqual(audit[-1]["detail"], {"soft_per_session": 2, "hard_global": 4})
+
+    def test_job_caps_post_rejects_an_invalid_pair_without_writing(self):
+        self._allow()
+        self._stub_count()
+        for soft, hard in ((0, 5), (6, 5), (3, 13)):
+            with self.subTest(soft=soft, hard=hard):
+                resp = self.client.post("/api/job-caps",
+                                        json={"soft_per_session": soft, "hard_global": hard})
+                self.assertEqual(resp.status_code, 400)
+        self.assertFalse((self.state_dir / "job-caps.json").exists())
+        self.assertFalse((self.state_dir / "cockpit-audit.jsonl").exists())
+
+    def test_job_caps_post_refuses_non_integers_rather_than_coercing(self):
+        self._allow()
+        for bad in ("3", 3.0, True, None):
+            with self.subTest(bad=bad):
+                resp = self.client.post("/api/job-caps",
+                                        json={"soft_per_session": bad, "hard_global": 5})
+                self.assertEqual(resp.status_code, 422)
+        self.assertFalse((self.state_dir / "job-caps.json").exists())
+
     # --- health / workout / meal panels (v4) --------------------------------------------------------
     # Fixtures use health_common.connect() so these exercise the REAL health_import.py schema, not a
     # hand-rolled guess. Deeper coverage of grouping/rollup/tolerance logic lives in test_health.py —
@@ -1383,6 +1444,15 @@ class CockpitOidcAuthTests(unittest.TestCase):
         resp = self.client.post("/api/control/restart",
                                 headers={"X-Cockpit-Requested-With": "cockpit"})
         self.assertEqual(resp.status_code, 200)
+
+    def test_job_caps_unauthed_401_and_csrf_403_and_write_nothing(self):
+        resp = self.client.post("/api/job-caps", json={"soft_per_session": 3, "hard_global": 6},
+                                headers={"X-Cockpit-Requested-With": "cockpit"})
+        self.assertEqual(resp.status_code, 401)
+        self._login()
+        resp = self.client.post("/api/job-caps", json={"soft_per_session": 3, "hard_global": 6})
+        self.assertEqual(resp.status_code, 403)
+        self.assertFalse((self.state_dir / "job-caps.json").exists())
 
     def test_ws_gate_closes_without_session(self):
         with self.assertRaises(Exception):

@@ -435,6 +435,18 @@ class RepliedTo(WatchAckFixture):
         self.assertEqual(result["matched_by"], "ledger")
         self.assertEqual(result["fact_key"], BANK_SOURCE_KEY)
 
+    def test_a_pasted_selection_tail_still_resolves_to_the_alert(self):
+        """A partial-quote reply reads `(replying to: "<alert>" — selected: "<part>")`. A caller that
+        copies everything between the outer quotes must still land on the alert's ledger row."""
+        self.seed_escalation("2026-09-13T20:00:00Z", BANK_REWORDINGS[2], sender=BANK_SENDER,
+                             subject=BANK_SUBJECT)
+        head = BANK_REWORDINGS[2].replace("**", "")[:80].rstrip() + "…"
+        pasted = f'{head}" — selected: "{BANK_REWORDINGS[2][10:30]}'
+        result = wa.resolve_replied_to(pasted, self.dir, now=NOW)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["matched_by"], "ledger")
+        self.assertEqual(result["fact_key"], BANK_SOURCE_KEY)
+
     def test_a_quote_with_no_ledger_row_falls_back_to_its_own_prose_key(self):
         result = wa.resolve_replied_to(BANK_TEXT, self.dir, now=NOW)
         self.assertTrue(result["ok"])

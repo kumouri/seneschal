@@ -118,8 +118,37 @@ preflight that is wrong, never for a path that is.
 jobs that make agent/model calls (`job_agent_class`; unknown counts). Enforced at the CLI, never inside
 `start_job`, so an analysis or a retry respawn can never be blocked. The soft cap reserves the owner's
 interactive headroom and yields to `--over-soft-cap` (stamped on the record); the hard cap has no
-override. A refusal prints the in-flight set ranked by kill order, each row with its own `cancel`
-line — it never cancels anything itself.
+per-job override. A refusal prints the in-flight set ranked by kill order, each row with its own
+`cancel` line — it never cancels anything itself. **The VALUES are the owner's to set**:
+`state/job-caps.json`, written only by `job_caps.save` — from the cockpit's Jobs panel or `jobs.py caps
+set --soft N --hard M` — and read fresh at every check; missing/unreadable/invalid reads as 3 / 5 and
+says so once. That moves where each line sits, never whether a job can get past the hard one, and
+lowering either below the live count cancels nothing — it only refuses the next start.
+
+**`start --account <name>` — which Claude login a job bills to.** An install can hold more than one
+Claude subscription; an account is a Claude config dir named in `state/claude-accounts.json`
+(`claude_accounts.py`; host-side login steps: `CLAUDE_ACCOUNTS_SETUP.md`). It is resolved and checked
+BEFORE the preflight — unknown name, missing dir, a dir with no `.credentials.json`, or one whose hooks
+or `CLAUDE.md` differ from `~/.claude`'s (a job there would run without the guards) is exit 2 with
+nothing written — and the RESOLVED dir is stamped on the record as `account: {name, config_dir}`, so a
+later registry edit can never move a running job's retry or resume to another login. `child_env` sets
+`CLAUDE_CONFIG_DIR` from that block at both spawn points, and since a `--retry` respawn and §3.13's
+RESUME both re-enter `_spawn_attempt` with the same record, they land on the same login by
+construction — a resume against another config dir would not find the session. No flag = no block =
+the launcher's own login, byte-for-byte as before. Named in `list`/`status` and the completion push
+when not the default. The caps stay one global pair: they protect the owner's concurrency, which is
+the same desk whichever subscription pays for it.
+
+**The `runtime` block — what every job runs on, stamped at start (spec §3.16).** `start_job` writes
+`runtime: {subscription, harness, model, llm}` on EVERY record (`job_runtime`): `llm` is
+`job_agent_class` verbatim (True / False / "unknown"), so the badge and the caps can never disagree;
+`harness` is `claude-cli` / `codex` / `hf-router` / `ollama` / `unknown` / `none`; `subscription` is
+the Claude login the child will actually use (`--account`, else the inherited `CLAUDE_CONFIG_DIR`,
+else "main"), or "ChatGPT" / "HuggingFace" / "local" for the other harnesses; `model` is the argv's
+own `--model`/`-m`, a delegate target's registered id, or the literal "default" — never guessed. A
+record without the block predates it and renders "—" everywhere; nothing re-derives it on read. `list`
+prints it in brackets, `status` spells it out, the cockpit's Jobs panel shows it per row with a
+non-LLM / unknown badge.
 
 **"Terminal" is not "the work landed"** (`job_completion.py`). For a job with its own working
 directory, a success-like ending is checked for uncommitted/unpushed/PR-less work; an incomplete job
@@ -166,7 +195,9 @@ import unicodedata
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import claude_accounts  # `--account <name>`: which Claude login (config dir) a job runs on
 import failures  # a durable row for a failure that would otherwise vanish silently
+import job_caps  # the cap VALUES — the owner's to set (state/job-caps.json)
 import job_completion  # detect/resume/rescue (§3.13); reads only — never import THIS module back
 import job_pr_draft  # a PR opened by a still-running job is a draft until it ends (never imports jobs.py at module scope)
 import job_push_ledger  # the "already pushed about this ending" record — the ONLY writer is below
@@ -674,6 +705,25 @@ def honour_cancel(state_dir: str, rec: dict) -> dict:
 
 def save_job(state_dir: str, rec: dict) -> None:
     save_json(job_path(state_dir, rec["id"]), honour_cancel(state_dir, rec))
+
+
+def normalize_prs(value) -> list:
+    """`--pr`'s values as a sorted, de-duplicated list of positive ints; `[]` for anything else. A
+    bool is refused (`True` is an int in Python) and so is a non-positive number — neither names a
+    pull request."""
+    if not isinstance(value, (list, tuple, set)):
+        return []
+    out = set()
+    for v in value:
+        if isinstance(v, bool):
+            continue
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            continue
+        if n > 0:
+            out.add(n)
+    return sorted(out)
 
 
 def list_jobs(state_dir: str, active_only: bool = False) -> list:
@@ -1615,9 +1665,18 @@ def origin_goal(rec: dict) -> str:
 
 # --------------------------------------------------------------------------- process helpers
 
-def child_env(job_id: str | None = None) -> dict:
+def child_env(job_id: str | None = None, account: dict | None = None) -> dict:
     """Env for a spawned job: scrub ANTHROPIC_API_KEY, **unbuffer Python children**, and — for §3.14's
     `job_background_guard.py` — stamp `SENESCHAL_JOB_ID` when `job_id` is given.
+
+    **`account` (`start --account`) is the record's `account` block**, and it sets
+    `CLAUDE_CONFIG_DIR` to that login's config dir (or REMOVES an inherited one, for an account that
+    names the normal `~/.claude`) — `claude_accounts.apply_env`. `None` touches nothing: a job started
+    without the flag inherits whatever login its launcher had, byte-for-byte as before. Both call sites
+    pass `claude_accounts.account_of(rec)`, which is what makes a `--retry` respawn and §3.13's RESUME
+    (both re-enter `_spawn_attempt` with the same record) land on the SAME login as the first attempt
+    — a resume against another config dir would not find the session it is resuming. The API-key
+    scrub below runs for every account: they are all subscription logins.
 
     **`SENESCHAL_JOB_ID` is the whole scoping signal for the background-guard hook.** It fires only when
     this var is present on ITS OWN process — inherited straight down from here through the job's real
@@ -1665,6 +1724,7 @@ def child_env(job_id: str | None = None) -> dict:
     env["PYTHONUNBUFFERED"] = "1"
     if job_id:
         env["SENESCHAL_JOB_ID"] = str(job_id)
+    claude_accounts.apply_env(env, account)
     return env
 
 
@@ -2556,8 +2616,29 @@ def preflight_refusal(argv, *, exists=os.path.exists, which=None, is_windows=Non
 #      `bash x.sh`, `wsl … bash …`, `cmd /c`, `python -c`) hides what it runs, and treating an opaque
 #      job as free is how an agent job slips past the cap unseen. An over-count costs one `--no-agent`;
 #      an under-count costs the headroom the caps exist to protect.
-SOFT_CAP_PER_ORIGIN = 3
-HARD_CAP_GLOBAL = 5
+#
+# **The VALUES are the owner's to set**: `state/job-caps.json`, written only by `job_caps.save`
+# (the cockpit's Jobs panel, or `jobs.py caps set`), read FRESH at every check by `current_caps`. These two
+# constants are now only the DEFAULTS that file falls back to — missing, unreadable or invalid all read
+# as 3 / 5, never as "no cap". What did NOT change: the two caps stay distinct, the soft one still
+# yields to `--over-soft-cap`, and the hard one still has no per-job flag.
+SOFT_CAP_PER_ORIGIN = job_caps.DEFAULT_SOFT
+HARD_CAP_GLOBAL = job_caps.DEFAULT_HARD
+
+
+def current_caps(state_dir: str) -> dict:
+    """The caps in force right now — `job_caps.load`, read fresh on every call (never cached), so a
+    value saved from the cockpit applies to the very next `start`. Never raises."""
+    return job_caps.load(state_dir)
+
+
+def _cap_provenance(caps: dict, which: str) -> str:
+    """Who set the number a refusal quotes — the shipped default, or the store's stamp. A refusal must
+    never attribute a number the owner changed to the default it replaced."""
+    if caps.get("source") == "file":
+        return (f"the owner's setting, via {caps.get('updated_by') or '?'} at "
+                f"{caps.get('updated_at') or '?'}")
+    return "the shipped default"
 
 AGENT = "agent"
 NON_AGENT = "non-agent"
@@ -2567,7 +2648,7 @@ AGENT_UNKNOWN = "unknown"
 _AGENT_COMMANDS = frozenset({"claude", "ollama", "codex", "gemini"})
 # Scripts (by basename) known to make model calls — subscription, API or local (Ollama).
 _AGENT_SCRIPTS = frozenset({
-    "fable_delegate.py", "job_analysis.py", "router.py", "interleave.py",
+    "fable_delegate.py", "model_delegate.py", "job_analysis.py", "router.py", "interleave.py",
     "rag_index.py", "rag_query.py", "rag_projects.py", "sentiment.py", "mini_dream.py",
 })
 # A token naming a model provider in an argv element's basename (a script called
@@ -2650,6 +2731,174 @@ def job_agent_class(rec: dict) -> tuple:
 def counts_toward_cap(rec: dict) -> bool:
     """True unless the record is positively `non-agent`. `unknown` counts."""
     return job_agent_class(rec)[0] != NON_AGENT
+
+
+# --------------------------------------------------------------------------- the runtime block (§3.16)
+#
+# The cockpit has to say what jobs are on what subscription / harness / model, AND which ones are
+# non-LLM. So `start_job` stamps, once, at the one write point, a `runtime` block:
+#
+#   {"subscription": "main" | "<account name>" | "ChatGPT" | "HuggingFace" | "local" | None,
+#    "harness": "claude-cli" | "codex" | "hf-router" | "ollama" | "unknown" | "none",
+#    "model": "<id>" | "default" | None,
+#    "llm": True | False | "unknown"}
+#
+# **Stamped at start, read as a field later — never inferred after the fact.** A record without the
+# block predates it and every reader renders it as "—"; re-deriving it on read would put today's
+# classifier and today's registry in the mouth of a job that ran under different ones.
+#
+# **`llm` is `job_agent_class` verbatim** (agent → True, non-agent → False, unknown → "unknown"), so the
+# badge the cockpit shows and the population the caps count can never disagree. **Never guessed**: `model`
+# is the argv's own `--model`/`-m`, or the delegate target's registered id, or the literal "default"
+# when an agent harness runs with no model flag (the CLI's own default chose, and we did not see which).
+# An agent job whose harness the argv does not name (a wrapper, a script not listed below) is
+# `harness: "unknown"` with no subscription or model — an honest blank, not a likely answer.
+HARNESS_CLAUDE = "claude-cli"
+HARNESS_CODEX = "codex"
+HARNESS_HF = "hf-router"
+HARNESS_OLLAMA = "ollama"
+HARNESS_UNKNOWN = "unknown"
+HARNESS_NONE = "none"
+MODEL_DEFAULT = "default"
+SUBSCRIPTION_MAIN = "main"  # the normal ~/.claude login — what `--account default` and no flag both name
+_HARNESS_SUBSCRIPTION = {HARNESS_CODEX: "ChatGPT", HARNESS_HF: "HuggingFace", HARNESS_OLLAMA: "local"}
+# `model_delegate.Target.backend` -> harness. Its `hf` backend IS the HuggingFace router.
+_DELEGATE_BACKEND_HARNESS = {"claude-cli": HARNESS_CLAUDE, "codex": HARNESS_CODEX, "hf": HARNESS_HF}
+# Agent scripts whose harness is fixed by their own code (verified against the code, not assumed):
+# `job_analysis.py`'s analyst is a `claude -p`; `router.py`/`sentiment.py` POST to Ollama's /api/chat.
+# The delegates are handled separately because their model comes from their own registry.
+_SCRIPT_HARNESS = {"job_analysis.py": HARNESS_CLAUDE, "router.py": HARNESS_OLLAMA,
+                   "sentiment.py": HARNESS_OLLAMA}
+_HARNESS_COMMANDS = {"claude": HARNESS_CLAUDE, "codex": HARNESS_CODEX, "ollama": HARNESS_OLLAMA}
+
+
+def _flag_value(toks: list, names: tuple) -> str | None:
+    """The value of the first `--name X` / `--name=X` in `toks`, else None."""
+    for i, tok in enumerate(toks):
+        for name in names:
+            if tok == name and i + 1 < len(toks):
+                return toks[i + 1]
+            if name.startswith("--") and tok.startswith(name + "="):
+                return tok[len(name) + 1:]
+    return None
+
+
+def _script_args(argv: list, script: str) -> list:
+    """The argv after the python script `script` (by basename), else `[]`."""
+    toks = [str(a) for a in argv]
+    for i, tok in enumerate(toks):
+        if _cmd_name(tok) == script:
+            return toks[i + 1:]
+    return []
+
+
+def _claude_subscription(state_dir: str, account: dict | None, env=None) -> str:
+    """Which Claude login a `claude` child will actually use — the same answer `child_env` acts on.
+
+    `--account` wins (its name; `default` → "main"). With no flag the child INHERITS this process's
+    `CLAUDE_CONFIG_DIR`, so that is read rather than assumed: unset or `~/.claude` → "main", a dir the
+    registry names → that name, any other dir → its basename (a real dir we can name, never a guess at
+    which account it "probably" is)."""
+    if isinstance(account, dict) and isinstance(account.get("name"), str):
+        name = account["name"]
+        return SUBSCRIPTION_MAIN if name == claude_accounts.DEFAULT_NAME else name
+    inherited = (os.environ if env is None else env).get("CLAUDE_CONFIG_DIR") or ""
+    if not inherited.strip():
+        return SUBSCRIPTION_MAIN
+    norm = lambda p: os.path.normcase(os.path.abspath(os.path.expandvars(os.path.expanduser(p))))  # noqa: E731
+    target = norm(inherited)
+    if target == norm(claude_accounts.default_config_dir()):
+        return SUBSCRIPTION_MAIN
+    try:
+        registry = claude_accounts.load_registry(state_dir) or {}
+    except claude_accounts.AccountError:
+        registry = {}
+    for name, raw in registry.items():
+        if isinstance(raw, str) and raw.strip() and norm(raw) == target:
+            return SUBSCRIPTION_MAIN if name == claude_accounts.DEFAULT_NAME else name
+    return os.path.basename(target.rstrip("\\/")) or inherited
+
+
+def _delegate_harness_model(argv: list, script: str) -> tuple:
+    """`(harness, model)` for a `model_delegate.py` / `fable_delegate.py` argv, read off the delegate's
+    own registry; `(None, None)` when the target cannot be resolved. Lazy import: the delegates pull in
+    `model_config` and friends, and a job start must never fail because a delegate module would not
+    load."""
+    args = _script_args(argv, script)
+    try:
+        if script == "fable_delegate.py":
+            import fable_delegate  # noqa: PLC0415
+            return HARNESS_CLAUDE, _flag_value(args, ("--model",)) or fable_delegate.DEFAULT_MODEL
+        import model_delegate  # noqa: PLC0415
+        target = model_delegate.resolve(_flag_value(args, ("--target",)) or "")
+    except Exception:  # noqa: BLE001 — an unloadable delegate is an unknown harness, never a crash
+        return None, None
+    if target is None:
+        return None, None
+    return _DELEGATE_BACKEND_HARNESS.get(target.backend), target.model
+
+
+def job_runtime(rec: dict, state_dir: str, *, env=None) -> dict:
+    """The `runtime` block for a record about to be written — see the comment block above. Total: a
+    record it cannot read is `llm: "unknown"`, `harness: "unknown"`, like `job_agent_class`."""
+    cls, _why = job_agent_class(rec)
+    llm = {AGENT: True, NON_AGENT: False}.get(cls, AGENT_UNKNOWN)
+    if llm is False:
+        return {"subscription": None, "harness": HARNESS_NONE, "model": None, "llm": False}
+    harness, model = None, None
+    try:
+        argv = [str(a) for a in (rec.get("argv") or [])]
+        script, _module = _python_target(argv)
+        if script in ("model_delegate.py", "fable_delegate.py"):
+            harness, model = _delegate_harness_model(argv, script)
+        else:
+            # The first argv element that IS a harness command — `claude …`, but also `uv run claude …`
+            # or `wsl -- claude …`. Exact command names only, so a prompt mentioning claude is not one.
+            for i, tok in enumerate(argv):
+                if _cmd_name(tok) in _HARNESS_COMMANDS:
+                    harness = _HARNESS_COMMANDS[_cmd_name(tok)]
+                    rest = argv[i + 1:]
+                    if harness == HARNESS_OLLAMA:
+                        # `ollama run <model> …` — the model is positional, not a flag.
+                        model = rest[1] if len(rest) >= 2 and rest[0] == "run" else None
+                    else:
+                        model = _flag_value(rest, ("--model", "-m"))
+                    break
+            if harness is None and script in _SCRIPT_HARNESS:
+                harness = _SCRIPT_HARNESS[script]
+                model = _flag_value(_script_args(argv, script), ("--model",))
+    except Exception:  # noqa: BLE001 — see the docstring
+        harness, model = None, None
+    if harness is None:
+        return {"subscription": None, "harness": HARNESS_UNKNOWN, "model": None, "llm": llm}
+    if harness == HARNESS_CLAUDE:
+        subscription = _claude_subscription(state_dir, claude_accounts.account_of(rec), env)
+    else:
+        subscription = _HARNESS_SUBSCRIPTION.get(harness)
+    return {"subscription": subscription, "harness": harness, "model": model or MODEL_DEFAULT,
+            "llm": llm}
+
+
+def runtime_of(rec: dict) -> dict | None:
+    """The record's stamped `runtime` block, or None for a record that predates it (or a malformed
+    one). Readers render None as "—" — never re-derived (see the comment block above)."""
+    rt = rec.get("runtime") if isinstance(rec, dict) else None
+    return rt if isinstance(rt, dict) else None
+
+
+def runtime_label(rec: dict) -> str:
+    """One compact phrase for `list`: `main · claude-cli · default`, `non-LLM`, `LLM unknown`, or `—`."""
+    rt = runtime_of(rec)
+    if rt is None:
+        return "—"
+    if rt.get("llm") is False:
+        return "non-LLM"
+    if rt.get("harness") in (None, HARNESS_UNKNOWN):
+        return "LLM · harness unknown" if rt.get("llm") is True else "LLM unknown"
+    # A named harness under an `unknown` class (e.g. `wsl -- codex …`, which the cap classifier does
+    # not place) keeps the doubt visible rather than reading as a confirmed LLM job.
+    head = "" if rt.get("llm") is True else "LLM? "
+    return head + " · ".join(str(rt.get(k) or "?") for k in ("subscription", "harness", "model"))
 
 
 def in_flight(state_dir: str, now: datetime | None = None) -> list:
@@ -2844,27 +3093,33 @@ _RANKED_ON = ("  Ranked on: retry-pending state, origin.request.reason_class, or
 
 
 def hard_cap_refusal(state_dir: str, now: datetime | None = None,
-                     cap: int = HARD_CAP_GLOBAL) -> str | None:
-    """The 5, across every origin. Refusal text, or None.
+                     cap: int | None = None) -> str | None:
+    """The hard cap (default 5), across every origin. Refusal text, or None.
 
-    **No override exists and none should be added.** That is the single thing distinguishing it from
-    the 3, and an escape hatch here would make the two caps one cap with two spellings."""
+    **No per-job override exists and none should be added.** That is the single thing distinguishing
+    it from the soft cap, and an escape hatch here would make the two caps one cap with two
+    spellings. Its VALUE is the owner's to set (`current_caps`) — that moves where the line is, never
+    whether a job can talk its way past it. `cap` overrides the stored value (tests)."""
     now = now or _utc_now()
+    caps = current_caps(state_dir)
+    cap = caps["hard_global"] if cap is None else cap
     counts = concurrency(state_dir, None, now)
     if counts["global"] < cap:
         return None
     return (f"{counts['global']} agent jobs are already in flight and the hard cap is {cap} "
-            f"(only jobs that make agent calls count).\n"
-            f"There is no flag for this one. Cancel one of these and start yours again — ranked by "
-            f"recommended kill order, most-killable first:\n"
+            f"({_cap_provenance(caps, 'hard')}; only jobs that make agent calls count).\n"
+            f"There is no flag for this one — the NUMBER is the owner's to change (`jobs.py caps "
+            f"set`, or the cockpit's Jobs panel), but no job gets past it. Cancel one of these and "
+            f"start yours again — ranked by recommended kill order, most-killable first:\n"
             f"{kill_order_report(counts['in_flight'], now)}\n"
             f"{_uncounted_line(counts)}"
             f"{_RANKED_ON}")
 
 
 def soft_cap_refusal(state_dir: str, session_id: str | None, now: datetime | None = None,
-                     cap: int = SOFT_CAP_PER_ORIGIN) -> str | None:
-    """The 3, per ORIGIN SESSION. Refusal text, or None.
+                     cap: int | None = None) -> str | None:
+    """The soft cap (default 3), per ORIGIN SESSION. Refusal text, or None. Its value is read from
+    `current_caps` unless `cap` is given (tests).
 
     **It stops, and it names the one flag that gets past it in the same breath.** A cap that printed a
     warning and started the job anyway would be a prose rule with a compile step, because nothing about
@@ -2884,26 +3139,29 @@ def soft_cap_refusal(state_dir: str, session_id: str | None, now: datetime | Non
     sid = (session_id or "").strip()
     if not sid:
         return None
+    caps = current_caps(state_dir)
+    cap = caps["soft_per_session"] if cap is None else cap
     counts = concurrency(state_dir, sid, now)
     if counts["session"] < cap:
         return None
     mine = [r for r in counts["in_flight"] if origin_session_of(r) == sid]
     return (f"this session already has {counts['session']} agent jobs in flight and the soft cap "
             f"is {cap} "
-            f"(it reserves room for the owner's interactive sessions).\n"
+            f"({_cap_provenance(caps, 'soft')}; it reserves room for the owner's interactive "
+            f"sessions).\n"
             f"THIS IS HEADROOM, NOT MACHINE LOAD — it is the owner's concurrency being spent, not the "
             f"box's. If this job is worth one of those slots, say so and it runs: add --over-soft-cap. "
             f"Overrunning it can be the right call.\n"
             f"This session's in-flight jobs, ranked as kill candidates in case one of them is the "
             f"cheaper thing to drop:\n"
             f"{kill_order_report(mine, now)}\n"
-            f"  Global: {counts['global']} of {HARD_CAP_GLOBAL} in flight.\n"
+            f"  Global: {counts['global']} of {caps['hard_global']} in flight.\n"
             f"{_uncounted_line(counts)}"
             f"{_RANKED_ON}")
 
 
 def over_soft_cap_note(state_dir: str, session_id: str | None, now: datetime | None = None,
-                       cap: int = SOFT_CAP_PER_ORIGIN) -> dict | None:
+                       cap: int | None = None) -> dict | None:
     """What `--over-soft-cap` writes onto the record — or None when the flag was passed but the cap was
     never reached.
 
@@ -2915,11 +3173,30 @@ def over_soft_cap_note(state_dir: str, session_id: str | None, now: datetime | N
     sid = (session_id or "").strip()
     if not sid:
         return None
+    if cap is None:
+        cap = current_caps(state_dir)["soft_per_session"]
     counts = concurrency(state_dir, sid, now)
     if counts["session"] < cap:
         return None
     return {"at": _stamp(now), "cap": cap, "session_active": counts["session"],
             "global_active": counts["global"]}
+
+
+def caps_view(state_dir: str, session_id: str | None = None,
+              now: datetime | None = None) -> dict:
+    """What `jobs.py caps --json` prints and the cockpit's Jobs-panel control reads (via that CLI, in
+    a subprocess — the cockpit cannot import this module, cockpit-spec): the caps in force,
+    their bounds, and the in-flight counts taken by the SAME `concurrency()` the gate refuses on, so
+    the number on the panel is the number a `start` would be judged against.
+
+    `session_id` defaults to `$CLAUDE_CODE_SESSION_ID`; with none, `session` is 0 (an unaddressed
+    caller holds no desktop share, exactly as `concurrency` counts it)."""
+    sid = (session_id if session_id is not None else os.environ.get(ORIGIN_ENV_VAR) or "").strip()
+    counts = concurrency(state_dir, sid or None, now)
+    return {"caps": current_caps(state_dir), "limits": job_caps.limits(),
+            "global": counts["global"], "session": counts["session"],
+            "session_id": counts["session_id"] or None,
+            "uncounted": len(counts.get("uncounted") or [])}
 
 
 def start_job(state_dir: str, title: str, argv: list, *, cwd: str | None = None,
@@ -2930,7 +3207,7 @@ def start_job(state_dir: str, title: str, argv: list, *, cwd: str | None = None,
               analyze: bool = False, analysis_for: str | None = None,
               worktree: bool = False, worktree_root: str | None = None,
               wt_runner=None, over_soft_cap: dict | None = None,
-              agent: bool | None = None) -> dict:
+              agent: bool | None = None, prs=None, account: dict | None = None) -> dict:
     """Write the record, then spawn the detached shim that runs `argv`. Returns the record.
 
     The record is written BEFORE the spawn and re-written after, so a crash in between leaves a
@@ -2978,7 +3255,20 @@ def start_job(state_dir: str, title: str, argv: list, *, cwd: str | None = None,
     `agent` is the caller's explicit answer to "does this job make agent/model calls" (`--agent` /
     `--no-agent`), stamped as `agent: true|false` and preferred over the argv heuristic by
     `job_agent_class`. **None is the default and writes nothing** — the heuristic decides, and an
-    unrecognised shape counts toward the caps."""
+    unrecognised shape counts toward the caps.
+
+    `prs` is the pull requests this job works on (`--pr N`, repeatable), stamped as a sorted `prs: [N]`
+    list and absent when none — `normalize_prs`. It is the structured signal the PR watcher reads
+    (`job_pr_draft.list_pr_owners`) to hold off launching its own repair of a PR a live job already
+    owns (`../docs/concurrent-pr-collisions-spec.md` §5A.10).
+
+    `account` is `claude_accounts.resolve()`'s `{"name", "config_dir"}` (`--account <name>`), stamped
+    as the record's `account` block — the RESOLVED directory, not just the name, so a later edit to
+    the registry can never move a running job's retry or resume onto a different login. **None is
+    the default and writes nothing** (the inherited login, as before).
+
+    Every record also gets a `runtime` block — subscription / harness / model / llm, computed once
+    here by `job_runtime` from the record as written (§3.16)."""
     if analysis_for and normalize_origin(origin):
         raise ValueError("an analysis job may not carry an origin — one pass, by construction "
                          "(job-origin-routing-spec §4.3)")
@@ -3029,10 +3319,24 @@ def start_job(state_dir: str, title: str, argv: list, *, cwd: str | None = None,
         # real overrun of the owner's interactive headroom, so the field stays countable instead of being a
         # flag someone passed out of habit. `over_soft_cap_note` is what decides that, not the flag.
         rec["over_soft_cap"] = dict(over_soft_cap)
+    prs = normalize_prs(prs)
+    if prs:
+        # Absent rather than `[]`, like `agent`: a record carrying the key said which PRs it owns.
+        rec["prs"] = prs
+    if account:
+        # Absent unless `--account` was passed, like `agent`: a record without it ran on whatever
+        # login its launcher inherited, exactly as every record before the flag existed did.
+        rec["account"] = {"name": str(account.get("name")), "config_dir": account.get("config_dir")}
     if agent is not None:
         # Absent unless the caller SAID — so every stamp on disk is a deliberate classification, and
         # a record without one is visibly the heuristic's call (`job_agent_class`).
         rec["agent"] = bool(agent)
+    # Always stamped, unlike the opt-in blocks around it: every job runs on SOMETHING, and "which
+    # subscription / harness / model, or no LLM at all" is read off this field by `list`, `status`
+    # and the cockpit's Jobs panel (§3.16). Computed after `account` and `agent` land, from the argv as
+    # it will actually run, and never recomputed — a retry respawn re-enters `_spawn_attempt` with
+    # this same record.
+    rec["runtime"] = job_runtime(rec, state_dir)
     if analyze:
         # Opt-in per job (it is a model call) and, like `retry`, absent from a plain record rather than
         # written false — a record must never imply a policy it doesn't have.
@@ -3093,7 +3397,8 @@ def _spawn_attempt(state_dir: str, rec: dict, *, runner=subprocess.Popen,
     # correctly report as `ended-unknown` rather than silently passing).
     shim = [python_bin or sys.executable, os.path.join(SCRIPT_DIR, "jobs.py"),
             "--state-dir", state_dir, "__run", rec["id"]]
-    kwargs: dict = {"cwd": rec.get("cwd") or REPO_ROOT, "env": child_env(rec.get("id"))}
+    kwargs: dict = {"cwd": rec.get("cwd") or REPO_ROOT,
+                    "env": child_env(rec.get("id"), claude_accounts.account_of(rec))}
     log_fh = None
     try:
         os.makedirs(jobs_dir(state_dir), exist_ok=True)
@@ -3293,7 +3598,8 @@ def _run_shim(state_dir: str, job_id: str, *, rand=random.random, clock=_utc_now
             save_job(state_dir, rec)
         try:
             child_kwargs: dict = {
-                "cwd": rec.get("cwd") or REPO_ROOT, "env": child_env(job_id),
+                "cwd": rec.get("cwd") or REPO_ROOT,
+                "env": child_env(job_id, claude_accounts.account_of(rec)),
                 "stdout": out or subprocess.DEVNULL, "stderr": subprocess.STDOUT,
                 "stdin": subprocess.DEVNULL}
             if os.name == "nt":
@@ -3884,6 +4190,12 @@ def notify_text(rec: dict) -> str:
     else:
         head = f'"{title}" — {status}.'
     parts = [head]
+    account = claude_accounts.account_label(rec)
+    if account:
+        # Named on its own line, ahead of everything else, so usage stays readable per login. Silent
+        # for a job on the inherited/default login — which is every job that never passed
+        # `--account`, so their push is byte-for-byte what it was.
+        parts.append(f"Account: {account}")
     # §12: an assistant-surface self-cancel already got explained in the turn that made it, so
     # its push stays the one short line `_cancelled_head` just built — no restated notes, no tail, and
     # (below) no "Reading it properly now.", because there IS no wake to read anything for. The
@@ -4663,9 +4975,32 @@ def _print_job(rec: dict, log_lines: int = 0, attempts: bool = False,
     if rec.get("retry"):
         bits.insert(2, f"try {rec.get('attempt') or 1}/"
                        f"{int((rec.get('retry') or {}).get('max_retries') or 0) + 1}")
+    # What it runs on (§3.16) — `main · claude-cli · default`, `non-LLM`, `LLM unknown`, or `—` for a
+    # record that predates the block. The runtime phrase already names a non-default account as its
+    # subscription, so the older `account <name>` bit only appears on a record without the block.
+    bits.insert(2, f"[{runtime_label(rec)}]")
+    account = claude_accounts.account_label(rec)
+    if account and runtime_of(rec) is None:
+        # Only when not the default login, so a list of ordinary jobs reads exactly as it always did.
+        bits.insert(2, f"account {account}")
     print("  ".join(str(b) for b in bits))
+    if attempts:
+        rt = runtime_of(rec)
+        if rt is None:
+            print("    runtime: — (record predates the runtime stamp)")
+        else:
+            llm = {True: "yes", False: "no (non-LLM)"}.get(rt.get("llm"), "unknown")
+            print(f"    runtime: subscription {rt.get('subscription') or '—'} · harness "
+                  f"{rt.get('harness') or '—'} · model {rt.get('model') or '—'} · LLM {llm} "
+                  f"({job_agent_class(rec)[1]})")
+    if attempts and claude_accounts.account_of(rec):
+        acct = claude_accounts.account_of(rec)
+        print(f"    account: {acct['name']} "
+              f"({acct.get('config_dir') or 'the normal ~/.claude login'})")
     if rec.get("next_attempt_at"):
         print(f"    next attempt due {rec['next_attempt_at']}")
+    if normalize_prs(rec.get("prs")):
+        print("    prs: " + ", ".join(f"#{n}" for n in normalize_prs(rec.get("prs"))))
     wt = rec.get("worktree") if isinstance(rec.get("worktree"), dict) else None
     if wt and rec.get("worktree_leaked"):
         # Printed by `list` as well as `status`, deliberately: a leak that only shows when you
@@ -4864,12 +5199,26 @@ def main(argv: list | None = None) -> int:
                         "Stamped on the record; beats the argv heuristic. "
                         "Without either flag, an unrecognised command shape COUNTS (fail closed).")
     s.add_argument("--over-soft-cap", action="store_true",
-                   help=f"start this even though this session already has "
-                        f"{SOFT_CAP_PER_ORIGIN} jobs in flight. THE SOFT CAP IS THE OWNER'S "
-                        f"INTERACTIVE HEADROOM, not machine load, so this is a judgement call that "
-                        f"can be right — but make it deliberately: the overrun is "
-                        f"stamped on the record. It does NOT touch the hard cap of "
-                        f"{HARD_CAP_GLOBAL} across all sessions, which has no flag.")
+                   help="start this even though this session is already at the soft cap (default "
+                        f"{SOFT_CAP_PER_ORIGIN}; `jobs.py caps` shows the value in force). THE SOFT CAP "
+                        "IS THE OWNER'S INTERACTIVE HEADROOM, not machine load, so this is a judgement "
+                        "call that can be right — but make it deliberately: the overrun is stamped on "
+                        "the record. It does NOT touch the hard cap across all sessions (default "
+                        f"{HARD_CAP_GLOBAL}), which has no flag.")
+    s.add_argument("--account", default=None, metavar="NAME",
+                   help="run this job on a named Claude login — a config dir registered in "
+                        f"state/{claude_accounts.REGISTRY_FILE} (setup: "
+                        f"{claude_accounts.SETUP_DOC}). Sets CLAUDE_CONFIG_DIR for the job and every "
+                        "retry/resume of it, and is named in list/status and the completion push. "
+                        "Refused up front (exit 2) for an unknown name or a dir that was never "
+                        "logged in. Omitted = the login this process already has, exactly as before. "
+                        "ANTHROPIC_API_KEY stays scrubbed for every account.")
+    s.add_argument("--pr", dest="prs", type=int, action="append", default=None, metavar="N",
+                   help="a pull request this job works on (repeatable: --pr 880 --pr 881). Stamped "
+                        "as the record's `prs` list. While the job is running, the PR watcher will "
+                        "not launch its own conflict repair or server-side rebase of that PR "
+                        "(concurrent-pr-collisions-spec §5A.10). PASS IT FOR EVERY JOB THAT REBASES, "
+                        "MERGES INTO, FIXES OR PUSHES TO AN EXISTING PR.")
     s.add_argument("--loop", default=None, metavar="ID",
                    help="the register work-item this job is doing (`loops.py show <id>`). Calls "
                         "`loops.py start` for it — one explicit signal, never inferred from the job's "
@@ -4942,6 +5291,23 @@ def main(argv: list | None = None) -> int:
     rc.add_argument("--telegram-env", default=None, metavar="PATH",
                     help="Telegram env file for --send (default: seneschal/scripts/telegram.env)")
 
+    cp = sub.add_parser(
+        "caps", help="show the concurrency caps in force (and `caps set` to change them)",
+        description="Show the two concurrency caps and how many agent jobs are in flight against "
+                    "them. The VALUES are the owner's to set — here or from the cockpit's Jobs "
+                    "panel, through the same writer.")
+    cp.add_argument("--json", action="store_true")
+    cp.add_argument("--session", default=None,
+                    help=f"count this session's share too (default ${ORIGIN_ENV_VAR})")
+    cps = cp.add_subparsers(dest="caps_cmd")
+    cset = cps.add_parser(
+        "set", help="change the soft and/or hard cap",
+        description="Lowering a cap below what is already running cancels NOTHING — it only "
+                    "refuses new starts until the count drops. Rejected (never clamped) unless "
+                    f"soft >= {job_caps.SOFT_MIN}, hard >= soft and hard <= {job_caps.HARD_CEILING}.")
+    cset.add_argument("--soft", type=int, default=None, help="agent jobs per warm session")
+    cset.add_argument("--hard", type=int, default=None, help="agent jobs across every session")
+
     pr = sub.add_parser("prune", help="GC notified terminal jobs (and swept session mail)")
     pr.add_argument("--days", type=int, default=RETENTION_DAYS)
     pr.add_argument("--mail-days", type=int, default=RETENTION_DAYS,
@@ -4991,6 +5357,15 @@ def main(argv: list | None = None) -> int:
         if args.wake and args.no_wake:
             print("--wake and --no-wake contradict each other. Pass one.", file=sys.stderr)
             return 2
+        account = None
+        if args.account is not None:
+            # Before the preflight and the caps: a login that cannot be used is the cheapest thing
+            # to be wrong about, and the fix is one line. Nothing is written for a refused job.
+            try:
+                account = claude_accounts.resolve(args.state_dir, args.account)
+            except claude_accounts.AccountError as e:
+                print(f"refusing to start: {e}", file=sys.stderr)
+                return 2
         if not args.no_preflight:
             # Last of the start-time refusals, and deliberately the last thing before anything is
             # written: a refused job must leave no record, because it never started. Exit 2 like the
@@ -5037,7 +5412,7 @@ def main(argv: list | None = None) -> int:
                         origin=origin, analyze=args.analyze, worktree=args.worktree,
                         over_soft_cap=(over_soft_cap_note(args.state_dir, session_id)
                                        if args.over_soft_cap and new_is_agent else None),
-                        agent=agent_flag,
+                        agent=agent_flag, prs=args.prs, account=account,
                         retry=retry_config(args.retry, backoff=args.retry_backoff,
                                            window_sec=args.retry_window))
         loop_started = None
@@ -5055,8 +5430,44 @@ def main(argv: list | None = None) -> int:
                           "worktree": rec.get("worktree"),
                           "over_soft_cap": rec.get("over_soft_cap"),
                           "agent_class": job_agent_class(rec)[0],
+                          "prs": rec.get("prs"),
+                          "account": rec.get("account"),
+                          "runtime": rec.get("runtime"),
                           "loop_started": loop_started}))
         return 0 if rec["status"] == RUNNING else 1
+
+    if args.cmd == "caps":
+        if args.caps_cmd == "set":
+            if args.soft is None and args.hard is None:
+                print("caps set: pass --soft N and/or --hard M", file=sys.stderr)
+                return 2
+            now_caps = current_caps(args.state_dir)
+            soft = now_caps["soft_per_session"] if args.soft is None else args.soft
+            hard = now_caps["hard_global"] if args.hard is None else args.hard
+            try:
+                job_caps.save(args.state_dir, soft, hard, updated_by="cli")
+            except job_caps.CapsError as e:
+                print(f"refusing: {e}", file=sys.stderr)
+                return 2
+        view = caps_view(args.state_dir, args.session)
+        if args.json:
+            print(json.dumps(view, indent=2))
+            return 0
+        caps = view["caps"]
+        origin_note = (f"set {caps.get('updated_at')} via {caps.get('updated_by')}"
+                       if caps["source"] == "file" else "defaults")
+        print(f"soft {caps['soft_per_session']} per session · hard {caps['hard_global']} total "
+              f"({origin_note})")
+        if caps.get("error"):
+            print(f"  ! job-caps.json {caps['error']} — the defaults are in force")
+        print(f"in flight: {view['global']} agent job(s) of {caps['hard_global']}"
+              + (f"; this session {view['session']} of {caps['soft_per_session']}"
+                 if view.get("session_id") else "")
+              + (f"; {view['uncounted']} non-agent uncounted" if view["uncounted"] else ""))
+        if view["global"] > caps["hard_global"]:
+            print("  (above the cap — nothing was cancelled; new agent starts are refused until "
+                  "the count drops)")
+        return 0
 
     if args.cmd == "list":
         recs = list_jobs(args.state_dir, active_only=args.active)

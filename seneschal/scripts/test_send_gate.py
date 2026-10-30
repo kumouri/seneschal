@@ -43,6 +43,9 @@ import send_recipients  # noqa: E402
 import stateio  # noqa: E402
 
 NOW = datetime(2026, 9, 16, 12, 0, tzinfo=timezone.utc)
+#: For tests that go through the CLI, which reads the real clock: a fixed date rots into a past
+#: expiry and turns every run after it red, so derive one from now.
+FUTURE_EXPIRY = (datetime.now(timezone.utc) + timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
 OWNER = fx.OWNER
 
 
@@ -98,6 +101,15 @@ class FailClosed(Base):
         self.assertEqual(v["reason"], "no-approval")
         self.assertIn("grant", sg.refusal_line(v))
         self.assertIn("dana@example.com", sg.refusal_line(v))
+
+    def test_an_owner_address_on_the_send_does_not_waive_the_gate_for_a_third_party(self):
+        """A cc to one of the owner's own addresses doesn't cover the actual third party on the same
+        send — only the third-party target has to be covered, and only it is named."""
+        v = sg.require_approval("email", f"{fx.OWNER_ALT}, dana@example.com")
+        self.assertFalse(v["allowed"])
+        self.assertEqual(v["reason"], "no-approval")
+        self.assertIn("dana@example.com", sg.refusal_line(v))
+        self.assertNotIn(fx.OWNER_ALT, v.get("error", ""))
 
     def test_unknown_is_not_owner(self):
         v = sg.require_approval("sms", "+15550001111", recipient_class="unknown")
@@ -366,7 +378,7 @@ class Cli(Base):
 
     def test_purpose_grant_via_cli_then_labelled_check(self):
         rc, out, _ = self._run(["grant", "--kind", "slack", "--purpose", "release-notes", "--standing",
-                                "--why", "replies, too", "--expires-at", "2026-10-03T05:00:00Z"])
+                                "--why", "replies, too", "--expires-at", FUTURE_EXPIRY])
         self.assertEqual(rc, 0)
         self.assertEqual(json.loads(out)["purpose"], "release-notes")
         rc, _, _ = self._run(["check", "--kind", "slack", "--recipient", "C1", "--class", "third_party"])

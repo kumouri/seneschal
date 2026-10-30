@@ -144,6 +144,16 @@ the attempt stands and the poison pill becomes reachable within a single boot â€
 rollback in invariant 3 above is a different case and is untouched), and `CONTROL_MAX_HOLD_SEC` now
 bounds invariant 7's `defer_until_idle` hold, because one wedged turn made all three of `chat_idle()`'s
 conditions false forever and that is Path A silently not deploying.
+**The gap covers the stdin write too**: the watchdog is armed before the turn's prompt is written,
+because a prompt over the pipe buffer blocks until the child reads and a child wedged before reading
+stdin otherwise held the worker thread with no deadline (`hung-turn-deadline-spec.md` "The write was
+outside the deadline").
+**An outside backstop sits behind the gap.** The drainer spawns a per-turn task on the event loop beside
+each send. If no stream event arrives for 30 minutes (never under 2Ã— the session's gap), the task kills
+the child, ends the turn on the same timeout path, and pings the owner that the watchdog failed. The
+task list is unchanged: this is part of the drainer, cancelled in the send's own `finally`, not another
+supervised task. It shares nothing with the in-thread watchdog. Invariant: **a heartbeat proves the
+event loop is alive, never that a turn is** (`hung-turn-deadline-spec.md` "The outside backstop").
 
 ### Session registry (defer noise into an engaged chat; see who's working on what)
 

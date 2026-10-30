@@ -1000,6 +1000,34 @@ button.breakglass-danger-btn:disabled {
   color: var(--text);
 }
 
+/* The caps control — the panel's one write. Quiet like everything else here: a count
+   above a lowered cap is bold, not alarm-red, because nothing is wrong — new starts simply wait. */
+.job-caps {
+  border-bottom: 1px solid var(--panel-border);
+  padding-bottom: 8px;
+  margin-bottom: 8px;
+  font-size: 0.82rem;
+}
+
+.job-caps-head {
+  margin-bottom: 6px;
+}
+
+.job-caps-over {
+  font-weight: 600;
+}
+
+.job-caps-inputs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+}
+
+.job-caps-number {
+  width: 4.5em;
+}
+
 .job-row {
   border-bottom: 1px solid var(--panel-border);
   padding: 6px 0;
@@ -1053,6 +1081,69 @@ button.breakglass-danger-btn:disabled {
 
 .job-status-muted {
   color: var(--text-dim);
+}
+
+/* What a job runs on (background-jobs-spec §3.16). Neither badge is an alarm — `awaiting_push` keeps
+   the only alarm styling in this panel — so both are outlines, never fills. */
+.job-badge {
+  flex: 0 0 auto;
+  font-size: 0.68rem;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  border: 1px solid;
+  border-radius: 4px;
+  padding: 0 5px;
+}
+
+.job-badge-nonllm {
+  color: var(--toxic);
+  border-color: color-mix(in srgb, var(--toxic) 50%, transparent);
+}
+
+/* Distinct from both: dashed and dim, because it is a statement of not knowing. */
+.job-badge-unknown {
+  color: var(--text-dim);
+  border-style: dashed;
+  border-color: var(--text-dim);
+}
+
+.job-runtime {
+  font-size: 0.74rem;
+  padding-left: 2px;
+  overflow-wrap: anywhere;
+}
+
+.job-runtime-none {
+  opacity: 0.7;
+}
+
+.job-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  margin-bottom: 6px;
+  font-size: 0.74rem;
+}
+
+.job-filter {
+  background: none;
+  color: var(--text-dim);
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  padding: 1px 6px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.job-filter:hover {
+  border-color: var(--kumouri);
+}
+
+.job-filter.is-active {
+  color: var(--text);
+  border-color: var(--kumouri);
+  background: var(--kumouri-soft);
 }
 
 .job-title {

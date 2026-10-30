@@ -25,7 +25,7 @@ that branch:
   - **every conflicting path is repair-eligible** — one of §5.2's two JSON ledgers
     (`seneschal/context-budget.json`, `seneschal/context-pointers.json`) or any Markdown file
     (`*.md`) → launch ONE `jobs.py start --worktree` repair job per `(PR, base sha)`,
-    `--requested-by assistant --reason-class merge-repair`, no `--over-soft-cap` — a cap refusal
+    `--requested-by assistant --reason-class merge-repair --pr N`, no `--over-soft-cap` — a cap refusal
     records nothing and the next pass retries. Markdown is resolved by KEEPING BOTH SIDES
     (:func:`repair_brief`), and the job comments on the PR listing the files it resolved so the owner
     can review the diff;
@@ -53,9 +53,18 @@ that reads them; :func:`sweep` takes `repo=` / `base_branch=` to override both. 
 
 At most one rebase, one repair launch and two conflict classifications per pass; one repair job in
 flight at a time; a repair job never relaunched for the same `(PR, base sha)`; at most
-:data:`MAX_REPAIRS_PER_PR_PER_DAY` per PR per 24 h (a binding ceiling says so once); no launch and no
-notice inside the quiet window (`merge_guard.in_quiet_hours`) — a job's completion push would buzz
-the owner at 3 AM, and the spec's §5.4 invariant 3 says a repair defers there like everything else.
+:data:`MAX_REPAIRS_PER_PR_PER_DAY` per PR per 24 h (a binding ceiling says so once); **never a repair
+or a rebase of a PR a running job owns** (§5A.10: `job_pr_draft.list_pr_owners` — the job's `--pr`
+stamp, else a `#N` in its title/goal); every launch **claimed first** under a lock against fresh reads
+(`state/pr-repair-launching.json`), so a second pass cannot launch the same repair while the first
+launch is in flight; no launch and no notice inside the quiet window — a job's completion push would
+buzz the owner at 3 AM, and the spec's §5.4 invariant 3 says a repair defers there like everything
+else. **Unless the owner is demonstrably awake: the window is `merge_guard.quiet_window`, the same
+predicate `pr_sweep` asks with** — the owner's own message, tap, reaction or attachment in
+`turns.jsonl` within `merge_guard.AWAKE_OVERRIDE_WINDOW` stands it down, and no row or an unreadable
+file keeps it (fails toward QUIET). Reading the bare window instead once held a conflicted PR all
+night while the owner was on Telegram approving pickers. When the override applies, the report
+carries `awake_override` and the summary line says so.
 Rebases DO run overnight: they send nothing. `state/pr-auto-repair-off` (an empty file) turns the
 whole pass off without a deploy.
 
@@ -73,12 +82,14 @@ USAGE (diagnostics; the daemon is the production caller):
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
@@ -87,7 +98,7 @@ if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
 import job_pr_draft  # noqa: E402 — a PR whose branch is a running job's worktree gets drafted, not repaired
-import merge_guard as mg  # noqa: E402 — DEFAULT_STATE_DIR, in_quiet_hours, verify_approval, repo_key
+import merge_guard as mg  # noqa: E402 — DEFAULT_STATE_DIR, quiet_window, verify_approval, repo_key
 import pr_rebase  # noqa: E402 — phase 2R: the server-side rebase under §5A.3
 import repo_config  # noqa: E402 — which repository, and which base branch: configuration
 
@@ -147,6 +158,16 @@ COMPARE_FILE_CAP = 300
 JOB_TITLE_PREFIX = "pr-repair"
 JOB_DEADLINE_SEC = 3600
 GH_TIMEOUT_SEC = 60
+#: §5A.10 — the single-flight claim. The lock guards only check-then-claim (milliseconds); the intent
+#: file is the claim itself, and it outlives the lock until the launch's outcome is on the ledger.
+LAUNCH_LOCK_FILE = "pr-repair-launch.lock"
+LAUNCH_LOCK_STALE_SEC = 120
+LAUNCH_INTENT_FILE = "pr-repair-launching.json"
+LAUNCH_INTENT_SCHEMA = "seneschal.pr-repair-launching/1"
+#: An unresolved claim older than this no longer blocks: its launcher died between claiming and
+#: recording. Well past `jobs.py start`'s own worst case (`GH_TIMEOUT_SEC` on the subprocess), and any
+#: job it did start stamped `--pr N`, so :func:`job_pr_draft.list_pr_owners` still holds the PR.
+LAUNCH_INTENT_TTL = timedelta(minutes=15)
 
 
 class CannotTell(Exception):
@@ -366,6 +387,116 @@ def active_repair_jobs(state_dir: str) -> list:
         return [{"title": "(jobs ledger unreadable)"}]
 
 
+# --------------------------------------------------------------------------- single-flight (§5A.10)
+
+def _intent_key(pr: int, base_sha: str) -> str:
+    return f"{pr}@{base_sha}"
+
+
+def _load_intents(state_dir: str) -> dict:
+    try:
+        from sentinel import load_json
+        data = load_json(os.path.join(state_dir, LAUNCH_INTENT_FILE), {})
+    except Exception:  # noqa: BLE001
+        data = {}
+    intents = data.get("intents") if isinstance(data, dict) else None
+    return dict(intents) if isinstance(intents, dict) else {}
+
+
+def _save_intents(state_dir: str, intents: dict) -> bool:
+    try:
+        from sentinel import save_json
+        save_json(os.path.join(state_dir, LAUNCH_INTENT_FILE),
+                  {"schema": LAUNCH_INTENT_SCHEMA, "intents": intents})
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _live_intent(intents: dict, pr: int, base_sha: str, now) -> dict | None:
+    """The unexpired claim on `(pr, base_sha)`, or None. An unparseable stamp counts as live — the
+    claim exists, and cannot-tell means don't launch."""
+    got = intents.get(_intent_key(pr, base_sha))
+    if not isinstance(got, dict):
+        return None
+    at = _parse_stamp(got.get("at"))
+    return got if at is None or now - at < LAUNCH_INTENT_TTL else None
+
+
+@contextlib.contextmanager
+def _launch_lock(state_dir: str):
+    """Cross-process mutex around check-then-claim; yields whether it is held. **Fail-CLOSED**: a lock
+    that cannot be taken means no launch this pass (the cost is one ~3 min pass), never an unguarded
+    one. A holder that died leaves a file older than :data:`LAUNCH_LOCK_STALE_SEC`, which is stolen."""
+    path = os.path.join(state_dir, LAUNCH_LOCK_FILE)
+    fd = None
+    for _ in range(2):
+        try:
+            os.makedirs(state_dir, exist_ok=True)
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode())
+            break
+        except FileExistsError:
+            try:
+                if time.time() - os.path.getmtime(path) <= LAUNCH_LOCK_STALE_SEC:
+                    break
+                os.remove(path)
+            except OSError:
+                break
+        except OSError:
+            break
+    try:
+        yield fd is not None
+    finally:
+        if fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+            with contextlib.suppress(OSError):
+                os.remove(path)
+
+
+def claim_launch(state_dir: str, row: dict, base_sha: str, now, owners_loader) -> tuple:
+    """Check-then-claim, under :func:`_launch_lock`, against FRESH reads — never the pass's start-of-pass
+    snapshot. Returns `(True, "")` with a claim written, or `(False, why)`. Everything a second pass
+    (another process, or this one after a restart) needs to see before it could launch the same repair
+    is re-read here: the ledger's `repair_launched`, a live claim, a running repair job, and a job that
+    owns the PR."""
+    pr, head = row["number"], row["headRefOid"]
+    with _launch_lock(state_dir) as held:
+        if not held:
+            return False, "another pass holds the launch lock"
+        if _rows_for(read_log(state_dir), "repair_launched", pr, base_sha=base_sha):
+            return False, "already launched for this base"
+        intents = _load_intents(state_dir)
+        live = _live_intent(intents, pr, base_sha, now)
+        if live:
+            return False, f"a launch is already in flight (claimed {live.get('at')})"
+        if active_repair_jobs(state_dir):
+            return False, "a repair job is already running"
+        owner = (owners_loader() or {}).get(pr)
+        if owner:
+            return False, f"job {owner.get('job_id')} owns it"
+        # Expired claims (a release that found the lock busy, a launcher that died) are pruned here,
+        # the one place the file is written with the lock held anyway.
+        intents = {k: v for k, v in intents.items()
+                   if isinstance(v, dict) and _live_intent(intents, v.get("pr"), v.get("base_sha"), now)}
+        intents[_intent_key(pr, base_sha)] = {"pr": pr, "base_sha": base_sha, "head_sha": head,
+                                              "at": _stamp(now), "pid": os.getpid()}
+        if not _save_intents(state_dir, intents):
+            return False, "could not write the launch claim"
+    return True, ""
+
+
+def release_launch(state_dir: str, pr: int, base_sha: str) -> None:
+    """Drop the claim once the launch's outcome is recorded (or known not to have started a job)."""
+    with _launch_lock(state_dir) as held:
+        if not held:
+            return  # the claim expires on its own (LAUNCH_INTENT_TTL); never block on cleanup
+        intents = _load_intents(state_dir)
+        if intents.pop(_intent_key(pr, base_sha), None) is not None:
+            _save_intents(state_dir, intents)
+
+
 def job_title(pr: int, base: str | None = None) -> str:
     return f"{JOB_TITLE_PREFIX} #{pr}: merge {base or target_base()}, resolve conflicts"
 
@@ -435,7 +566,7 @@ def launch_repair(state_dir: str, row: dict, base_sha: str, paths: list, *, clau
             f"merge left to the owner")
     argv = [sys.executable, os.path.join(SCRIPT_DIR, "jobs.py"), "--state-dir", state_dir, "start",
             "--title", job_title(row["number"], base), "--worktree", "--requested-by", "assistant",
-            "--reason-class", "merge-repair", "--goal", goal, "--agent",
+            "--reason-class", "merge-repair", "--goal", goal, "--agent", "--pr", str(row["number"]),
             "--deadline-sec", str(JOB_DEADLINE_SEC), "--",
             claude_bin, "-p", repair_brief(repo, row, base_sha, paths, base),
             "--permission-mode", "bypassPermissions"]
@@ -507,28 +638,42 @@ def _detect_once(state_dir, log_rows, row, base_sha, cls, extra, verifier, now, 
 
 def sweep(state_dir: str = mg.DEFAULT_STATE_DIR, *, claude_bin: str = "claude", now=None,
           runner=None, classifier=None, launcher=None, sender=None, verifier=None,
-          store_loader=None, dry_run: bool = False, repo: str | None = None,
+          store_loader=None, owners_loader=None, dry_run: bool = False, repo: str | None = None,
           base_branch: str | None = None) -> dict:
     """One pass. Returns a report and NEVER raises — it runs inside the daemon's PR-watch task.
 
     Seams (tests): `runner` (every subprocess), `classifier(base_sha, head_sha) -> [paths]`,
     `launcher(row, base_sha, paths) -> dict`, `sender(text) -> {"ok"}`, `verifier` (verify_approval),
-    `store_loader() -> question store`. `repo` / `base_branch` override the configured target
+    `store_loader() -> question store`, `owners_loader() -> {pr: {"job_id", "via"}}`
+    (`job_pr_draft.list_pr_owners` by default — read fresh, never cached across passes). `repo` /
+    `base_branch` override the configured target
     (:func:`target_repo` / :func:`target_base`), resolved once per pass."""
     report = {"disabled": False, "rebased": [], "waiting": [], "launched": [], "noticed": [],
               "deferred": [], "errors": [], "looked_at": 0, "drafted": []}
     try:
         return _sweep(report, state_dir, claude_bin=claude_bin, now=now, runner=runner,
                       classifier=classifier, launcher=launcher, sender=sender, verifier=verifier,
-                      store_loader=store_loader, dry_run=dry_run, repo=repo,
+                      store_loader=store_loader, owners_loader=owners_loader, dry_run=dry_run, repo=repo,
                       base_branch=base_branch)
     except Exception as e:  # noqa: BLE001 — fail-open: the daemon's task must not go down
         report["errors"].append(f"pr-repair pass failed: {e!r}")
         return report
 
 
+def _note_owned(state_dir, log_rows, row, base_sha, cls, owner, now, dry_run, repo):
+    """One ledger row per `(pr, head, owning job)` — the durable "why no repair" (§5A.10). The report's
+    `deferred`/`waiting` line says it every pass; this says it once, where 2a's rows live."""
+    pr, head, job_id = row["number"], row["headRefOid"], owner.get("job_id")
+    if dry_run or _rows_for(log_rows, "skipped_owned", pr, head_sha=head, job_id=job_id):
+        return
+    rec = {"event": "skipped_owned", "repo": repo, "pr": pr, "head_sha": head, "base_sha": base_sha,
+           "class": cls, "job_id": job_id, "via": owner.get("via"), "at": _stamp(now)}
+    append_log(state_dir, rec)
+    log_rows.append(rec)
+
+
 def _sweep(report, state_dir, *, claude_bin, now, runner, classifier, launcher, sender, verifier,
-           store_loader, dry_run, repo, base_branch):
+           store_loader, owners_loader, dry_run, repo, base_branch):
     if os.path.exists(os.path.join(state_dir, OFF_SENTINEL)):
         report["disabled"] = True
         return report
@@ -550,6 +695,7 @@ def _sweep(report, state_dir, *, claude_bin, now, runner, classifier, launcher, 
     launch = launcher or (lambda row, base_sha, paths: launch_repair(
         state_dir, row, base_sha, paths, claude_bin=claude_bin, runner=run, repo=repo, base=base))
     load_store = store_loader or _store_loader(state_dir)
+    load_owners = owners_loader or (lambda: job_pr_draft.list_pr_owners(state_dir))
 
     rows, err = list_open(repo, runner=run)
     if rows is None:
@@ -559,7 +705,11 @@ def _sweep(report, state_dir, *, claude_bin, now, runner, classifier, launcher, 
     if base_sha is None:
         report["errors"].append(err)
         return report
-    quiet = mg.in_quiet_hours(now)
+    # The PR-watcher's one quiet predicate (`pr_sweep` asks with it): the curfew, stood down by the
+    # owner's own activity in the last `AWAKE_OVERRIDE_WINDOW`, and held on any doubt about that.
+    quiet, awake = mg.quiet_window(state_dir, now)
+    if awake is not None:
+        report["awake_override"] = _stamp(awake)
     log_rows = read_log(state_dir)
     rows = sorted((r for r in rows if isinstance(r.get("number"), int)
                    and not isinstance(r.get("number"), bool)
@@ -576,6 +726,14 @@ def _sweep(report, state_dir, *, claude_bin, now, runner, classifier, launcher, 
     # above, so every row reaching this loop is, by definition, not yet a draft — the first time one
     # is seen in-flight it gets converted here.
     inflight = job_pr_draft.list_running_worktree_branches(state_dir, runner=run)
+    # **PR ownership, §5A.10.** A job can own a PR without having its branch checked out
+    # yet — a job rebasing three PRs in turn has had the watcher launch repairs of the one it was
+    # mid-rebase on (detached) and of the next one (before it got there). Read once
+    # here for the per-row skip; `claim_launch` reads it again, fresh, right before a launch.
+    try:
+        owners = load_owners() or {}
+    except Exception:  # noqa: BLE001 — cannot tell ⇒ the claim's fresh re-read still guards the launch
+        owners = {}
 
     for row in rows:
         pr, head = row["number"], row["headRefOid"]
@@ -599,6 +757,12 @@ def _sweep(report, state_dir, *, claude_bin, now, runner, classifier, launcher, 
         if mergeable == "MERGEABLE" and state == "BEHIND":
             _detect_once(state_dir, log_rows, row, base_sha, "behind",
                          {"rebase_would_suffice": True}, verifier, now, dry_run, repo)
+            owner = owners.get(pr)
+            if owner:
+                _note_owned(state_dir, log_rows, row, base_sha, "behind", owner, now, dry_run, repo)
+                report["waiting"].append(f"#{pr}: job {owner.get('job_id')} owns it "
+                                         f"(via {owner.get('via')}); not rebasing under it")
+                continue
             if rebases >= MAX_REBASES_PER_PASS:
                 report["deferred"].append(f"#{pr} (rebase cap)")
                 continue
@@ -625,6 +789,12 @@ def _sweep(report, state_dir, *, claude_bin, now, runner, classifier, launcher, 
             continue  # one job per (PR, base sha), whatever it did
         if _rows_for(log_rows, "repair_refused", pr, head_sha=head):
             continue  # the owner has been told about this head once
+        owner = owners.get(pr)
+        if owner:
+            _note_owned(state_dir, log_rows, row, base_sha, "conflicting", owner, now, dry_run, repo)
+            report["deferred"].append(f"#{pr} (job {owner.get('job_id')} owns it, via "
+                                      f"{owner.get('via')}; not repairing under it)")
+            continue
         if quiet:
             report["deferred"].append(f"#{pr} (quiet hours)")
             continue
@@ -698,6 +868,13 @@ def _sweep(report, state_dir, *, claude_bin, now, runner, classifier, launcher, 
             report["launched"].append(f"#{pr} (would launch): {', '.join(paths)}")
             launches += 1
             continue
+        # §5A.10: check-then-claim against FRESH reads, under a lock. Everything above read the
+        # start-of-pass snapshot; the claim is what stops a second pass (another process, or this one
+        # after a restart) launching the same repair while this launch is still in flight.
+        claimed, why = claim_launch(state_dir, row, base_sha, now, load_owners)
+        if not claimed:
+            report["deferred"].append(f"#{pr} ({why})")
+            continue
         res = launch(row, base_sha, paths) or {}
         if res.get("ok"):
             launches += 1
@@ -711,6 +888,10 @@ def _sweep(report, state_dir, *, claude_bin, now, runner, classifier, launcher, 
             report["deferred"].append(f"#{pr} (jobs cap; retry next pass)")
         else:
             report["errors"].append(f"#{pr} launch: {res.get('error')}")
+        # Released only once the outcome is on the ledger (or no job started): from here on
+        # `repair_launched` is what holds the (PR, base sha). A launcher that RAISES skips this line —
+        # whether a job started is then unknown, so the claim stands until LAUNCH_INTENT_TTL.
+        release_launch(state_dir, pr, base_sha)
     return report
 
 
@@ -720,6 +901,8 @@ def summary_line(report: dict) -> str:
                        ("noticed", "told"), ("waiting", "waiting"), ("deferred", "held")):
         if report.get(key):
             parts.append(f"{label}: " + "; ".join(report[key]))
+    if report.get("awake_override"):
+        parts.append(f"quiet window stood down: the owner was active at {report['awake_override']}")
     return "pr-repair — " + (" | ".join(parts) if parts else f"looked at {report.get('looked_at', 0)}")
 
 

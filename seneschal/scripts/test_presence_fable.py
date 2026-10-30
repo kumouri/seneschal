@@ -4,6 +4,8 @@ Fable delegation") — companion to test_presence_cockpit.py (v2) and test_prese
 pre-existing Router shadow arm). Covers:
   * `resolve_warm_model` — state/model-config.json's warm_model winning over --model, with fallback;
   * `strip_force_fable` / `apply_force_route` — the `!fable` force-route text transform;
+  * `strip_force_route` / `force_route_directive` — the other targets (`!opus48`, `!glm`, `!gpt…`)
+    off `model_delegate.TARGETS`;
   * `fable_arm_classify` — the router's fable arm, ceiling-gated, logging `arm: "fable"` rows;
   * `_enqueue_inbound` wiring both of the above in for real, end to end;
   * `drainer_task` best-effort attaching a pending fable hint to the next prompt it builds.
@@ -127,6 +129,69 @@ class ApplyForceRoute(unittest.TestCase):
         # A quick guard against a future edit accidentally implying force-route bypasses approvals.
         result = pr.apply_force_route("telegram", "!fable send the email", lambda *_: None)
         self.assertIn("never the approval gate", result)
+
+
+class ForceRouteTargets(unittest.TestCase):
+    """The other force-route targets (`!opus48`, `!glm`, `!gpt…`) — one registry, `model_delegate.TARGETS`,
+    and `!fable` left byte-for-byte as it was."""
+
+    def test_every_non_fable_registry_alias_is_a_prefix(self):
+        import model_delegate
+        self.assertEqual(set(pr.FORCE_ROUTE_ALIASES), set(model_delegate.TARGETS) - {"fable"})
+        for alias in pr.FORCE_ROUTE_ALIASES:
+            self.assertEqual(pr.strip_force_route(f"!{alias} hello"), (alias, "hello"))
+
+    def test_fable_still_parses_through_its_own_path(self):
+        self.assertEqual(pr.strip_force_route("!Fable: do the thing"), ("fable", "do the thing"))
+        self.assertEqual(pr.force_route_directive("fable"), pr.FORCE_FABLE_DIRECTIVE)
+
+    def test_punctuation_and_case_after_the_alias(self):
+        self.assertEqual(pr.strip_force_route("!glm: red-team the harness"), ("glm", "red-team the harness"))
+        self.assertEqual(pr.strip_force_route("  !GLM, hi"), ("glm", "hi"))
+        self.assertEqual(pr.strip_force_route("!gpt6sol"), ("gpt6sol", ""))
+
+    def test_mid_sentence_and_near_misses_are_ignored(self):
+        for text in ("ask !glm about it", "!gpt6 is not an alias", "!glmx nope", "!gpt6solar no",
+                     "glm: no bang", ""):
+            self.assertEqual(pr.strip_force_route(text), (None, text), text)
+
+    def test_the_longest_alias_wins(self):
+        # gpt6sol vs gpt61sol vs gpt6astra — no alias may stop at a shorter one's prefix.
+        self.assertEqual(pr.strip_force_route("!gpt61sol x")[0], "gpt61sol")
+        self.assertEqual(pr.strip_force_route("!gpt6astra x")[0], "gpt6astra")
+
+    def test_directive_per_target_names_the_model_the_script_and_the_gate(self):
+        import model_delegate
+        for alias in pr.FORCE_ROUTE_ALIASES:
+            t = model_delegate.TARGETS[alias]
+            d = pr.force_route_directive(alias)
+            self.assertTrue(d.startswith(f"[force-route {alias}: "), d)
+            self.assertIn(t.label, d)
+            self.assertIn(f"model_delegate.py --target {alias}", d)
+            self.assertIn("MUST attempt", d)
+            self.assertIn("handle the turn yourself", d)
+            self.assertIn("never the approval gate", d)
+            self.assertIn("drafts-and-holds", d)
+
+    def test_ceiling_wording_follows_the_backend(self):
+        self.assertIn("ceiling refuses", pr.force_route_directive("opus48"))
+        self.assertIn("ceiling doesn't apply", pr.force_route_directive("glm"))
+        self.assertIn("ceiling doesn't apply", pr.force_route_directive("gpt6sol"))
+
+    def test_apply_force_route_injects_the_target_directive(self):
+        logs = []
+        out = pr.apply_force_route("discord", "!glm: plan the eval", logs.append)
+        self.assertEqual(out, f"{pr.force_route_directive('glm')}\n\nplan the eval")
+        self.assertTrue(any("'!glm'" in l and "discord" in l for l in logs))
+
+    def test_fable_log_line_is_unchanged(self):
+        logs = []
+        pr.apply_force_route("telegram", "!fable x", logs.append)
+        self.assertEqual(logs, ["• force-route: '!fable' detected on a telegram message — directive injected"])
+
+    def test_cockpit_toggle_never_double_prefixes_another_target(self):
+        # The "Send to Fable" toggle left on while the owner typed `!glm` — the typed prefix wins.
+        self.assertEqual(pr._cockpit_inbox_text({"text": "!glm hi", "force_fable": True}), "!glm hi")
 
 
 class FableArmClassify(unittest.TestCase):

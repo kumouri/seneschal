@@ -337,6 +337,21 @@ session so the assistant knows what the owner is replying to without a restate.
   content of its own.
 - The prefix rides the existing `telegram-thread.json` continuity unchanged (it's just part of the line).
 
+### 4.5 Partial-quote replies
+- Telegram lets the owner select part of a message and reply to just that; the update carries
+  `message.quote`, which intake used to ignore — a reply to one sentence read as a reply to the whole
+  message, and a sentence past the 300-char head never arrived at all.
+- `telegram_poll.py::extract_reply_selection` → an additive `reply_quote` field: a **manual** quote's
+  `text`, verbatim (ends stripped), capped at `REPLY_SELECTION_CHARS` = 4096 (Telegram's own message
+  ceiling, so a real selection never reaches it). A server-added quote (`is_manual` absent) is not a
+  selection; a selection equal to the whole parent is dropped as redundant.
+- `presence.py::reply_prefix` renders `(replying to: "<parent head>" — selected: "<the selection>")`.
+  The parent quote is first and byte-identical to §4.4's shape, so `watch_ack.py --replied-to` keeps
+  resolving it.
+- `external_reply` (a reply into another chat or topic) now gets a descriptor as well — the
+  server-added quote's text when there is one, else a media descriptor or "a message in another chat
+  or topic" — and a manual quote on it is a selection like any other.
+
 ---
 
 ## 5. Companion — post-restart "backlog ack" (optional, recommended)

@@ -1,11 +1,12 @@
 # Durable background jobs — "I'll tell you when it's done," made real
 
-**Status:** `PARTIAL(BUILT + §3.7-§3.14)` — the detached ledger, shim and completion push · §7
+**Status:** `PARTIAL(BUILT + §3.7-§3.16)` — the detached ledger, shim and completion push · §7
 transient-failure retry · §3.8 live logs + the tree kill · §3.9 the spawn preflight, made
 namespace-aware in §3.9.1 · §3.10 a cancel is unoverwritable · §3.11 exit 0 vs. the log · §7.2.1 the
 classifier reads the failure end · §3.12 the concurrency caps, counting agent jobs only · §3.13 the
 job-completion guarantee (detect/resume/rescue) · §3.14 the preventive rail
-(`job_background_guard.py`). · **Scope:** `seneschal/scripts/jobs.py`,
+(`job_background_guard.py`) · the cap values the owner's to set (§3.12) · `start --account` (§3.15) ·
+the `runtime` stamp (§3.16). · **Scope:** `seneschal/scripts/jobs.py`,
 `seneschal/scripts/job_completion.py`, `seneschal/scripts/job_background_guard.py`, the PR CI watcher
 (§4), and `presence.py`'s two touchpoints (the scheduler tick's reconcile, the drainer's lease guard).
 
@@ -557,10 +558,10 @@ goes stale first.
 
 | | soft | hard |
 |---|---|---|
-| number | 3 | 5 |
+| number | 3 by default — **the owner's to set** (below) | 5 by default — **the owner's to set** |
 | population | agent jobs from one `origin.session_id` | agent jobs from every origin (below) |
 | what it protects | **the owner's headroom** — the concurrency they want left for their own desktop sessions | the ceiling |
-| override | `--over-soft-cap`, stamped on the record | **none, and none should be added** |
+| per-job override | `--over-soft-cap`, stamped on the record | **none, and none should be added** |
 
 The 3 is a claim about what the owner wants available, not about what the machine can carry, and
 overrunning it can be right: an urgent data-loss fix as a fourth job is the correct call. So it yields
@@ -657,6 +658,38 @@ is itself non-agent is checked against neither cap at the CLI: starting it adds 
    `bash x.sh`, `wsl … bash …`, `cmd /c`, `python -c`) hides what it runs. Treating an opaque job as free
    is how an agent job slips past the cap unseen, so an over-count is the cheaper error: it costs one
    `--no-agent` on the next start.
+
+#### The values are the owner's to set
+
+The two numbers used to be module constants. **What changed is who owns the numbers, not what kind of
+limit each one is**: the soft cap still yields to `--over-soft-cap` and the hard cap still has no
+per-job flag. A job still cannot talk its way past the hard cap; the owner can move where it sits.
+
+- **Store:** `state/job-caps.json` (gitignored) —
+  `{"schema", "soft_per_session", "hard_global", "updated_at", "updated_by": "cockpit"|"cli"}`.
+  `job_caps.save` is the ONLY writer (`stateio.write_json_atomic`, never an in-place write). Both
+  the cockpit's Jobs panel (`POST /api/job-caps`) and `jobs.py caps set --soft N --hard M` call it.
+  `jobs.py caps [--json]` shows the values beside the live counts.
+- **Read fresh at every check.** `current_caps()` → `job_caps.load()` on every refusal and on every
+  `over_soft_cap_note`. No cache, so a value saved in the panel applies to the very next `start`.
+- **Validate, never clamp.** Integers only (a JSON `true` is refused by name), soft ≥ 1, hard ≥ soft,
+  hard ≤ 12. A rejected pair writes nothing. The 12 is a typo guard, not a policy.
+- **Missing, unreadable or invalid reads as the defaults (3 / 5), and says so once per process.**
+  A broken file can never mean "no cap", and it must not stop every delegated job either. A refusal
+  quotes who set the number it refused at (the owner's setting and when, or "the shipped default"),
+  so a changed number is never attributed to the default it replaced.
+- **Lowering a cap below the live count cancels nothing.** It only refuses the next start; running
+  jobs finish normally. The panel and `caps set --help` both say so. Same posture as the refusal at
+  the hard cap: nothing here ever kills work.
+- **One global pair, not per-account** (§3.15). Both caps protect the owner's concurrency: the
+  desktop sessions the soft cap reserves room for, and the ceiling. That is the same desk whichever
+  subscription pays. A per-account ceiling would answer a different question, rate-limit headroom,
+  which belongs to the auto-pick follow-up (§8) if it is ever built.
+
+**Pinned by** `test_job_caps.py` (validation, the store's fallback and warn-once, the gate reading
+the stored values fresh, the unchanged flag surface, and lowering-cancels-nothing),
+`cockpit/server/test_caps_control.py` + `test_app.py` (the panel writes through the same writer, and
+the route is auth/CSRF-gated and audited) and `cockpit/web/src/components/jobCaps.test.ts`.
 
 #### Where the gate lives, and what it must never block
 
@@ -803,6 +836,80 @@ posture §3.13's own residuals section already accepts for retry-vs-resume compo
 
 Tests: `test_job_background_guard.py` (the hook's own decision logic, fail-open contract, and import
 weight) + `test_jobs.py` (`child_env`'s `SENESCHAL_JOB_ID` stamp, both call sites).
+
+### 3.15 Which login a job runs on — `start --account <name>`
+
+An install can hold more than one Claude subscription (plus, say, a ChatGPT one). Before this, every
+job ran on whichever Claude login its launcher happened to inherit, so there was no way to move
+delegated work onto a second subscription and no way to see which one a job had spent.
+
+**An account is a Claude config dir.** The CLI keeps its whole identity (`.credentials.json`, its own
+`.claude.json`, settings, history) under `CLAUDE_CONFIG_DIR`, and under `~/.claude` when that is
+unset. The registry is `state/claude-accounts.json`, `{name: dir | null}`, where `null` is the normal
+login. The login itself is an interactive host-side step no PR can take:
+`../scripts/CLAUDE_ACCOUNTS_SETUP.md`.
+
+- **Refused up front, exit 2, nothing written** (`claude_accounts.resolve`, run before the preflight
+  and the caps): an unknown name, a missing or unreadable registry, a dir that does not exist, a dir
+  with no `.credentials.json`, or **a dir whose rails differ from the default login's**. That last
+  one matters most. Claude Code reads hooks from `<dir>/settings.json` and the global instructions
+  from `<dir>/CLAUDE.md`, so a fresh second dir runs a job with no `merge_guard`, no `send_gate_hook`,
+  no `job_background_guard` and none of the owner's standing rules. A setup-doc sentence asking for a
+  link would be a prose rule that does not bind, so the comparison runs on every `--account` start
+  instead. The `hooks` block and the `CLAUDE.md` bytes must match `~/.claude`'s, and that reference is
+  always `~/.claude`, never the launcher's own `CLAUDE_CONFIG_DIR`.
+- **The RESOLVED dir is stamped**, `account: {name, config_dir}`, absent without the flag. A later
+  registry edit can therefore never move a running job's retry or resume onto another login.
+- **One job, one login, every spawn.** `child_env(job_id, account)` sets `CLAUDE_CONFIG_DIR` (or
+  REMOVES an inherited one, for an account naming the normal login) at both spawn points, the shim
+  (`_spawn_attempt`) and the real command (`_run_shim`). A `--retry` respawn and §3.13's RESUME
+  (`claude --resume <id>`) both re-enter `_spawn_attempt` with the same record, so they land on the
+  same login by construction. `--worktree` changes the cwd, never the env. `ANTHROPIC_API_KEY` stays
+  scrubbed for every account: they are all subscription logins.
+- **No flag, no change.** No block, and the child env is exactly what it was, including an inherited
+  `CLAUDE_CONFIG_DIR`, which is left alone.
+- **Visible where usage is read.** The completion push carries an `Account: <name>` line, and the
+  job's `runtime` stamp (§3.16) names the account as its `subscription` in `list`, `status` and the
+  cockpit's Jobs panel. All of them stay silent for the default login, so an ordinary job reads
+  byte-for-byte as before.
+- **What is NOT carried:** a `--analyze` job is a new, origin-less job and runs on the default login.
+
+**Pinned by** `test_claude_accounts.py` — resolve's refusals and the rails comparison, the env at
+both spawn points, the record stamp, the retry respawn, the worktree spawn, the RESUME respawn, the
+CLI's exit 2 with nothing written, and the display rules.
+
+### 3.16 What each job runs on — the `runtime` stamp
+
+With several subscriptions and providers in play, "a job is running" no longer says what it is
+spending, and the caps' agent/non-agent split (§3.12) was invisible anywhere but a refusal.
+
+**Stamp at start, read a field later.** `start_job` writes, on EVERY record, at the one write point:
+
+```json
+"runtime": {"subscription": "main", "harness": "claude-cli", "model": "default", "llm": true}
+```
+
+| Field | Values | Where it comes from |
+|---|---|---|
+| `llm` | `true` / `false` / `"unknown"` | `job_agent_class` verbatim: agent / non-agent / unknown. The badge and the caps can never disagree. |
+| `harness` | `claude-cli` / `codex` / `hf-router` / `ollama` / `unknown` / `none` | the first argv element that IS a harness command (`claude`, `codex`, `ollama` — so `uv run claude …` and `wsl -- claude …` count, a prompt mentioning claude does not), a delegate script's own registry, or a script whose harness is fixed by its code. `none` for a non-LLM job. |
+| `subscription` | `main` / an account name / `ChatGPT` / `HuggingFace` / `local` / `null` | for `claude-cli`, the login the child will ACTUALLY use: `--account` (§3.15; `default` → `main`), else the inherited `CLAUDE_CONFIG_DIR` (named from the registry when it can be), else `main`. The other harnesses map to their own provider. |
+| `model` | an id / `"default"` / `null` | the argv's own `--model`/`-m` (`ollama run <model>` positionally), or a delegate target's registered id. **The literal `"default"` when an agent harness ran with no model flag** — the CLI's own default chose, and nothing saw which. |
+
+- **Never guessed.** Every value is read off the argv, the record, or a registry; where none of them
+  says, the field is `unknown`/`null`, not a likely answer.
+- **Never re-derived.** A record written before the stamp existed has no block and renders `—` in
+  `list`, `status` and the cockpit. Re-classifying it on read would put today's classifier in the
+  mouth of a job that ran under a different one. A retry respawn keeps the stamp it started with.
+- **`model_delegate.py` joined `_AGENT_SCRIPTS`** in the same change. It was `unknown` before, which
+  already counted toward the caps, so this changed a label, not a count.
+- **Visible:** `list` prints `[main · claude-cli · default]` / `[non-LLM]` / `[LLM unknown]` / `[—]`
+  on the job's line; `status` spells out each field and the classifier's reason; `start` echoes the
+  block in its JSON. The cockpit's Jobs panel shows the phrase under each row with a **non-LLM** /
+  **LLM?** badge (`cockpit-spec.md` § Jobs panel).
+
+**Pinned by** `test_job_runtime.py`, `cockpit/server/test_jobs.py` (the block served field by field,
+absent → `null`), and `cockpit/web/src/components/jobRuntime.test.ts`.
 
 ## 4. First consumer — a PR CI watcher
 
@@ -1067,6 +1174,9 @@ still counts as **active** for `list --active`, the lease guard and the cockpit'
   have accumulated, the `jq` in §7.4.1 says which callers should opt into `--retry` — that is the
   decision the recording exists to inform, and leaving it collected-but-unread would be the same mistake
   one step later.
+- **Auto-pick the account with headroom (§3.15) — not built.** `--account` is explicit today;
+  nothing chooses a login for a job. Picking one would need a per-account usage reading, and the
+  choice must stay visible on the record the same way the explicit flag is.
 - **Still open:** the live daemon's restart-mid-job adoption path is unit-tested but not yet exercised
   against a real daemon reload with a job in flight. `--wake` and `--lease` are likewise tested but not
   yet live-exercised. The retry loop *has* been smoke-tested end to end against real detached processes
@@ -1075,7 +1185,7 @@ still counts as **active** for `list --active`, the lease guard and the cockpit'
 
 ## Router entry
 
-**Status:** PARTIAL(BUILT + §3.7-§3.14).
+**Status:** PARTIAL(BUILT + §3.7-§3.16).
 
 **What it decides:** Detached jobs the daemon pushes on every terminal state; the opt-in transient retry
 and why unrecognised output is terminal first time. **§3.8: "a cancel loses the log" was really "you

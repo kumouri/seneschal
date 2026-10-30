@@ -20,7 +20,33 @@ language" is a question about the patch, not about the file's final text. `git d
 for every untracked `*.md` (`gate_git.added_lines_diff`) is parsed by hand for **added** lines (`+`,
 never `+++`) matching `\bruling\b` or `\bruled\b`, case-insensitive. If any markdown file other than the
 ledger itself gained such a line, the ledger must be one of the files this diff touches. It is not
-enough that the ledger merely *exists* — the change must have edited it.
+enough that the ledger merely *exists* — the change must have edited it. An added line that is only a
+relocation of a removed one is exempt (next section).
+
+## A move is not new language
+
+Dream's nightly learnings retirement moves CLOSED proposals verbatim from
+`../references/proposed-learnings.md` to its archive file. A proposal that quotes a decision would turn
+the gate red on text that existed before the change and still exists after it, only in another file —
+and an unattended nightly PR would have to be patched by hand with per-line markers, every time.
+
+So the same `-U0` diff is read for its `-` lines too (`parse_diff`): **an added line whose text,
+stripped of surrounding whitespace, is also a removed line anywhere in the same diff — any file,
+including one deleted outright — is a move and is not judged.** It is reported (`moved` in `scan()`'s
+result, one summary line in `render()`), never a finding. The exemption is deliberately narrow:
+
+- **Exact text only.** A sentence that gained the word in an edit is a `-old`/`+new` pair whose two
+  sides differ, so the `+` side is judged exactly as before. Only surrounding whitespace is ignored
+  (re-indentation, CRLF vs LF).
+- **Multiplicity.** Each removed copy exempts ONE added copy, first in diff order — a line added
+  three times and removed once leaves two to be judged.
+- **Markdown sources only.** The removed lines come from the same `*.md` pathspec as the added ones;
+  text moved out of a `.py` docstring into a `.md` is still judged as new.
+- **The move test runs before the marker test**, so a moved line's marker — valid, empty-reason or
+  malformed — is not re-judged: it was judged where the line came from.
+
+Untracked files keep their working-tree meaning (`gate_git`'s synthetic all-added hunk): a new file
+that receives text removed from a tracked one is a move like any other.
 
 **Why the working tree.** Diffing `<merge-base>..HEAD` sees committed changes only: run BEFORE
 `git commit` (gates green, then commit, then push: the natural order) it is shown an empty diff,
@@ -93,6 +119,7 @@ import os
 import re
 import subprocess
 import sys
+from collections import Counter
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.normpath(os.path.join(SCRIPT_DIR, "..", ".."))
@@ -170,51 +197,92 @@ def changed_paths(root: str, base: str) -> list:
     return gate_git.changed_paths(root, base)
 
 
+def parse_diff(diff: str) -> tuple:
+    """`(added, removed)` from a `git diff -U0` text: `added` is `[(path, line text), ...]` in diff
+    order, `removed` a `Counter` of every `-` line's text, stripped of surrounding whitespace, across
+    ALL files in the diff (a deleted file's lines included — that is a move's most common source).
+
+    State-driven rather than prefix-driven: a `---`/`+++` line is a file header only BEFORE the
+    file's first `@@`; inside a hunk it is content (a removed line that itself began `--`). Every
+    file section opens with `diff --git`, which is what resets the state — `gate_git`'s synthetic
+    new-file hunk carries one too."""
+    added: list = []
+    removed: Counter = Counter()
+    current_path = None
+    in_hunk = False
+    for line in diff.splitlines():
+        if line.startswith("diff --git "):
+            current_path, in_hunk = None, False
+            continue
+        if not in_hunk:
+            if line.startswith("+++ "):
+                spec = line[4:].strip()
+                current_path = (None if spec == "/dev/null"
+                                else spec[2:] if spec.startswith("b/") else spec)
+            elif line.startswith("@@"):
+                in_hunk = True
+            continue
+        if line.startswith("@@"):
+            continue
+        if line.startswith("+"):
+            if current_path:
+                added.append((current_path, line[1:]))
+        elif line.startswith("-"):
+            removed[line[1:].strip()] += 1
+    return added, removed
+
+
 def _added_lines_by_ruling_status(root: str, base: str) -> tuple:
-    """One pass over the diff. Returns `(unsuppressed, malformed_reason, malformed_syntax)`, each
-    `{path: [added line text, ...]}`. Only `+` lines count — a ruling word already present before
-    this PR is not this PR's to answer for. A line carrying `CHECK_RULINGS_MARKER_RE` with a
-    non-empty reason is validly suppressed and appears in NONE of the three dicts; one with the
-    marker but an empty/whitespace-only reason lands in `malformed_reason`; one that carries the
-    literal substring `check-rulings:` (a marker was clearly attempted) but never matches
-    `CHECK_RULINGS_MARKER_RE` at all lands in `malformed_syntax` — in both malformed cases the
-    unexplained/unparseable opt-out stays a finding of its own rather than being scanned as if no
-    marker had ever been tried."""
+    """One pass over the diff. Returns `(unsuppressed, malformed_reason, malformed_syntax, moved)`,
+    each `{path: [added line text, ...]}`. Only `+` lines count — a ruling word already present
+    before this PR is not this PR's to answer for.
+
+    An added line whose stripped text is also a REMOVED line somewhere in the same diff is a move,
+    not new language, and lands in `moved` only (module docstring, "A move is not new language").
+    Multiplicity holds: each removed copy exempts exactly one added copy, first in diff order, so a
+    line added three times and removed once leaves two to be judged as usual. The move test runs
+    before the marker test, so a moved line's marker (valid or not) was already judged where the
+    line came from.
+
+    A line carrying `CHECK_RULINGS_MARKER_RE` with a non-empty reason is validly suppressed and
+    appears in NONE of the dicts; one with the marker but an empty/whitespace-only reason lands in
+    `malformed_reason`; one that carries the literal substring `check-rulings:` (a marker was
+    clearly attempted) but never matches `CHECK_RULINGS_MARKER_RE` at all lands in
+    `malformed_syntax` — in both malformed cases the unexplained/unparseable opt-out stays a finding
+    of its own rather than being scanned as if no marker had ever been tried."""
     diff = gate_git.added_lines_diff(root, base, "*.md")
     if diff is None:
-        return {}, {}, {}
+        return {}, {}, {}, {}
+    added, removed = parse_diff(diff)
     unsuppressed: dict = {}
     malformed_reason: dict = {}
     malformed_syntax: dict = {}
-    current_path = None
-    for line in diff.splitlines():
-        if line.startswith("+++ "):
-            spec = line[4:].strip()
-            current_path = None if spec == "/dev/null" else spec[2:] if spec.startswith("b/") else spec
+    moved: dict = {}
+    for path, text in added:
+        if not RULING_WORD_RE.search(text):
             continue
-        if line.startswith("+++") or line.startswith("---"):
+        key = text.strip()
+        if removed[key] > 0:
+            removed[key] -= 1
+            moved.setdefault(path, []).append(key)
             continue
-        if line.startswith("+") and current_path:
-            text = line[1:]
-            if not RULING_WORD_RE.search(text):
-                continue
-            marker = CHECK_RULINGS_MARKER_RE.search(text)
-            if marker:
-                if marker.group("reason").strip():
-                    continue  # validly suppressed — the marker IS the audit trail
-                malformed_reason.setdefault(current_path, []).append(text.strip())
-                continue
-            if CHECK_RULINGS_ATTEMPT_RE.search(text):
-                malformed_syntax.setdefault(current_path, []).append(text.strip())
-                continue
-            unsuppressed.setdefault(current_path, []).append(text.strip())
-    return unsuppressed, malformed_reason, malformed_syntax
+        marker = CHECK_RULINGS_MARKER_RE.search(text)
+        if marker:
+            if marker.group("reason").strip():
+                continue  # validly suppressed — the marker IS the audit trail
+            malformed_reason.setdefault(path, []).append(key)
+            continue
+        if CHECK_RULINGS_ATTEMPT_RE.search(text):
+            malformed_syntax.setdefault(path, []).append(key)
+            continue
+        unsuppressed.setdefault(path, []).append(key)
+    return unsuppressed, malformed_reason, malformed_syntax, moved
 
 
 def added_ruling_lines(root: str, base: str) -> dict:
     """`{path: [added line text, ...]}` for every tracked `*.md` file whose diff against `base`
-    ADDED a line matching `RULING_WORD_RE`, EXCLUDING a line validly suppressed by a
-    `check-rulings: not-a-ruling` marker (non-empty reason) — see the module docstring's "The escape
+    ADDED a line matching `RULING_WORD_RE`, EXCLUDING a pure move (`moved_ruling_lines`) and a line
+    validly suppressed by a `check-rulings: not-a-ruling` marker (non-empty reason) — see the module docstring's "The escape
     hatch", `malformed_rulings_markers` for the marker's empty-reason case, and
     `malformed_rulings_marker_syntax` for a marker that was attempted but doesn't parse — neither
     stays a silent pass."""
@@ -234,6 +302,12 @@ def malformed_rulings_marker_syntax(root: str, base: str) -> dict:
     at all (missing `-->`, wrong separator, a typo in `not-a-ruling`, ...). Distinct from
     `malformed_rulings_markers`, which is for a marker that DOES parse but has an empty reason."""
     return _added_lines_by_ruling_status(root, base)[2]
+
+
+def moved_ruling_lines(root: str, base: str) -> dict:
+    """`{path: [added line text, ...]}` for an added line matching `RULING_WORD_RE` that the move
+    test exempted — the same text was removed elsewhere in this diff. Reported, never a finding."""
+    return _added_lines_by_ruling_status(root, base)[3]
 
 
 def parse_ledger_rows(text: str) -> tuple:
@@ -297,11 +371,13 @@ def scan(root: str | None = None, base_ref: str | None = None) -> dict:
 
     base = resolve_base(root, base_ref)
     candidates: dict = {}
+    moved: dict = {}
     ledger_touched = None
     if base is not None:
         changed = changed_paths(root, base)
         ledger_touched = LEDGER_PATH in changed
-        unsuppressed, malformed_reason, malformed_syntax = _added_lines_by_ruling_status(root, base)
+        unsuppressed, malformed_reason, malformed_syntax, moved = _added_lines_by_ruling_status(
+            root, base)
         candidates = {p: lines for p, lines in unsuppressed.items() if p != LEDGER_PATH}
         if candidates and not ledger_touched:
             names = ", ".join(sorted(candidates))
@@ -336,6 +412,7 @@ def scan(root: str | None = None, base_ref: str | None = None) -> dict:
 
     return {"root": root, "base": base, "ledger_touched": ledger_touched,
             "candidates": {p: lines for p, lines in candidates.items()},
+            "moved": {p: lines for p, lines in moved.items()},
             "rows": len(rows), "findings": [f.as_dict() for f in findings]}
 
 
@@ -347,6 +424,10 @@ def render(result: dict, out=None) -> None:
     else:
         out.write("  base: %s · ledger touched in this diff: %s\n"
                    % (result["base"][:12], result["ledger_touched"]))
+        moved = result.get("moved") or {}
+        if moved:
+            out.write("  %d moved line(s) exempt (same text removed elsewhere in this diff): %s\n"
+                       % (sum(len(v) for v in moved.values()), ", ".join(sorted(moved))))
     if result["findings"]:
         out.write("\n")
         for f in result["findings"]:

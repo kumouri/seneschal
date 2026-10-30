@@ -52,13 +52,14 @@ seneschal/
                    (incl. reminders_seed.py — the whole-day exact-time seeder; reminders_cadence
                    / reminder_premise* / reminder_suppressions / reminders_live / _reconcile),
                    ack.py (free-text ack) + watch_ack/_reconcile/_suppress (Watch-send gates),
-                   cockpit_pipe.py + model_config.py + governor.py + fable_delegate.py (the
-                   cockpit pipe, model dials, budget governor, and Fable delegation one-shot),
+                   cockpit_pipe.py + model_config.py + governor.py + fable_delegate.py +
+                   model_delegate.py (the cockpit pipe, model dials, budget governor, the Fable
+                   delegation one-shot, and the `!<alias>` force-route to other models),
                    outbox.py + outbox_common.py (durable write-behind journal for act-low
                    Notion writes — Notion backend only; filesystem backends write direct),
                    session_stamp.py + session_heartbeat.py + mini_dream.py (multi-session
                    registry under state/sessions/ + the per-session mini-dream distiller),
-                   jobs.py + job_*.py + worktree_gc.py (durable background jobs —
+                   jobs.py + job_*.py + worktree_gc.py + claude_accounts.py (durable background jobs —
                    docs/background-jobs-spec.md), loops.py + cadence_chain/owi_*/
                    observation_gate/standing_safety/brief_prestage/carryover_region (the
                    open-work register and its satellites — state/README.md),
