@@ -143,7 +143,7 @@ TELEGRAM_INBOX_DIR = "inbox"
 
 # Catch-up stagger. When a defer-release (the owner wakes / gets home / stops driving) or a plain backlog lets
 # several nudges come due in one pass, firing them all at once is the "wall of N nudges at 2:12" we
-# retired (reminders-stagger-not-batch — bunching overwhelms an Autistic+ADHD brain). So a NON-piercing
+# retired (reminders-stagger-not-batch — bunching overwhelms the owner). So a NON-piercing
 # nudge fires only when at least this long has elapsed since the last non-piercing fire (and at most one
 # per pass); the rest stay pending and drip out one at a time on later ticks. Piercing items (Call Me /
 # Critical `pierce_quiet`) bypass the gate — they can't slide. Fresh nudges are already spaced

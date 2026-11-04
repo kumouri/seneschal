@@ -6,7 +6,7 @@ of a recorded reaction to the assistant forgetting something — the second axis
 **salience = frequency × emotional-weight** (`../references/salience.md`; plan §3).
 
 **Division of labor (plan §3.2):** the *source of record* for an event's weight is the warm Opus
-session that logged it — only Opus holds the context that makes "you forgot my mom's yahrzeit" a 10
+session that logged it — only Opus holds the context that makes "you forgot the memorial service" a 10
 and "you forgot to move my 3pm" a 2. This classifier runs **offline in Dream** over each new event's
 bare ``reaction_text`` as an independent second opinion; divergence between the two is a
 data-quality flag in the weekly rollup, never an override. The owner's own stated weight always wins.
@@ -70,7 +70,7 @@ Return STRICT JSON, exactly these keys and nothing else:
    "reason": "<one short clause>"}
 
 Scale for "weight":
-  -1.0 .. -0.7  devastating / a betrayal of trust ("you seriously forgot my mom died?")
+  -1.0 .. -0.7  devastating / a betrayal of trust ("you seriously forgot the funeral?")
   -0.7 .. -0.4  clearly hurt or angry ("you forgot my birthday?")
   -0.4 .. -0.1  mildly annoyed / disappointed ("you forgot again, huh")
    0.0          neutral, purely factual mention, or unscorable from the text alone
