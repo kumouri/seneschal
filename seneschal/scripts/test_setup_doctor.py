@@ -163,7 +163,7 @@ class Base(unittest.TestCase):
         vpy.parent.mkdir(parents=True, exist_ok=True)
         vpy.write_text("", encoding="utf-8")
 
-    def write_daemon_files(self, pid=None, health_age_min=1):
+    def write_daemon_files(self, pid=None, health_age_min=1, supervised=True):
         (self.state_dir / "presence.lock").write_text(
             json.dumps({"pid": pid if pid is not None else os.getpid()}), encoding="utf-8"
         )
@@ -171,6 +171,11 @@ class Base(unittest.TestCase):
         (self.state_dir / "seneschald-health.json").write_text(
             json.dumps({"status": "ok", "updated_at": stamp}), encoding="utf-8"
         )
+        if supervised:  # a healthy Windows install runs under seneschald_supervise.py
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            (self.state_dir / "seneschald-supervisor.json").write_text(json.dumps({
+                "pid": os.getpid(), "heartbeat": now, "state": "running",
+                "restarts": {"reload": 0, "crash": 0}, "crash_budget": {"left": 5}}), encoding="utf-8")
 
     def write_hooks(self):
         settings = self.home / ".claude" / "settings.json"
@@ -532,6 +537,49 @@ class DaemonCheck(Base):
         row = sd.check_daemon(self.ctx(platform="darwin"))
         self.assertIn("loaded", row["detail"])
         self.assertNotIn("not loaded", row["detail"])
+
+
+class DaemonSupervisorCheck(Base):
+    """The supervisor's report in the daemon row (docs/service-supervision-spec.md §5)."""
+
+    def registered(self):
+        self.patch(sd, "_run", lambda cmd, timeout=30.0, env=None: (0, "", ""))
+
+    def write_report(self, age_min=0.5, state="running"):
+        stamp = (datetime.now(timezone.utc) - timedelta(minutes=age_min)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        (self.state_dir / "seneschald-supervisor.json").write_text(json.dumps({
+            "pid": 4242, "heartbeat": stamp, "state": state,
+            "restarts": {"reload": 3, "crash": 1}, "crash_budget": {"left": 4}}), encoding="utf-8")
+
+    def test_a_running_supervisor_is_named_green(self):
+        self.registered()
+        self.write_daemon_files()
+        self.write_report()
+        row = sd.check_daemon(self.ctx())
+        self.assertEqual(row["status"], sd.GREEN)
+        self.assertIn("supervised (supervisor pid 4242; 1 crash restart(s), 4 left", row["detail"])
+
+    def test_a_stale_report_says_the_supervisor_is_not_running(self):
+        self.registered()
+        self.write_daemon_files()
+        self.write_report(age_min=30)
+        row = sd.check_daemon(self.ctx())
+        self.assertIn("supervisor not running", row["detail"])
+
+    def test_a_windows_task_without_a_supervisor_is_yellow_with_the_fix(self):
+        self.registered()
+        self.write_daemon_files(supervised=False)
+        row = sd.check_daemon(self.ctx())
+        self.assertEqual(row["status"], sd.YELLOW)
+        self.assertIn("predates seneschald_supervise.py", row["detail"])
+        self.assertIn("/setup daemon", row["fix"])
+
+    def test_posix_never_expects_a_supervisor(self):
+        self.patch(sd, "_run", lambda cmd, timeout=30.0, env=None: (0, "", ""))
+        self.write_daemon_files(supervised=False)
+        row = sd.check_daemon(self.ctx(platform="linux"))
+        self.assertEqual(row["status"], sd.GREEN)
+        self.assertNotIn("supervis", row["detail"])
 
 
 class HooksCheck(Base):

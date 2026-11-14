@@ -33,8 +33,9 @@ await asyncio.gather(
 3. **Add one `_supervise("your-name", your_task(state, args, log), state, log)` line** to the
    `asyncio.gather(...)` call. `_supervise` is the **outer** net — if your coroutine still raises
    past your own handling, it logs the crash with its traceback, sets `state.crashed = True`, and
-   stops the daemon **loudly** (never a silent "alive but missing a task"), so the scheduled task's
-   restart-on-failure relaunches a clean process.
+   stops the daemon **loudly** (never a silent "alive but missing a task"): a non-zero exit, which
+   the platform's supervisor restarts as a crash with backoff — `seneschald_supervise.py` on Windows,
+   systemd / launchd on Linux / macOS (`service-supervision-spec.md`).
 4. **Wire an opt-out flag if it can be disabled** (`--no-your-task`), following the existing
    `--no-cockpit` / `--no-discord` / `--no-reminders` / `--no-peek` / `--no-slots` pattern. A task
    that is switched off (or can't run in test modes — `--stub-brain`, `--fake-inbox`) simply

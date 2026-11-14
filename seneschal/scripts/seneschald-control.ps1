@@ -6,9 +6,11 @@
 .DESCRIPTION
     One entry point for stopping, starting, restarting, and updating seneschald.
 
-      -Action Stop     Stop the scheduled task AND kill the running daemon (stopping the task alone does
-                       NOT end the process), then clear the lock. Writes the deliberate-stop sentinel
-                       (state/seneschald-stopped) so the auto-revive below never fights it.
+      -Action Stop     Writes the deliberate-stop sentinel (state/seneschald-stopped) so the auto-revive
+                       below never fights it, then hands over to `service.py stop` — the tested Python
+                       Stop (docs/service-supervision-spec.md §3): under seneschald_supervise.py a graceful
+                       `shutdown --now` first, then the task, then only VERIFIED pids. If python cannot
+                       run it, the legacy steps here run instead (stop the task, kill the lock's pid).
       -Action Start    Start the scheduled task. Clears the deliberate-stop sentinel and the daemon's own
                        crash-loop give-up latch (a human starting it is the clean-slate signal).
       -Action Restart  Stop then Start (the old `reseneschald` behaviour). Default.
@@ -181,6 +183,16 @@ if (-not $script:SeneschaldDotSourced -and
     exit
 }
 
+function Invoke-ServiceStop {
+    # `python service.py stop` — the one tested implementation of the Windows Stop (graceful shutdown
+    # under the supervisor, then schtasks /End, then kills of VERIFIED pids only, then withdrawing its own
+    # queued shutdown). $true only on exit 0. A wrapper so a test can replace it.
+    try {
+        & python (Join-Path $PSScriptRoot 'service.py') stop --state-dir $StateDir | ForEach-Object { Write-Host $_ }
+        return ($LASTEXITCODE -eq 0)
+    } catch { return $false }
+}
+
 function Stop-Seneschald {
     Write-Host '- stopping seneschald...'
     # Record the INTENT before doing anything else, so a stop that dies half-way still reads as
@@ -189,6 +201,8 @@ function Stop-Seneschald {
     try {
         New-Item -ItemType File -Path $StoppedFile -Force | Out-Null
     } catch { Write-Warning "stopped-sentinel write: $_" }
+    if (Invoke-ServiceStop) { return }
+    Write-Warning 'service.py stop did not complete - falling back to the legacy Stop steps'
     try { Stop-ScheduledTask -TaskName $TaskName -ErrorAction Stop } catch { Write-Warning "Stop-ScheduledTask: $_" }
     # Stopping the scheduled task does NOT end the already-running daemon process — kill the PID from the lock.
     if (Test-Path $LockFile) {
@@ -530,6 +544,7 @@ function Invoke-PresenceRevive {
 
     if (-not $verdict.revive) {
         switch ($verdict.reason) {
+            'supervised'           { & $Log 'revive: SKIPPED — seneschald_supervise.py is running and owns the daemon''s restarts (it holds seneschald-supervisor.instance.lock).' }
             'deliberately-stopped' { & $Log 'revive: SKIPPED — deliberately stopped (seneschald-stopped sentinel present).' }
             'crash-looping'        { & $Log 'revive: SKIPPED — the daemon''s own crash-loop guard gave up (seneschald-crashloop sentinel present). It already alerted the owner; clear it with -Action Start once the crash is fixed.' }
             'budget-exhausted'     { & $Log "revive: GIVING UP — $($verdict.next_state.revivals) revivals inside the window produced no healthy daemon. No more attempts until it recovers or you intervene." }
@@ -539,11 +554,14 @@ function Invoke-PresenceRevive {
         return $false
     }
 
-    # Start the EXISTING scheduled task rather than spawning presence.py ourselves. run-presence.cmd is
-    # not a thin wrapper: it clears ANTHROPIC_API_KEY to force SUBSCRIPTION billing, sets PYTHONUTF8,
-    # prefers the uv venv interpreter, and carries every daemon flag. Hand-rolling that risks silently
-    # flipping the daemon onto metered API billing. MultipleInstances=IgnoreNew makes a redundant start a
-    # no-op rather than a second brain.
+    # Start the EXISTING scheduled task rather than spawning presence.py ourselves. What the task runs is
+    # not a thin wrapper: seneschald_supervise.py (or, on an install from before it, run-presence.cmd)
+    # clears ANTHROPIC_API_KEY to force SUBSCRIPTION billing, sets PYTHONUTF8, prefers the uv venv
+    # interpreter, and carries every daemon flag. Hand-rolling that risks silently flipping the daemon
+    # onto metered API billing. Under the supervisor this path runs only when the SUPERVISOR is gone
+    # (rule 0 of seneschald_revive.py stands down while it lives), so this start relaunches it.
+    # MultipleInstances=IgnoreNew makes a redundant start a no-op, and presence.py's kernel lock makes a
+    # second brain impossible either way.
     & $Log "revive: attempting (attempt $($verdict.next_state.revivals) in this window)..."
     try {
         Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop

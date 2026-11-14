@@ -48,7 +48,9 @@ python seneschal/scripts/render_units.py --platform <ledger platform> --apply
 
 This renders gitignored locals into `seneschal/state/setup/` from the tracked templates —
 the launcher (`run-presence.local.cmd` / `.sh`, absolute paths pinned, the ledger's
-`models` watch/slots dials substituted) plus the platform's registration assets. Tracked
+`models` watch/slots dials substituted), on Windows `seneschald.args` (the daemon's flags
+with the same dials, read by the supervisor at every child start), plus the platform's
+registration assets. Tracked
 templates are never touched. Flags to pass through when they apply:
 `--with-health-listener` (Windows, if the owner runs the phone health/presence feed —
 ask only if they mentioned it or `HEALTH_SETUP.md` artifacts exist), `--user-level`
@@ -57,11 +59,16 @@ ask only if they mentioned it or `HEALTH_SETUP.md` artifacts exist), `--user-lev
 ## 2 — Windows: one script, one elevation
 
 The rendered `seneschal/state/setup/register-tasks.ps1` holds **every** admin step:
-`seneschald` (at logon, S4U principal — session 0, no console window, restart 1 min ×999,
-no time limit, single-instance), `seneschald-update` (every 10 min, windowless via
-`wscript.exe` + `run-seneschald-update-hidden.vbs`), and optionally
+`seneschald` (S4U principal — session 0, no console window, no stored password — at
+startup and at logon, single-instance, no time limit, battery flags off; its action is
+`seneschald_supervise.py` itself, which restarts the daemon in seconds on a reload or a
+crash, because Task Scheduler's own restart-on-failure never fires on an exit code —
+`seneschal/docs/service-supervision-spec.md`), `seneschald-update` (every 10 min,
+windowless via `wscript.exe` + `run-seneschald-update-hidden.vbs`), and optionally
 `seneschal-health-listener`. The parameters mirror `seneschal/scripts/SCHEDULING.md`
-exactly — that doc stays the authoritative manual path.
+exactly — that doc stays the authoritative manual path. (`seneschald install` does steps
+1-3 in one go — render, the one UAC prompt, the result read-back — for an owner who would
+rather not paste the line.)
 
 1. **SHOW the script** (read it out of `seneschal/state/setup/register-tasks.ps1`) and say
    what it registers, in one line per task. Never elevate anything the owner hasn't seen.
@@ -78,9 +85,10 @@ exactly — that doc stays the authoritative manual path.
    (`SCHEDULING.md`), and mark accordingly — never claim a registration the result file
    doesn't show.
 4. **Elevation declined** → the honest fallback: re-render with `--user-level`
-   (InteractiveToken principal, registers without admin) and state its caveats plainly — a
-   console window appears at logon (no session-0 hiding without S4U), and the tasks run
-   **only while this user is logged on**. The owner runs it unelevated:
+   (InteractiveToken principal, registers without admin; the supervisor runs under the
+   venv's `pythonw.exe`, so no window appears) and state its caveat plainly — the tasks run
+   **only while this user is logged on**: no supervision before logon, none after logoff. The
+   owner runs it unelevated:
    `pwsh -NoProfile -ExecutionPolicy Bypass -File <repo>\seneschal\state\setup\register-tasks.ps1`.
    Declining both is fine: `mark daemon declined --summary "no scheduled tasks; SCHEDULING.md is the by-hand path"`.
 
@@ -95,7 +103,9 @@ exactly — that doc stays the authoritative manual path.
    — copies `seneschald.service` + `seneschald-update.service`/`.timer` to
    `~/.config/systemd/user/`. The service's `EnvironmentFile=-%h/.config/seneschal/daemon.env`
    (and the launcher's own sourcing) is how the unattended daemon gets the auth-models
-   chapter's token.
+   chapter's token. Its restart policy is the reload contract as unit settings:
+   `Restart=on-failure` + `RestartSec=5` (a crash restarts in 5 s, exit 0 stays down), a give-up
+   past 5 starts in 10 min, and a reload is an in-place `execv` systemd never sees.
 
 2. Enable (confirmed):
 
@@ -116,7 +126,8 @@ exactly — that doc stays the authoritative manual path.
 ## 4 — macOS: launchd agents, zero elevation
 
 1. Install the staged plists (confirmed): the same `--apply --install` line with
-   `--platform darwin` — copies `com.seneschal.presence.plist` (RunAtLoad + KeepAlive) and
+   `--platform darwin` — copies `com.seneschal.presence.plist` (RunAtLoad + KeepAlive
+   `{SuccessfulExit: false, Crashed: true}`: a crash restarts, exit 0 stays down) and
    `com.seneschal.update.plist` (every 600 s) to `~/Library/LaunchAgents/`. Both wrap the
    launcher in `/bin/sh -c` sourcing `~/.config/seneschal/daemon.env` first.
 2. Bootstrap each agent (confirmed, one per command — no sudo anywhere):
@@ -176,7 +187,9 @@ Run what the platform can actually show, and report only what happened:
   `/tn seneschald-update`); Linux `systemctl --user is-active seneschald.service`; macOS
   `launchctl print gui/$UID/com.seneschal.presence | head -5`.
 - **Alive:** `seneschal/state/presence.lock` appears within ~a minute of the start and its
-  pid is live (the daemon's own single-instance lock).
+  pid is live (the daemon's report; the single-instance gate itself is the kernel-held
+  `presence.instance.lock`). On Windows, `seneschal/state/seneschald-supervisor.json` shows
+  the supervisor `running` with the daemon as its `child_pid` — or run `seneschald status`.
 - **Deploy heartbeat:** `seneschal/state/seneschald-health.json` gets its first stamp on
   the updater's first cycle — up to ~10 min out; say when to expect it rather than waiting.
 - Offer **`/doctor`** — its daemon + hooks rows check exactly these things and give fix
@@ -188,12 +201,13 @@ Run what the platform can actually show, and report only what happened:
 python seneschal/scripts/setup_state.py mark daemon done --artifacts seneschal/state/setup/register-tasks.ps1 --summary "<one line: what registered + what was declined>"
 ```
 
-(Artifacts per platform: the ps1 + `run-presence.local.cmd` on Windows;
+(Artifacts per platform: the ps1 + `seneschald.args` + `run-presence.local.cmd` on Windows;
 `run-presence.local.sh` on POSIX — record what was actually rendered. Partial outcomes are
 fine: a `done` with "user-level tasks, linger declined" beats a false green.)
 
 Name the marquee failure this chapter just prevented: an unregistered or session-bound
 daemon dies silently with the login — reminders stop firing, Telegram goes quiet, merges
 stop deploying, and nothing *looks* broken until the owner notices days of silence. A
-registered task with restart-on-failure, a 10-minute updater, and a fresh health stamp make
-that silence impossible to miss.
+supervisor that restarts a crash in seconds (systemd, launchd, or `seneschald_supervise.py`
+on Windows), a 10-minute updater, and a fresh health stamp make that silence impossible to
+miss.

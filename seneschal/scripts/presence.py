@@ -297,6 +297,7 @@ import standing_safety  # the READ FIRST items' own store (docs/read-first-retir
 import owi_unknowns  # the unknown-owner grid picker (owi_unknowns.py)
 import tomorrow_marker  # Tomorrow's Lead — the Brief section + the Wrap's two pickers (docs/tomorrow-marker-spec.md)
 import observation_gate  # the Brief's "observation complete, ready to continue" lead-in (docs/observation-gate-spec.md)
+import single_instance  # THE single-instance gate — an OS-held exclusive lock, not a heartbeat age
 import stateio  # zero-import atomic write primitive — vitals.json's writer
 from telegram_poll import safe_filename  # shared scrub for sender-supplied filenames
 import telegram_topics  # phase-2 declared-channel resolution (message-routing-spec.md)
@@ -608,6 +609,35 @@ SEED_PROMPT_TEMPLATE = (
 )
 
 
+# --- supervised mode (docs/service-supervision-spec.md §2) ------------------------------------------------
+# seneschald_supervise.py starts this daemon with SENESCHALD_SUPERVISED=1, and only then do two exits
+# change: a graceful reload exits EXIT_RELOAD instead of spawning a detached successor (Windows only —
+# POSIX keeps its in-place os.execv), and losing the single-instance lock exits EXIT_LOCK_HELD instead of
+# 0. Everything else is as it always was: 0 = stay down, any other code = a crash. Unset — a hand run,
+# systemd, launchd, the legacy run-presence.cmd launch — and nothing here changes anything.
+SUPERVISED_ENV = "SENESCHALD_SUPERVISED"
+EXIT_LOCK_HELD = 69   # EX_UNAVAILABLE — another daemon holds the lock; the supervisor waits for it
+EXIT_RELOAD = 75      # EX_TEMPFAIL — reload me; the supervisor restarts at once, outside its budget
+
+
+def take_supervised_flag(environ=None) -> bool:
+    """Read AND remove `SENESCHALD_SUPERVISED` from this process's environment. Removing it is the point:
+    every child this daemon starts — through `child_env`, a bare `subprocess` call, a detached site —
+    inherits `os.environ`, and none of them may think it is the supervised daemon."""
+    env = os.environ if environ is None else environ
+    return env.pop(SUPERVISED_ENV, None) == "1"
+
+
+def reload_mode(supervised: bool, os_name: str | None = None) -> str:
+    """How a graceful reload leaves this process: `exit` (EXIT_RELOAD, for the supervisor to restart) or
+    `respawn` (`_respawn_detached` — a detached successor on Windows, `os.execv` in place on POSIX).
+
+    Only supervised Windows exits. POSIX keeps `execv` even under a supervisor, because it keeps the PID:
+    systemd, launchd and seneschald_supervise.py all see nothing at all, where an exit under systemd's
+    default `KillMode=control-group` would take the cockpit and the warm session down with it."""
+    return "exit" if supervised and (os_name or os.name) == "nt" else "respawn"
+
+
 def child_env(source: str = "scheduled") -> dict:
     """Env for any child `claude` process: scrub ANTHROPIC_API_KEY so we always bill the
     subscription (CLAUDE_CODE_OAUTH_TOKEN / the logged-in account), never the metered API.
@@ -627,9 +657,14 @@ def child_env(source: str = "scheduled") -> dict:
     interlock rather than a label: `telegram_send.ACK_GATE_SOURCES` reads it to arm the ack gate that
     stops a peek re-escalating an already-acked ⏰ row (see `maybe_peek`). `watch` is outside
     `jobs.ASSISTANT_SURFACES`/`sentinel.ASSISTANT_SURFACES` exactly as `scheduled` is, so nothing about cancel
-    attribution or the wording ladder changes."""
+    attribution or the wording ladder changes.
+
+    `SENESCHALD_SUPERVISED` is dropped too: it tells THIS process to speak the supervisor's exit codes,
+    and a nested `presence.py` (a test a job runs, say) must never believe it is supervised. `main()`
+    already pops it from the daemon's own environment at boot; this is the second layer."""
     env = os.environ.copy()
     env.pop("ANTHROPIC_API_KEY", None)
+    env.pop(SUPERVISED_ENV, None)
     env["SENESCHAL_SESSION_SOURCE"] = source
     return env
 
@@ -2875,8 +2910,9 @@ def write_lock(state_dir: str) -> list:
     # Stamp this boot for the self crash-loop guard (below) and hand the pruned window back so the
     # caller can decide, in one place, whether we've been booting too fast to keep trying. This is the
     # SINGLE recording point — every real daemon boot goes through write_lock, whatever relaunched it
-    # (Task Scheduler restart-on-failure, the ~10-min watchdog revive, a graceful _respawn_detached, a
-    # manual start), so counting here catches every loop shape without double-counting any of them.
+    # (a supervisor's crash restart — seneschald_supervise.py, systemd, launchd — the ~10-min watchdog
+    # revive, a graceful reload, a manual start), so counting here catches every loop shape without
+    # double-counting any of them.
     return record_boot_attempt(state_dir)
 
 
@@ -5152,8 +5188,9 @@ class DaemonState:
                                               # is keyed on state.slot_children, not chat_idle().
         self.pending_action: str | None = None  # 'restart' | 'shutdown' once a control is applied
         self.just_started = True             # cleared by the first non-empty poll — gates the backlog ack
-        self.crashed = False                 # a task died unexpectedly — exit non-zero so the task
-                                             # scheduler's restart-on-failure brings us back
+        self.crashed = False                 # a task died unexpectedly — exit non-zero: a crash to
+                                             # seneschald_supervise.py / systemd / launchd (Task
+                                             # Scheduler's restart-on-failure ignores exit codes)
         self.iterations = 0                  # telegram poll cycles (bounds test runs)
         self.cockpit_hub = None               # cockpit_pipe.PipeHub — the sole pipe client, set by
                                               # cockpit_task; None whenever the pipe is disabled/down
@@ -7472,8 +7509,10 @@ async def pr_watch_task(state: DaemonState, args, log) -> None:
 
 
 async def _supervise(name: str, coro, state: DaemonState, log) -> None:
-    """A task that dies unexpectedly must take the daemon down LOUDLY (exit non-zero → the scheduled
-    task's restart-on-failure relaunches us), never linger as a half-daemon that looks alive but has,
+    """A task that dies unexpectedly must take the daemon down LOUDLY (exit non-zero, which every real
+    supervisor reads as a crash and restarts with backoff — seneschald_supervise.py on Windows, systemd's
+    Restart=on-failure, launchd's KeepAlive; Task Scheduler's own restart-on-failure does NOT fire on an
+    exit code, docs/service-supervision-spec.md §1), never linger as a half-daemon that looks alive but has,
     say, no drainer."""
     try:
         await coro
@@ -7584,34 +7623,65 @@ async def main_async(args, log, make_session, fake_queue: list) -> DaemonState:
     return state
 
 
-def _respawn_detached(log, state_dir=None, telegram_env=None) -> bool:
+def _reload_would_loop(log, state_dir, telegram_env) -> bool:
+    """The graceful-reload crash-loop check both reload exits share (`_respawn_detached` and, supervised,
+    `_reload_exit`). Project the boot-attempts window as if the reload had happened; if that would trip
+    the guard, trip it now (sentinel + one alert) and return True so the caller exits 0 — stay down —
+    instead. False on any guard error: fail-open, a guard bug must never block a legitimate reload."""
+    try:
+        now = datetime.now(timezone.utc)
+        projected = prune_boot_attempts(_load_boot_attempts(state_dir), now) + [now]
+        if is_crashloop(projected):
+            trip_crashloop_guard(state_dir, telegram_env, log, projected, now)
+            log("crash-loop guard: refusing the graceful reload (would loop); exiting instead.")
+            return True
+    except Exception as e:  # noqa: BLE001 — never let the guard block a legitimate reload
+        log(f"! crash-loop guard reload check errored (reloading anyway): {e}")
+    return False
+
+
+def _reload_exit(log, state_dir=None, telegram_env=None, instance_lock=None) -> int:
+    """A graceful reload under seneschald_supervise.py on Windows (docs/service-supervision-spec.md §2):
+    the exit code the process should return. EXIT_RELOAD hands the restart to the supervisor, which starts
+    the successor at once, in the same process tree, outside its crash budget; 0 means the reload would
+    trip the crash-loop guard, so stay down. The lock is released first, so the successor never waits on
+    us (the OS would release it at exit anyway; this just makes the handoff immediate)."""
+    if state_dir is not None and _reload_would_loop(log, state_dir, telegram_env):
+        return 0
+    if instance_lock is not None:
+        instance_lock.release()
+    log(f"• restart — exiting {EXIT_RELOAD} for the supervisor to start the successor")
+    return EXIT_RELOAD
+
+
+def _respawn_detached(log, state_dir=None, telegram_env=None, instance_lock=None) -> bool:
     """Relaunch on the (freshly pulled) code, preferring the uv-managed venv interpreter when it
     exists so a graceful reload also migrates the daemon onto the venv (run-presence.cmd only picks
     the interpreter on a HARD start). Windows: do NOT os.execv under Task Scheduler — replacing the
     process image kills the daemon without a successor. Spawn a fresh, DETACHED
     instance — same argv + inherited env, so same flags and subscription billing — then exit; it
-    acquires the released lock and takes over.
+    acquires the released lock and takes over. POSIX: `os.execv` in place, so the PID never changes and
+    systemd / launchd see no exit at all.
 
-    Self crash-loop guard (secondary check). Before spawning, PROJECT the boot-attempts window as if
-    this respawn had happened (prune + the imminent boot) and, if that would exceed the budget, refuse
-    to spawn — the successor would only trip its own startup guard a moment later, so we stop the
-    graceful-reload loop one iteration earlier and never launch the doomed child. The startup guard in
-    main() is the primary net (every boot funnels through write_lock); this closes the specific gap the
-    spec calls out — "the graceful-reload path respawns detached with no loop guard." We don't PERSIST
-    the projected boot here: if we spawn, the child's write_lock records the real one; if we refuse,
-    no boot happened. Fail-open: a guard error must never block a legitimate reload, so it proceeds to
-    spawn on any exception."""
-    if state_dir is not None:
-        try:
-            now = datetime.now(timezone.utc)
-            projected = prune_boot_attempts(_load_boot_attempts(state_dir), now) + [now]
-            if is_crashloop(projected):
-                trip_crashloop_guard(state_dir, telegram_env, log, projected, now)
-                log("crash-loop guard: refusing the graceful respawn (would loop); exiting instead.")
-                return False
-        except Exception as e:  # noqa: BLE001 — never let the guard block a legitimate reload
-            log(f"! crash-loop guard respawn check errored (respawning anyway): {e}")
+    **`instance_lock` is released immediately before the spawn, and that ordering is the mechanism.**
+    The single-instance lock is kernel-held for this process's whole life (`single_instance.py`), so a
+    successor spawned while we still hold it would find the lock taken by its own predecessor. We give
+    it back first; the successor's `--instance-lock-wait-sec` covers the milliseconds between the
+    release and its own acquisition, and if some third launcher wins that race instead, the successor
+    exits quietly on one line and exactly one daemon still runs.
+
+    Self crash-loop guard (secondary check, `_reload_would_loop`). Before spawning, PROJECT the
+    boot-attempts window as if this respawn had happened and, if that would exceed the budget, refuse to
+    spawn — the successor would only trip its own startup guard a moment later. The startup guard in
+    main() is the primary net (every boot funnels through write_lock). Fail-open: a guard error must
+    never block a legitimate reload, so it proceeds to spawn on any exception."""
+    if state_dir is not None and _reload_would_loop(log, state_dir, telegram_env):
+        return False
     script = os.path.abspath(sys.argv[0])
+    # Hand the lock over BEFORE the spawn (see the docstring). After the crash-loop refusal above, so a
+    # respawn we decline never gives up the claim it is still entitled to hold while it exits.
+    if instance_lock is not None:
+        instance_lock.release()
     try:
         if os.name == "nt":
             venv_py = os.path.join(REPO_ROOT, ".venv", "Scripts", "python.exe")
@@ -7624,7 +7694,7 @@ def _respawn_detached(log, state_dir=None, telegram_env=None) -> bool:
         venv_py = os.path.join(REPO_ROOT, ".venv", "bin", "python")
         exe = venv_py if os.path.exists(venv_py) else sys.executable
         os.execv(exe, [exe, script] + sys.argv[1:])
-    except OSError as e:  # relaunch failed — exit cleanly (the scheduled task can bring us back)
+    except OSError as e:  # relaunch failed — exit cleanly; the watchdog's revive (or a supervisor) brings us back
         log(f"! relaunch failed: {e}; exiting")
     return False
 
@@ -7790,6 +7860,9 @@ def build_parser() -> argparse.ArgumentParser:
                         "(tests — pair with --stub-brain/--fake-inbox so an offline run can't message anyone)")
     p.add_argument("--fake-inbox", default=None, help="JSON file of message batches to feed instead of Telegram (tests)")
     p.add_argument("--max-iterations", type=int, default=0, help="stop after N telegram poll cycles (0 = run forever)")
+    p.add_argument("--instance-lock-wait-sec", type=float, default=single_instance.DEFAULT_WAIT_SEC,
+                   help="how long to wait for the single-instance lock before exiting quietly (covers the "
+                        "graceful re-exec handoff; 0 = one attempt). See single_instance.py.")
     p.add_argument("--log-file", default=None,
                    help="append daemon log lines here too (Task Scheduler drops stdout, so without this "
                         "there's no trace of e.g. a failed Telegram send). Rotated at ~2 MB.")
@@ -7797,6 +7870,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    # Read-and-remove before anything can spawn a child: see take_supervised_flag.
+    supervised = take_supervised_flag()
     parser = build_parser()
     args = parser.parse_args()
 
@@ -7834,6 +7909,37 @@ def main() -> int:
             if log_fh:
                 log_fh.write(line + "\n")  # never raises — see RotatingAppendLog's own contract
 
+    # ------------------------------------------------------------------ THE single-instance gate
+    #
+    # First thing after the log exists and BEFORE any side effect: no Telegram intake, no warm session,
+    # no queued nudge (check_read_first_migration below can send one), no bound port. The gate this
+    # replaces was a heartbeat-age read of state/presence.lock, and a heartbeat is a claim rather than an
+    # enforcement: non-atomic (two starts milliseconds apart both passed), "dead" for the minutes a live
+    # daemon spends winding down, and "alive" for 90 s after a hard kill — which would have made a
+    # supervisor's crash restart wait out the stale window. single_instance.py has the full reasoning.
+    #
+    # The kernel holds this lock on an open handle for the process's whole life. `wait_sec` carries the
+    # claim across a graceful re-exec (_respawn_detached releases immediately before its successor
+    # starts). Whoever loses exits quietly on ONE line. state/presence.lock is still written and beaten
+    # (write_lock/beat_lock) — it is the report the watchdog, the doctor and the cockpit read; this is
+    # the gate.
+    instance_lock = single_instance.InstanceLock(single_instance.instance_lock_path(args.state_dir))
+    if not instance_lock.acquire(wait_sec=args.instance_lock_wait_sec):
+        # Supervised, the loser says so in its exit code (69): the supervisor waits for the holder to go
+        # and then starts us. Unsupervised, 0, exactly as before (systemd/launchd stay down on 0).
+        log(f"presence already running — {instance_lock.holder_note()}; exiting"
+            + (f" {EXIT_LOCK_HELD} (supervised)." if supervised else "."))
+        if log_fh:
+            log_fh.close()
+        return EXIT_LOCK_HELD if supervised else 0
+    try:
+        return _main_locked(args, parser, log, log_fh, supervised, instance_lock)
+    finally:
+        instance_lock.release()  # idempotent — a reload exit may already have done it
+
+
+def _main_locked(args, parser, log, log_fh, supervised: bool, instance_lock) -> int:
+    """Everything `main()` does once this process holds the single-instance lock."""
     # Wire the store's MCP (if any) into every spawned claude. The resolution is store-config-driven —
     # see resolve_store_mcp(): explicit --store-mcp / --notion-mcp → store/config.json's active backend →
     # legacy scripts/notion-mcp.json → None. Filesystem backends (obsidian/markdown) resolve to None, and
@@ -7925,17 +8031,14 @@ def main() -> int:
         log(f"PR watch: {', '.join(pr_sweep.DEFAULT_REPOS)} every {PR_WATCH_INTERVAL}s "
             f"(asks on green, notifies on red; never merges, never approves)")
 
-    stale_sec = max(args.poll_timeout * 3, 90)
-    if lock_is_live(args.state_dir, stale_sec):
-        log("presence already running (live lock) — exiting.")
-        return 0
     boots = write_lock(args.state_dir)  # records this boot + returns the pruned crash-loop window
 
     # Self crash-loop guard (primary check). If we've booted too many times too fast, STOP — don't run,
     # don't respawn. Every relaunch mechanism funnels through here (write_lock above stamped the boot),
-    # so this one check breaks a Task-Scheduler restart-on-failure loop, a watchdog-revive loop, AND a
-    # graceful _respawn_detached loop alike. We exit 0 (not 1) deliberately: a loud exit(1) would invite
-    # Task Scheduler's restart-on-failure to relaunch us straight back into the same crash. Fail-open —
+    # so this one check breaks a supervisor crash-restart loop, a watchdog-revive loop, AND a graceful
+    # reload loop alike. We exit 0 (not 1) deliberately: 0 is "stay down" to every supervisor
+    # (seneschald_supervise.py, systemd's Restart=on-failure, launchd's SuccessfulExit=false), where a
+    # loud exit(1) would be restarted straight back into the same crash. Fail-open —
     # a bug in the guard must never take a healthy daemon down, so any error here just proceeds to run.
     try:
         if is_crashloop(boots):
@@ -7996,7 +8099,11 @@ def main() -> int:
         return 0
 
     if state.crashed:
-        return 1  # loud exit → the scheduled task's restart-on-failure relaunches us
+        # A crash. seneschald_supervise.py, systemd (Restart=on-failure) and launchd (KeepAlive
+        # SuccessfulExit=false) all restart a non-zero exit with backoff. Unsupervised under the legacy
+        # Windows task, NOTHING restarts on this code — Task Scheduler's restart-on-failure ignores exit
+        # codes — so the ~10-min watchdog's revive is the only way back.
+        return 1
     if state.pending_action == "shutdown":
         log("• shutdown — exiting cleanly (pair with Stop-Seneschald to keep the task down)")
         return 0
@@ -8004,7 +8111,11 @@ def main() -> int:
         log("• restart — reloading code")
         if log_fh:
             log_fh.close()
-        _respawn_detached(log, args.state_dir, args.telegram_env)
+        if reload_mode(supervised) == "exit":
+            # Supervised on Windows: no detached successor. The supervisor restarts us in its own process
+            # tree, so the reload never leaves supervision (docs/service-supervision-spec.md §2).
+            return _reload_exit(log, args.state_dir, args.telegram_env, instance_lock=instance_lock)
+        _respawn_detached(log, args.state_dir, args.telegram_env, instance_lock=instance_lock)
         return 0
     if log_fh:
         log_fh.close()

@@ -72,5 +72,30 @@ class ControlQueueUnit(unittest.TestCase):
         self.assertEqual(p.load_control_queue(self.d), [])
 
 
+
+class WithdrawUnit(unittest.TestCase):
+    """`--withdraw`: a caller takes back its OWN queued entry (matched by action + exact reason), and
+    nothing else — the Windows Stop's cleanup (docs/service-supervision-spec.md §3)."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+
+    def test_removes_only_the_matching_reason(self):
+        rc.enqueue_control(self.d, "restart", "merge to main")
+        rc.enqueue_control(self.d, "shutdown", "seneschald stop", defer=False)
+        self.assertTrue(rc.queued(self.d, "shutdown", "seneschald stop"))
+        self.assertEqual(rc.withdraw_control(self.d, "shutdown", "seneschald stop"), 1)
+        self.assertFalse(rc.queued(self.d, "shutdown", "seneschald stop"))
+        self.assertEqual([i["action"] for i in p.load_control_queue(self.d)], ["restart"])
+
+    def test_another_callers_entry_is_left_alone(self):
+        rc.enqueue_control(self.d, "shutdown", "someone else")
+        self.assertEqual(rc.withdraw_control(self.d, "shutdown", "seneschald stop"), 0)
+        self.assertTrue(rc.queued(self.d, "shutdown", "someone else"))
+
+    def test_missing_queue_is_zero(self):
+        self.assertEqual(rc.withdraw_control(self.d, "shutdown", "x"), 0)
+        self.assertFalse(rc.queued(self.d, "shutdown", "x"))
+
 if __name__ == "__main__":
     unittest.main()

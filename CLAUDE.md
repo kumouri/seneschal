@@ -66,7 +66,10 @@ seneschal/
                    usage_probe/_activity/_health + spend_levers + trace + record_search +
                    transcript_archive/_size_watch (plan-meter, spend and session-trace
                    observability — docs/usage-telemetry-spec.md, docs/session-trace-spec.md),
-                   cockpit_site + archon_sites (daemon-supervised web UIs), health/presence
+                   cockpit_site + archon_sites (daemon-supervised web UIs),
+                   seneschald_supervise.py + single_instance.py + service.py (the Windows
+                   supervisor, the kernel instance lock, the `seneschald` verbs —
+                   docs/service-supervision-spec.md), health/presence
                    pipelines, archive_common.py + telegram_ingest.py + discord_export_ingest.py
                    + sms_ingest.py + archive_aggregate.py (message archiver),
                    setup_state.py + setup_env.py + setup_doctor.py + settings_merge.py +
@@ -140,9 +143,10 @@ re-runs that health check any time — `setup_doctor.py`'s green/yellow/red boar
 red count) plus the in-session MCP probes the script can't do. The `daemon` chapter installs
 the always-on layer tri-platform with at most ONE elevation (`render_units.py` renders
 gitignored locals into `seneschal/state/setup/` — a `register-tasks.ps1` the owner
-approves-then-runs in one `-Verb RunAs` shot on Windows, with an InteractiveToken
-`--user-level` fallback; systemd user units + the one `loginctl enable-linger` sudo on
-Linux; launchd agents, zero elevation, on macOS) and merges the §5 session hooks into the
+approves-then-runs in one `-Verb RunAs` shot on Windows, whose task runs the supervisor, with
+a windowless InteractiveToken `--user-level` fallback; systemd user units + the one
+`loginctl enable-linger` sudo on Linux; launchd agents, zero elevation, on macOS; the
+`seneschald` verbs drive all three — `docs/service-supervision-spec.md`) and merges the §5 session hooks into the
 user's `~/.claude/settings.json` (`settings_merge.py` — diff-first, append-only,
 backup-first, refuses corrupt JSON). Standalone
 `/setup-persona` and `/setup-store` still work and update the same ledger. The framework runs
