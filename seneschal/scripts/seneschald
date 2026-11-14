@@ -1,0 +1,7 @@
+#!/bin/sh
+# seneschald - the service verbs (install / uninstall / start / stop / restart / status / logs).
+# A thin shim over service.py; see seneschal/docs/service-supervision-spec.md.
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PY=python3
+command -v python3 >/dev/null 2>&1 || PY=python
+exec "$PY" "$HERE/service.py" "$@"

@@ -1,0 +1,19 @@
+# seneschald.args — the daemon's arguments under seneschald_supervise.py, one flag per line.
+#
+# TRACKED TEMPLATE, machine-neutral like run-presence.cmd / run-presence.sh: keep it free of usernames,
+# absolute per-host paths and secrets. `/setup daemon` (render_units.py) renders a local copy with the
+# owner's model dials into seneschal/state/setup/seneschald.args, and the scheduled task passes that
+# copy with --args-file; edit knobs there.
+#
+# Read at EVERY child start, so a change deploys on the next graceful reload — no hard restart.
+# Format (seneschald_supervise.parse_args_text): a flag's value rides on its own line after the first
+# space, verbatim (no quoting); a value starting with {repo} becomes an absolute path under the repo.
+# The flag list is pinned equal to run-presence.cmd's by test_seneschald_supervise.py.
+--model claude-opus-4-8
+--idle-min 20
+--poll-timeout 25
+--peek-interval-min 5
+--call-env {repo}/seneschal/scripts/push-call.env
+--log-file {repo}/seneschal/state/presence.log
+--watch-model claude-haiku-4-5-20251001
+--watch-prompt Run Watch mode (seneschal/SKILL.md): glance at email/Slack/calendar and escalate only if something is genuinely hot; otherwise exit.

@@ -106,7 +106,9 @@ a `stop` event, and a `control_pending` flag. It is only touched from coroutines
 7. **Graceful restart, never mid-exchange.** Controls with `defer_until_idle` apply only when the session
    is down and the queue empty; a pending control shortens the wind-down to `CONTROL_PENDING_IDLE_SEC`.
    On Windows the restart **spawns a detached successor and exits** (never `os.execv` — see the
-   incident note in the code); that mechanism is kept verbatim. **"Drain, don't kill": a
+   incident note in the code) — unless the daemon runs under `seneschald_supervise.py`, where it exits
+   75 and the supervisor restarts it in its own process tree; on POSIX it re-executes in place, same pid
+   (`service-supervision-spec.md` §2). **"Drain, don't kill": a
    restart/shutdown ALSO holds while `state.slot_children` is non-empty** — additional to the chat-idle
    gate above, not a replacement, and bounded on its own cap (`SLOT_DRAIN_MAX_HOLD_SEC`, 20 min)
    independent of `CONTROL_MAX_HOLD_SEC`. A PR merging mid-slot used to kill the child outright:

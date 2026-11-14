@@ -33,6 +33,9 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import single_instance  # noqa: E402 — stdlib-only kernel lock probe (rule 0)
+
 # Budget: at most this many revival attempts inside a rolling window before giving up and staying given
 # up (spec §3.5 / §4). Named constants so the numbers live in exactly one place and tests can reference
 # them instead of hardcoding copies that could silently drift out of sync.
@@ -49,6 +52,9 @@ STOPPED_SENTINEL_NAME = "seneschald-stopped"
 CRASHLOOP_SENTINEL_NAME = "seneschald-crashloop"
 HEALTH_FILE_NAME = "presence-health.json"
 LOCK_FILE_NAME = "presence.lock"
+# seneschald_supervise.py's own kernel lock (docs/service-supervision-spec.md §5), duplicated as a literal
+# so this module never imports the supervisor. test_seneschald_supervise.py pins the two equal.
+SUPERVISOR_LOCK_NAME = "seneschald-supervisor.instance.lock"
 
 # The revive-confirmation settle window: a daemon we just restarted must stay up (heartbeat advancing)
 # at least this long before the watchdog counts the revive as a real recovery. seneschald-control.ps1 passes
@@ -218,6 +224,16 @@ def decide(state_dir: str, now: datetime) -> dict:
         crashloop_path = os.path.join(state_dir, CRASHLOOP_SENTINEL_NAME)
         health_path = os.path.join(state_dir, HEALTH_FILE_NAME)
         record, ok = _load_health(health_path)
+
+        # Rule 0 — SUPERVISED (docs/service-supervision-spec.md §5). While a live process holds the
+        # supervisor's own instance lock, seneschald_supervise.py owns the daemon: its restarts, its
+        # backoff and its give-up (which writes the same seneschald-crashloop sentinel rule 1b reads). A
+        # watchdog revive here could only second-guess it. Nothing supervises the SUPERVISOR, though — so
+        # when nobody holds this lock, every rule below applies exactly as before, and that is what keeps
+        # the watchdog as the supervisor's backstop. `is_held` fails closed: an unreadable lock reads as
+        # held, i.e. stand down. Bookkeeping untouched, as for rules 1-1b.
+        if single_instance.is_held(os.path.join(state_dir, SUPERVISOR_LOCK_NAME)):
+            return _result(False, "supervised", record)
 
         # Rule 1 — the deliberate-stop sentinel wins over EVERYTHING, including an available budget.
         # `Stop-Seneschald` writes this file precisely so that intent (a human said stop) is never

@@ -478,6 +478,11 @@ def check_ollama(ctx) -> dict:
     return _row("ollama", GREEN, f"reachable at {url}; models present: {have}")
 
 
+#: The supervisor rewrites its heartbeat every 30 s while a child runs and before every backoff (120 s
+#: at most), so 3 min is its longest honest silence (service.SUPERVISOR_FRESH_SEC / 60).
+SUPERVISOR_FRESH_MIN = 3.0
+
+
 def check_daemon(ctx) -> dict:
     """7 — is the daemon registered / running / freshly stamped? Platform-appropriate,
     best-effort, never RED (the daemon is start-by-hand until its chapter lands)."""
@@ -516,6 +521,15 @@ def check_daemon(ctx) -> dict:
         lock_pid = lock.get("pid")
         lock_state = "alive" if isinstance(lock_pid, int) and _pid_alive(lock_pid) else "dead"
 
+    # seneschald_supervise.py's own report (docs/service-supervision-spec.md §5). Running = a heartbeat
+    # under SUPERVISOR_FRESH_MIN and a last state it does not write on its way out.
+    sup, _serr = _load_json(ctx.state_dir / "seneschald-supervisor.json")
+    sup_state = "none"
+    if isinstance(sup, dict):
+        sup_age = _minutes_old(sup.get("heartbeat"))
+        sup_state = ("running" if sup_age is not None and sup_age <= SUPERVISOR_FRESH_MIN
+                     and sup.get("state") not in ("stopped", "gave-up", "upgrading") else "down")
+
     health, herr = _load_json(ctx.state_dir / "seneschald-health.json")
     health_fresh: bool | None = None  # None = no stamp to judge
     age = None
@@ -530,13 +544,29 @@ def check_daemon(ctx) -> dict:
         parts.append(f"stale presence.lock (pid {lock_pid} not running)")
     elif lock_state == "unreadable":
         parts.append("presence.lock unreadable")
+    if sup_state == "running":
+        restarts = sup.get("restarts") if isinstance(sup.get("restarts"), dict) else {}
+        budget = sup.get("crash_budget") if isinstance(sup.get("crash_budget"), dict) else {}
+        parts.append(f"supervised (supervisor pid {sup.get('pid')}; {restarts.get('crash', 0)} crash "
+                     f"restart(s), {budget.get('left')} left in its 15-min budget)")
+    elif sup_state == "down":
+        parts.append(f"supervisor not running (its report last said '{sup.get('state')}')")
     if health_fresh is True:
         parts.append("health stamp fresh")
     elif health_fresh is False:
         parts.append(f"health stamp stale ({age:.0f} min old)" if age is not None else "health stamp unreadable")
 
+    # A Windows task registered before the supervisor existed runs the daemon unsupervised: a reload
+    # leaves a detached successor and a crash waits up to ~20 min for the watchdog. Say so once, with
+    # the fix, instead of reading GREEN.
+    unsupervised_task = (ctx.platform == "win32" and registered is True and lock_state == "alive"
+                         and sup_state == "none")
+    if unsupervised_task:
+        parts.append("not supervised - the task predates seneschald_supervise.py (re-run /setup daemon "
+                     "to move it under the supervisor)")
+
     if lock_state == "alive":
-        status = GREEN if health_fresh is not False else YELLOW
+        status = GREEN if health_fresh is not False and not unsupervised_task else YELLOW
     elif lock_state in ("dead", "unreadable"):
         status = YELLOW
     elif registered is True:

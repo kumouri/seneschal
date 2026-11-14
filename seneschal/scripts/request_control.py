@@ -11,6 +11,12 @@ scheduled task down — a bare exit would be relaunched).
 Usage:
   python request_control.py --action restart [--reason "..."] [--now] [STATE_DIR]
   python request_control.py --action shutdown [--reason "..."]
+  python request_control.py --action shutdown --withdraw --reason "..." [STATE_DIR]
+
+`--withdraw` takes back what one caller queued: it removes the entries of that action whose reason is
+EXACTLY the one given, and nothing else. A Stop that queued a graceful `shutdown --now` and then had to
+kill the daemon uses it, because a shutdown nobody consumed would sit at the head of the queue and make
+the next start exit at once (docs/service-supervision-spec.md §3).
 
 seneschald-control.ps1 calls through here for every graceful restart it asks for: a merge landing on
 the deploy branch, a deferred restart once a failed dep sync recovers, and the login-deploys credential
@@ -49,14 +55,46 @@ def enqueue_control(state_dir: str, action: str, reason: str | None = None, defe
     return path
 
 
+def withdraw_control(state_dir: str, action: str, reason: str) -> int:
+    """Remove the queued `action` entries whose reason is exactly `reason`. Returns how many went.
+    Another caller's entry (any other reason) is left alone; a missing or unreadable queue is 0."""
+    import os
+    path = os.path.join(state_dir, CONTROL_QUEUE)
+    items = load_json(path, [])
+    if not isinstance(items, list) or not items:
+        return 0
+    keep = [i for i in items
+            if not (isinstance(i, dict) and i.get("action") == action and (i.get("reason") or "") == reason)]
+    removed = len(items) - len(keep)
+    if removed:
+        save_json(path, keep)
+    return removed
+
+
+def queued(state_dir: str, action: str, reason: str) -> bool:
+    """Is an `action` entry with exactly this reason waiting in the queue?"""
+    import os
+    items = load_json(os.path.join(state_dir, CONTROL_QUEUE), [])
+    return isinstance(items, list) and any(
+        isinstance(i, dict) and i.get("action") == action and (i.get("reason") or "") == reason for i in items)
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="Enqueue a daemon control request (restart/shutdown).")
     p.add_argument("--action", required=True, choices=["restart", "shutdown"])
     p.add_argument("--reason", default=None)
     p.add_argument("--now", action="store_true",
                    help="apply ASAP (defer_until_idle=false) — may interrupt a live chat")
+    p.add_argument("--withdraw", action="store_true",
+                   help="remove the queued entries of --action whose reason is exactly --reason")
     p.add_argument("state_dir", nargs="?", default=DEFAULT_STATE_DIR)
     args = p.parse_args()
+    if args.withdraw:
+        if not args.reason:
+            p.error("--withdraw needs --reason (it only ever takes back one caller's own entry)")
+        n = withdraw_control(args.state_dir, args.action, args.reason)
+        print(f"control '{args.action}' withdrawn: {n} entr{'y' if n == 1 else 'ies'}")
+        return 0
     path = enqueue_control(args.state_dir, args.action, args.reason, defer=not args.now)
     print(f"control '{args.action}' queued: {path}")
     return 0

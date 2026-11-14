@@ -8,9 +8,9 @@ REM renders a per-machine local launcher from. Keep it machine-neutral: no real
 REM usernames, absolute per-host paths, or secrets — those belong in the local
 REM copy the wizard writes (or in your user environment), never here.
 REM
-REM Point the scheduled task's "Program/script" at THIS file (no Arguments needed):
-REM   Program/script:  %USERPROFILE%\workspace\repos\seneschal\seneschal\scripts\run-presence.cmd
-REM   Trigger:         At log on   (single instance; restart on failure)
+REM The scheduled task does NOT run this file: /setup daemon registers the task with
+REM seneschald_supervise.py as its process (SCHEDULING.md section 2), because Task Scheduler's
+REM restart-on-failure never fires on an exit code. This file is for a hand run.
 REM
 REM This wrapper exists so you don't fight Task Scheduler quoting — edit the knobs
 REM here, in a normal file, instead of in the Arguments field. It also guarantees
@@ -18,6 +18,16 @@ REM SUBSCRIPTION billing (not metered API):
 REM   * It clears ANTHROPIC_API_KEY for this process tree.
 REM   * It relies on CLAUDE_CODE_OAUTH_TOKEN being set in your user environment
 REM     (one-time:  claude setup-token   then   setx CLAUDE_CODE_OAUTH_TOKEN <token>).
+REM
+REM Two modes:
+REM   run-presence.cmd              presence.py directly, unsupervised: a graceful reload spawns a
+REM                                 detached successor, and NOTHING restarts a crash (Task Scheduler's
+REM                                 restart-on-failure ignores exit codes) except the ~10-min watchdog.
+REM   run-presence.cmd supervise    seneschald_supervise.py instead: presence.py as its child, restarted
+REM                                 on a reload (exit 75) or a crash (with backoff). What the /setup daemon
+REM                                 task runs (directly, not through this file). Its flags come from
+REM                                 seneschald.args, not from this file; test_seneschald_supervise.py
+REM                                 fails if the two lists ever disagree, so change a knob in BOTH places.
 REM ============================================================================
 setlocal
 
@@ -55,6 +65,10 @@ REM     gateway falls back to REST polling). `uv sync --frozen` (or seneschald-u
 set "PYEXE=%~dp0..\..\.venv\Scripts\python.exe"
 if not exist "%PYEXE%" set "PYEXE=python"
 
+REM --- `supervise` mode: hand over to the supervisor (it repeats the env scrub above in tested Python,
+REM     reads seneschald.args, and passes on any further supervisor flags given here) ---
+if /i "%~1"=="supervise" goto :supervise
+
 REM --- knobs (edit these freely) ---
 REM  * --model below is the FALLBACK warm-session model only. The LIVE knob (v3, cockpit-spec.md
 REM    "Model dials & Fable delegation") is state\model-config.json (via the cockpit's Model dials
@@ -72,3 +86,8 @@ REM    here only to change the fallback used when no model-config.json (or no wa
   --watch-prompt "Run Watch mode (seneschal/SKILL.md): glance at email/Slack/calendar and escalate only if something is genuinely hot; otherwise exit."
 
 endlocal
+exit /b %ERRORLEVEL%
+
+:supervise
+"%PYEXE%" "%~dp0seneschald_supervise.py" %2 %3 %4 %5 %6 %7 %8 %9
+endlocal & exit /b %ERRORLEVEL%

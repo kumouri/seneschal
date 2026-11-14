@@ -33,9 +33,11 @@ and can alert — it just has no way to do anything about it.
 
 ### 1a. Nothing supervises the daemon after its first graceful restart
 
-`presence.py`'s `_supervise` exits **1** on a crashed task — "loud exit → the scheduled task's
-restart-on-failure relaunches us". The `seneschald` task does carry `RestartCount=3 /
-RestartInterval=PT1M`. But on a **graceful** restart — which happens on *every* merge to the deploy
+`presence.py`'s `_supervise` exits **1** on a crashed task — the comment then read "loud exit → the
+scheduled task's restart-on-failure relaunches us". The `seneschald` task does carry `RestartCount=3 /
+RestartInterval=PT1M`. (Measured since: Task Scheduler's restart-on-failure does not fire on an exit code
+at all, only on a failure to launch, so it never protected even the first process. The fix is the
+supervisor of `service-supervision-spec.md`; this watchdog stays as its backstop — rule 0 below.) But on a **graceful** restart — which happens on *every* merge to the deploy
 branch — `main()` calls `_respawn_detached()` and returns **0**. The task's own process ends
 *successfully*, and the live daemon is a detached orphan Task Scheduler can no longer see.
 
@@ -218,10 +220,13 @@ written to fix.
 
 **(b) A real service wrapper (NSSM, WinSW, or a native service).** Genuine supervision with restart
 policy, and the honest long-term answer — especially for a framework shipping to arbitrary hosts, where
-"depend on Windows Task Scheduler" is a portability constraint anyway. Not chosen *for now*: a new
+"depend on Windows Task Scheduler" is a portability constraint anyway. Not chosen *at the time*: a new
 external dependency and a rebuild of the launch path, for a problem an existing, already-scheduled
-component can cover. Worth revisiting if the watchdog proves insufficient. (On Linux and macOS the
-`/setup daemon` chapter's systemd / launchd units already supervise with `Restart=`/`KeepAlive`.)
+component could cover. **Since built**, without the dependency: `service-supervision-spec.md` — a
+stdlib supervisor that IS the `seneschald` task's process (every service host would need a stored
+password), with systemd / launchd unit settings encoding the same policy on Linux and macOS. The
+watchdog stands down while that supervisor holds its lock (rule 0, `seneschald_revive.py`) and remains
+its backstop.
 
 **(c) Battery gating.** A task carrying `DisallowStartIfOnBatteries = True` and `StopIfGoingOnBatteries
 = True` would silently defeat a revive on battery power. Inert on a desktop with no battery; on a laptop

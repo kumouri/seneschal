@@ -138,6 +138,31 @@ jobs:
       - name: Validate every tracked JSON file parses
         run: python seneschal/scripts/check_json_files.py --enforce
 
+  service-supervision:
+    name: Service supervision (${{ matrix.os }})
+    # The reload contract, tested per platform (seneschal/docs/service-supervision-spec.md §7). The
+    # python job above already runs these suites on ubuntu; this job runs them where the OS-specific
+    # halves actually execute: the Windows kill-on-close job, the Windows Stop against real processes and
+    # the control script's Stop hand-over (pwsh); os.execv keeping the pid on Linux and macOS (the
+    # property the systemd unit and the launchd agent rely on for a reload); `systemd-analyze verify` on
+    # the rendered unit and `plutil -lint` on the rendered plists. Stdlib only — no install step.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Supervision suites
+        working-directory: seneschal/scripts
+        run: >-
+          python -m unittest -v
+          test_single_instance test_seneschald_supervise test_service test_seneschald_revive
+          test_render_units test_control_queue test_seneschald_control_stop
+
   screener:
     name: Call screener typecheck + test
     runs-on: ubuntu-latest

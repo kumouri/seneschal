@@ -92,7 +92,7 @@ class Base(unittest.TestCase):
         self.repo = Path(self._tmp.name) / "checkout"
         scripts = self.repo / "seneschal" / "scripts"
         scripts.mkdir(parents=True)
-        for name in ("run-presence.cmd", "run-presence.sh"):
+        for name in ("run-presence.cmd", "run-presence.sh", "seneschald.args"):
             shutil.copy(REAL_REPO / "seneschal" / "scripts" / name, scripts / name)
         self.home = Path(self._tmp.name) / "home"
         self.home.mkdir()
@@ -134,10 +134,34 @@ class WindowsRender(Base):
         self.assertIn("-RepetitionInterval (New-TimeSpan -Minutes 10)", ps1)
         self.assertIn("register-tasks.result.json", ps1)
 
-    def test_ps1_action_points_at_the_rendered_local_launcher(self):
-        ps1 = self.plan_texts("win32")["register-tasks.ps1"]
-        want = str(self.repo).replace("/", "\\") + "\\seneschal\\state\\setup\\run-presence.local.cmd"
-        self.assertIn(want, ps1)
+    def daemon_block(self, **kw) -> str:
+        ps1 = self.plan_texts("win32", **kw)["register-tasks.ps1"]
+        start = ps1.index("# --- seneschald: the always-on presence daemon")
+        return ps1[start:ps1.index("# --- seneschald-update:")]
+
+    def test_the_task_runs_the_supervisor_directly(self):
+        """docs/service-supervision-spec.md section 4: no cmd.exe in front (schtasks /End kills only the
+        task's own process, so a wrapper would orphan the supervisor), the rendered args file, and
+        --task so the supervisor's self-upgrade can hand over to the task."""
+        block = self.daemon_block()
+        repo_win = str(self.repo).replace("/", "\\")
+        self.assertIn(repo_win + "\\seneschal\\scripts\\seneschald_supervise.py", block)
+        self.assertIn("--task seneschald", block)
+        self.assertIn("--args-file", block)
+        self.assertIn(repo_win + "\\seneschal\\state\\setup\\seneschald.args", block)
+        self.assertIn("-WorkingDirectory " + ru.ps_quote(repo_win), block)
+        self.assertNotIn("run-presence", block)
+        self.assertNotIn(".cmd", block)
+        self.assertRegex(block, r"-Execute '[^']*python\.exe'")
+
+    def test_s4u_task_starts_at_boot_and_logon_and_ignores_batteries(self):
+        block = self.daemon_block()
+        self.assertIn("-LogonType S4U", block)
+        self.assertIn("New-ScheduledTaskTrigger -AtStartup", block)
+        self.assertIn("New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME", block)
+        self.assertIn("-AllowStartIfOnBatteries", block)
+        self.assertIn("-DontStopIfGoingOnBatteries", block)
+        self.assertIn("-MultipleInstances IgnoreNew", block)
 
     def test_user_level_variant_swaps_the_principal(self):
         ps1 = self.plan_texts("win32", user_level=True)["register-tasks.ps1"]
@@ -145,6 +169,31 @@ class WindowsRender(Base):
         self.assertNotIn("-LogonType S4U", ps1)
         self.assertIn("user_level   = $true", ps1)
         self.assertIn("logged on", ps1)  # the honest session-bound caveat
+
+    def test_user_level_is_the_windowless_supervisor_at_logon(self):
+        """The no-admin fallback (spec section 6): pythonw.exe runs the supervisor, so no console window,
+        and only a logon trigger (a boot trigger needs admin)."""
+        block = self.daemon_block(user_level=True)
+        self.assertRegex(block, r"-Execute '[^']*pythonw\.exe'")
+        self.assertIn("seneschald_supervise.py", block)
+        self.assertNotIn("-AtStartup", block)
+        self.assertIn("New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME", block)
+
+    def test_args_file_rendered_with_the_dials(self):
+        self.write_models(watch="claude-haiku-4-5", slots="claude-sonnet-5")
+        args = self.plan_texts("win32")["seneschald.args"]
+        self.assertIn("RENDERED LOCAL", args)
+        self.assertIn("--watch-model claude-haiku-4-5\n", args)
+        self.assertIn("--slot-model claude-sonnet-5\n--watch-model", args)
+        self.assertIn("{repo}/seneschal/state/presence.log", args)  # expanded by the supervisor, not here
+        import seneschald_supervise as ss
+        argv = ss.parse_args_text(args, repo_root=str(self.repo))
+        self.assertEqual(argv[argv.index("--slot-model") + 1], "claude-sonnet-5")
+
+    def test_args_file_without_dials_is_the_template(self):
+        args = self.plan_texts("win32")["seneschald.args"]
+        self.assertIn("--watch-model claude-haiku-4-5-20251001", args)
+        self.assertNotIn("--slot-model", args)
 
     def test_health_listener_included_only_on_flag(self):
         ps1 = self.plan_texts("win32", with_health_listener=True)["register-tasks.ps1"]
@@ -212,6 +261,19 @@ class PosixRender(Base):
         self.assertIn("OnUnitActiveSec=10min", texts["seneschald-update.timer"])
         self.assertIn("Unit=seneschald-update.service", texts["seneschald-update.timer"])
         self.assertIn("run-seneschald-update.local.sh", texts["seneschald-update.service"])
+
+    def test_systemd_unit_encodes_the_reload_contract(self):
+        """docs/service-supervision-spec.md section 4: restart a crash after 5 s, stay down on exit 0
+        (Restart=on-failure), give up past 5 starts in 10 min, and keep the default KillMode (a reload is
+        an execv, never an exit, so it never triggers it)."""
+        svc = self.plan_texts("linux")["seneschald.service"]
+        unit, service = svc.split("[Service]", 1)
+        self.assertIn("StartLimitIntervalSec=600", unit)
+        self.assertIn("StartLimitBurst=5", unit)
+        self.assertIn("RestartSec=5\n", service)
+        self.assertNotIn("RestartSec=60", svc)
+        self.assertNotIn("KillMode=", svc.replace("default KillMode=control-group", ""))
+        self.assertNotIn("Restart=always", svc)
 
     def test_update_script_is_ff_only_and_graceful(self):
         upd = self.plan_texts("linux")["run-seneschald-update.local.sh"]
@@ -315,6 +377,11 @@ class UpdateScriptParity(Base):
         update = texts["com.seneschal.update.plist"]
         self.assertIn("<string>com.seneschal.presence</string>", presence)
         self.assertIn("<key>KeepAlive</key>", presence)
+        # Restart a non-zero exit or a crash; stay down on exit 0 (spec section 4).
+        keep = presence[presence.index("<key>KeepAlive</key>"):presence.index("<key>StandardOutPath</key>")]
+        self.assertIn("<key>SuccessfulExit</key>\n        <false/>", keep)
+        self.assertIn("<key>Crashed</key>\n        <true/>", keep)
+        self.assertNotIn("<key>KeepAlive</key>\n    <true/>", presence)
         self.assertIn("<key>RunAtLoad</key>", presence)
         self.assertIn("<string>com.seneschal.update</string>", update)
         self.assertIn("<integer>600</integer>", update)
@@ -406,6 +473,33 @@ class ScannerSelfTest(unittest.TestCase):
         self.assertEqual(scan_powershell_structure(
             "# comment with { and ' unmatched\n$a = '{'\n$b = \"}`\"\"\nif ($a) { $b }\n"), [])
 
+
+
+class NativeLint(Base):
+    """The platform's own validator over the RENDERED unit, where the platform's tool exists (CI's
+    service-supervision job runs this on ubuntu and macOS). A typo'd key in a unit file is otherwise
+    silently ignored by systemd, and a malformed plist is refused by launchd only at bootstrap time."""
+
+    def render(self, platform):
+        self.assertEqual(self.run_cli("--platform", platform, "--apply", "--install"), 0)
+
+    @unittest.skipUnless(shutil.which("systemd-analyze"), "systemd-analyze not installed")
+    def test_systemd_analyze_verify_accepts_the_unit(self):
+        self.render("linux")
+        unit = self.home / ".config" / "systemd" / "user" / "seneschald.service"
+        proc = subprocess.run(["systemd-analyze", "verify", str(unit)], capture_output=True, text=True, timeout=120)
+        complaints = [ln for ln in (proc.stdout + proc.stderr).splitlines()
+                      if "seneschald.service" in ln and any(w in ln for w in (
+                          "Unknown key", "Unknown section", "Invalid", "Failed to parse", "unknown lvalue"))]
+        self.assertEqual(complaints, [], proc.stdout + proc.stderr)
+
+    @unittest.skipUnless(shutil.which("plutil"), "plutil not installed (macOS only)")
+    def test_plutil_lints_both_plists(self):
+        self.render("darwin")
+        for name in ("com.seneschal.presence.plist", "com.seneschal.update.plist"):
+            path = self.home / "Library" / "LaunchAgents" / name
+            proc = subprocess.run(["plutil", "-lint", str(path)], capture_output=True, text=True, timeout=60)
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 
 if __name__ == "__main__":
     unittest.main()

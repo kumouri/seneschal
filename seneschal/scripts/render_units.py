@@ -9,25 +9,34 @@ modified; the setup dir is covered by the ``seneschal/state/*`` gitignore rule.
 
 Per platform:
 
-  * **win32** — ``run-presence.local.cmd`` (absolute paths; ledger model args) and
-    ``register-tasks.ps1``: every admin step of the chapter in ONE script, so the owner
-    approves it once and runs it under ONE elevation — Register-ScheduledTask ``seneschald``
-    (at logon, S4U principal, restart 1 min x999, no time limit, IgnoreNew — mirroring
-    SCHEDULING.md), ``seneschald-update`` (10-min repetition via ``wscript.exe`` +
-    ``run-seneschald-update-hidden.vbs``, mirroring PATH_A_CUTOVER.md step 5), and, with
-    ``--with-health-listener``, ``seneschal-health-listener``. The script writes per-task
-    results to ``register-tasks.result.json`` for the chapter to read back. ``--user-level``
-    renders the no-admin fallback (InteractiveToken principal — console window at logon,
-    runs only while logged on). **This tool only renders the file** — launching it (the one
-    ``Start-Process -Verb RunAs -Wait``) is the owner's/chapter's step, never Python's.
+  * **win32** — ``seneschald.args`` (the daemon's flags with the ledger's model dials, read by
+    the supervisor at every child start), ``run-presence.local.cmd`` (absolute paths; ledger
+    model args — for a hand run) and ``register-tasks.ps1``: every admin step of the chapter in
+    ONE script, so the owner approves it once and runs it under ONE elevation —
+    Register-ScheduledTask ``seneschald`` running ``seneschald_supervise.py`` DIRECTLY (no
+    ``cmd.exe`` in front: stopping the task must kill the supervisor, and through its
+    kill-on-close job the daemon), S4U principal, at startup + at logon, IgnoreNew, no time
+    limit, battery flags off (docs/service-supervision-spec.md §4), ``seneschald-update``
+    (10-min repetition via ``wscript.exe`` + ``run-seneschald-update-hidden.vbs``, mirroring
+    PATH_A_CUTOVER.md step 5), and, with ``--with-health-listener``,
+    ``seneschal-health-listener``. The script writes per-task results to
+    ``register-tasks.result.json`` for the chapter to read back. ``--user-level`` renders the
+    no-admin fallback: an InteractiveToken task at logon whose action is the venv's
+    ``pythonw.exe`` running the same supervisor — no console window, but it runs only while the
+    owner is logged on. **This tool only renders the file** — launching it (the one
+    ``Start-Process -Verb RunAs -Wait``, or ``seneschald install`` which does exactly that) is
+    the owner's step, never this module's.
   * **linux** — ``run-presence.local.sh`` + ``run-seneschald-update.local.sh`` and the
     systemd **user** units ``seneschald.service`` (ExecStart = the local launcher,
-    Restart=on-failure, ``EnvironmentFile=-%h/.config/seneschal/daemon.env`` — the token
+    Restart=on-failure + RestartSec=5 + StartLimitIntervalSec=600 / StartLimitBurst=5 and the
+    default KillMode — the reload contract encoded as unit settings, spec §4;
+    ``EnvironmentFile=-%h/.config/seneschal/daemon.env`` — the token
     home the auth-models chapter established) + ``seneschald-update.service`` /
     ``seneschald-update.timer`` (OnUnitActiveSec=10min). Staged in the setup dir;
     ``--install`` copies them to ``~/.config/systemd/user/``.
   * **darwin** — the same two local scripts plus launchd agents
-    ``com.seneschal.presence.plist`` (RunAtLoad + KeepAlive) and
+    ``com.seneschal.presence.plist`` (RunAtLoad + KeepAlive {SuccessfulExit: false, Crashed:
+    true} — restart a crash, stay down on exit 0, default 10 s ThrottleInterval) and
     ``com.seneschal.update.plist`` (StartInterval 600), both exec'ing through a
     ``/bin/sh -c`` wrapper that sources ``~/.config/seneschal/daemon.env`` first.
     ``--install`` copies them to ``~/Library/LaunchAgents/``.
@@ -192,6 +201,29 @@ def render_launcher_sh(repo: Path, models: dict, template: str | None = None) ->
         "# >>> this file. Re-render via /setup daemon (or render_units.py --apply).\n"
     )
     return _insert_after_first_line(text, banner)
+
+
+def render_args(repo: Path, models: dict, template: str | None = None) -> str:
+    """seneschald.args -> the setup dir's local copy: the ledger's watch dial replaces the
+    template's ``--watch-model`` value, the slots dial adds a ``--slot-model`` line. Paths keep
+    their ``{repo}`` token — the supervisor expands it against its own checkout at every child
+    start, so a re-render is only ever needed for a knob, never for a move."""
+    import re
+
+    text = template if template is not None else _read_template(repo, "seneschald.args")
+    text = text.replace("\r\n", "\n")
+    watch = models.get("watch")
+    if watch:
+        text = re.sub(r"(?m)^(--watch-model )\S+", lambda m: m.group(1) + watch, text)
+    slots = models.get("slots")
+    if slots:
+        text = re.sub(r"(?m)^--watch-model ", f"--slot-model {slots}\n--watch-model ", text, count=1)
+    banner = (
+        f"# >>> RENDERED LOCAL - generated {_stamp()} by render_units.py from the tracked template\n"
+        "# >>> seneschal/scripts/seneschald.args. Gitignored; edit knobs here freely (they apply on the\n"
+        "# >>> next graceful reload); never commit this file. Re-render via /setup daemon.\n"
+    )
+    return banner + text
 
 
 def _insert_after_first_line(text: str, block: str) -> str:
@@ -591,6 +623,57 @@ def _ps_register_daemon_task(name: str, launcher: str, user_level: bool) -> str:
 }}"""
 
 
+def supervisor_python(repo: Path, windowless: bool) -> str:
+    """The interpreter the ``seneschald`` task executes: the venv's ``python.exe`` (S4U, session
+    0 — no desktop to show a window on) or ``pythonw.exe`` (the user-level fallback runs in the
+    owner's session, where a console app would open a window). The venv is what ``uv sync``
+    (every Update) maintains; when it is missing at render time, the interpreter running this
+    renderer stands in, from the same directory. A missing venv later makes the task fail to
+    LAUNCH, the one failure Task Scheduler's restart-on-failure does cover."""
+    exe = "pythonw.exe" if windowless else "python.exe"
+    repo_win = str(repo).replace("/", "\\").rstrip("\\")
+    venv = repo_win + "\\.venv\\Scripts\\" + exe
+    if Path(venv).exists() or not sys.executable:
+        return venv
+    base = str(Path(sys.executable).with_name(exe))
+    return base if Path(base).exists() else venv
+
+
+def _ps_register_supervisor_task(repo: Path, user_level: bool) -> str:
+    """The ``seneschald`` task: the supervisor IS the task's process, for life
+    (docs/service-supervision-spec.md §4). No ``cmd.exe`` in front — ``schtasks /End`` kills
+    only the task's own process, so a wrapper would orphan the supervisor."""
+    repo_win = str(repo).replace("/", "\\").rstrip("\\")
+    python = supervisor_python(repo, windowless=user_level)
+    script = repo_win + "\\seneschal\\scripts\\seneschald_supervise.py"
+    args_file = repo_win + "\\seneschal\\state\\setup\\seneschald.args"
+    arguments = f'"{script}" --task {TASK_DAEMON} --args-file "{args_file}"'
+    if user_level:
+        principal = "New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited"
+        triggers = "@(New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME)"
+        detail = ("registered (user-level InteractiveToken, at logon; pythonw.exe runs the supervisor - "
+                  "no window, but it runs only while you are logged on) + started")
+    else:
+        principal = "New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType S4U -RunLevel Limited"
+        triggers = "@((New-ScheduledTaskTrigger -AtStartup), (New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME))"
+        detail = ("registered (S4U session 0, at startup + at logon; seneschald_supervise.py restarts the "
+                  "daemon on a reload or a crash) + started")
+    return f"""try {{
+    # The supervisor is the task's process. RestartCount covers only a failure to LAUNCH (a missing
+    # venv): Task Scheduler's restart-on-failure never fires on an exit code, so the supervisor - not
+    # this setting - is what restarts the daemon.
+    $action    = New-ScheduledTaskAction -Execute {ps_quote(python)} -Argument {ps_quote(arguments)} -WorkingDirectory {ps_quote(repo_win)}
+    $triggers  = {triggers}
+    $settings  = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+    $principal = {principal}
+    Register-ScheduledTask -TaskName {ps_quote(TASK_DAEMON)} -Action $action -Trigger $triggers -Principal $principal -Settings $settings -Force | Out-Null
+    Start-ScheduledTask -TaskName {ps_quote(TASK_DAEMON)}
+    Add-Result {ps_quote(TASK_DAEMON)} $true {ps_quote(detail)}
+}} catch {{
+    Add-Result {ps_quote(TASK_DAEMON)} $false "$_"
+}}"""
+
+
 def render_register_ps1(
     repo: Path, user_level: bool = False, with_health_listener: bool = False
 ) -> str:
@@ -599,7 +682,6 @@ def render_register_ps1(
     (step 5) exactly. Rendered for the OWNER to run; Python never launches it."""
     repo_win = str(repo).replace("/", "\\").rstrip("\\")
     setup_win = repo_win + "\\seneschal\\state\\setup"
-    launcher = setup_win + "\\run-presence.local.cmd"
     vbs = repo_win + "\\seneschal\\scripts\\run-seneschald-update-hidden.vbs"
     health_cmd = repo_win + "\\seneschal\\scripts\\run-health-listener.cmd"
     result_json = setup_win + "\\register-tasks.result.json"
@@ -607,8 +689,9 @@ def render_register_ps1(
     if user_level:
         header_mode = (
             "# USER-LEVEL FALLBACK (no admin): tasks register with the InteractiveToken principal.\n"
-            "# Honest caveats: a console window appears at logon (no session-0 hiding without S4U),\n"
-            "# and the tasks run only while this user is logged on. Run this WITHOUT elevation:\n"
+            "# The daemon task runs the supervisor under pythonw.exe, so it shows no window; the honest\n"
+            "# caveat is that the tasks run only while this user is logged on (no supervision before\n"
+            "# logon, none after logoff). Run this WITHOUT elevation:\n"
             "#   pwsh -NoProfile -ExecutionPolicy Bypass -File <this file>\n"
         )
     else:
@@ -621,7 +704,7 @@ def render_register_ps1(
     blocks = [
         f"""# register-tasks.ps1 - RENDERED {_stamp()} by render_units.py. Gitignored; never commit.
 # Registers the seneschal daemon layer with Windows Task Scheduler:
-#   * {TASK_DAEMON}                 - the always-on presence daemon (at logon)
+#   * {TASK_DAEMON}                 - the always-on presence daemon, under seneschald_supervise.py
 #   * {TASK_UPDATE}          - the 10-min merge detector (windowless via wscript + vbs)"""
         + (
             f"\n#   * {TASK_HEALTH}  - the phone health/presence feed listener"
@@ -642,8 +725,8 @@ function Add-Result {{
     else {{ Write-Host ('  FAIL  ' + $Task + ' - ' + $Detail) }}
 }}
 
-# --- {TASK_DAEMON}: the always-on presence daemon ---------------------------------
-{_ps_register_daemon_task(TASK_DAEMON, launcher, user_level)}""",
+# --- {TASK_DAEMON}: the always-on presence daemon, under its supervisor ------------
+{_ps_register_supervisor_task(repo, user_level)}""",
         f"""# --- {TASK_UPDATE}: poll origin/main every 10 min; merge = deploy ------------
 # No admin needed by the task itself (git + a control-queue drop); registered here so one
 # approved run covers everything. wscript keeps it windowless (a bare pwsh.exe task would
@@ -689,14 +772,24 @@ def render_systemd_units(repo: Path) -> dict[str, str]:
     daemon = f"""{banner}[Unit]
 Description=Seneschal presence daemon (warm chat, reminders, comms-peek)
 After=network-online.target
+# The crash budget (docs/service-supervision-spec.md section 4): more than 5 starts in 10 min and
+# systemd stops restarting, the same give-up as the Windows supervisor's. Note it counts EVERY
+# start, a manual `systemctl --user start` included.
+StartLimitIntervalSec=600
+StartLimitBurst=5
 
 [Service]
 Type=simple
 # The token home the setup wizard's auth-models chapter established ('-' = ok when absent).
 EnvironmentFile=-%h/.config/seneschal/daemon.env
 ExecStart={setup_posix}/run-presence.local.sh
+# The reload contract as unit settings: a graceful reload is an in-place os.execv, so the main
+# pid never exits and systemd sees nothing. Exit 0 (a shutdown, or the daemon's own crash-loop
+# guard) stays down; any other exit or a killing signal is a crash, restarted after 5 s. The
+# default KillMode=control-group is kept on purpose: it acts only on a stop or a crash, never on a
+# reload, because a reload is not an exit.
 Restart=on-failure
-RestartSec=60
+RestartSec=5
 
 [Install]
 WantedBy=default.target
@@ -758,10 +851,18 @@ def render_launchd_plists(repo: Path) -> dict[str, str]:
     repo_posix = str(repo).replace("\\", "/").rstrip("/")
     setup_posix = repo_posix + "/seneschal/state/setup"
     log_path = xml_escape(repo_posix + "/seneschal/state/launchd-presence.log")
+    # The reload contract as agent settings (docs/service-supervision-spec.md section 4): a reload
+    # is an in-place os.execv (same pid, launchd sees nothing); a non-zero exit or a crash signal
+    # restarts, exit 0 stays down; the default 10 s ThrottleInterval spaces respawns.
     presence_schedule = f"""    <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
-    <true/>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
     <key>StandardOutPath</key>
     <string>{log_path}</string>
     <key>StandardErrorPath</key>
@@ -798,6 +899,9 @@ def build_plan(
         raise RenderError(f"unknown platform {platform!r} (choose from: {', '.join(PLATFORMS)})")
     plan: list[dict] = []
     if platform == "win32":
+        plan.append({"name": "seneschald.args",
+                     "text": render_args(repo, models),
+                     "executable": False, "install_to": None})
         plan.append({"name": "run-presence.local.cmd",
                      "text": render_launcher_cmd(repo, models),
                      "executable": False, "install_to": None})

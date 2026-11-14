@@ -85,23 +85,31 @@ invokes the orchestrator in one mode — but with the daemon owning them, that's
 `presence.py` runs resident (assuming an always-on host) and is event-driven, so it's ~free while idle.
 It owns Telegram chat (a warm `claude` session), fires reminders, and runs the comms-peek.
 
-**Don't put the python command in the Task Scheduler "Arguments" field** — its quoting/line-continuation
-rules will mangle a multi-flag command (you'll get a Python `exit code 2` = argparse rejected the args).
-Instead, point the task at the wrapper script **`run-presence.cmd`**, which holds the knobs in a normal
-file and sets the billing-safe environment:
+**The task's process is the supervisor, not the daemon** (`../docs/service-supervision-spec.md`).
+Task Scheduler supervises only the first process of a task instance, and its restart-on-failure does
+not fire on a non-zero exit code — so a task pointed straight at the daemon (or at `run-presence.cmd`)
+loses supervision at the first graceful reload and never restarts a crash. `seneschald_supervise.py`
+stays up for the task's whole life and restarts the daemon itself: at once on a reload (exit 75),
+with backoff on a crash, never on exit 0. The daemon's flags live in a file it reads at every child
+start (`seneschald.args`; `/setup daemon` renders a local copy with your model dials), so the task's
+Arguments field stays short and quoting-safe:
 
 ```
-Program/script:  %USERPROFILE%\workspace\repos\seneschal\seneschal\scripts\run-presence.cmd
-(Arguments:      — leave empty —)
+Program/script:  %USERPROFILE%\workspace\repos\seneschal\.venv\Scripts\python.exe
+Arguments:       "%USERPROFILE%\workspace\repos\seneschal\seneschal\scripts\seneschald_supervise.py" --task seneschald --args-file "%USERPROFILE%\workspace\repos\seneschal\seneschal\state\setup\seneschald.args"
 Start in:        %USERPROFILE%\workspace\repos\seneschal
-Trigger:         At log on
+Run as:          whether logged on or not, S4U (session 0, no window, no stored password)
+Triggers:        At startup + At log on
 Settings:        "If the task is already running … Do not start a new instance"
-                 "If the task fails, restart every 1 minute"
+                 no time limit; start on batteries; don't stop on batteries
 ```
 
-(The daemon also self-guards with a single-instance lock, so an accidental second launch just exits.)
-Edit the model / idle / peek knobs inside `run-presence.cmd`. To run it by hand for a smoke test, just
-double-click it or run `seneschal\scripts\run-presence.cmd` in a terminal.
+(No `cmd.exe` in front: ending the task kills only its own process, and a wrapper would orphan the
+supervisor. The daemon also self-guards with a kernel-held single-instance lock, so an accidental
+second launch just exits.) `seneschald stop | start | restart | status | logs` drive it
+(`service.py`). For a smoke test by hand, `seneschal\scripts\run-presence.cmd supervise` runs the
+supervisor in a terminal; plain `run-presence.cmd` runs the daemon unsupervised, with the knobs
+inside that file.
 
 **Subscription billing (important).** The warm session is the `claude` **CLI**, which bills against the
 Claude subscription — *not* the metered API. One-time:
@@ -162,7 +170,8 @@ wall of 503s (the backend still binds loopback and rejects non-loopback clients)
 
 **The watchdog rides the `seneschald-update` cycle.** Besides the ff-pull + graceful restart, each
 cycle stamps `state/presence-health.json` and **revives a dead daemon** by starting the `seneschald`
-task — the decision is `seneschald_revive.py`'s (at most 3 revivals per 60 min, a revive counts only if
+task — the decision is `seneschald_revive.py`'s (it stands down while the supervisor holds its lock, so
+it acts only when the supervisor itself is gone; at most 3 revivals per 60 min, a revive counts only if
 the daemon then stays up 90 s; vetoed while `state/seneschald-stopped` (written by `-Action Stop`) or
 `state/seneschald-crashloop` (the daemon's own crash-loop guard gave up) exists — see
 `../docs/seneschald-revive-spec.md`). It also compares `~/.claude.json`'s account with the account the

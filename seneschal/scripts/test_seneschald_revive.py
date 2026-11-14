@@ -316,6 +316,56 @@ class CrashloopSentinelUnit(unittest.TestCase):
         self.assertEqual(result["reason"], "deliberately-stopped")
 
 
+class SupervisedRuleUnit(unittest.TestCase):
+    """Rule 0 — a live seneschald_supervise.py owns the daemon (docs/service-supervision-spec.md §5). The
+    probe is the supervisor's KERNEL lock, so "live" means a process holds it right now, not that a
+    report file says so. Nobody holding it puts every other rule back exactly as before: the watchdog is
+    the supervisor's backstop."""
+
+    def setUp(self):
+        import single_instance as si
+        self.si = si
+        self.dir = tempfile.mkdtemp()
+        self.health_path = os.path.join(self.dir, mr.HEALTH_FILE_NAME)
+        self.lock_path = os.path.join(self.dir, mr.SUPERVISOR_LOCK_NAME)
+
+    def test_a_live_supervisor_stands_the_watchdog_down(self):
+        lock = self.si.InstanceLock(self.lock_path)
+        self.assertTrue(lock.acquire())
+        try:
+            result = mr.decide(self.dir, NOW)
+        finally:
+            lock.release()
+        self.assertFalse(result["revive"])
+        self.assertEqual(result["reason"], "supervised")
+
+    def test_supervised_wins_over_the_sentinels_and_leaves_bookkeeping_alone(self):
+        window_start = NOW - timedelta(minutes=10)
+        _write_health(self.health_path, revivals=2, revival_window_start=_z(window_start), revival_gave_up=False)
+        _write_raw(os.path.join(self.dir, mr.STOPPED_SENTINEL_NAME), "")
+        lock = self.si.InstanceLock(self.lock_path)
+        self.assertTrue(lock.acquire())
+        try:
+            result = mr.decide(self.dir, NOW)
+        finally:
+            lock.release()
+        self.assertEqual(result["reason"], "supervised")
+        self.assertEqual(result["next_state"]["revivals"], 2)
+
+    def test_a_dead_supervisor_is_the_backstop_case(self):
+        """The lock FILE left behind by a supervisor that died is not a live supervisor: revive as before."""
+        lock = self.si.InstanceLock(self.lock_path)
+        self.assertTrue(lock.acquire())
+        lock.release()
+        self.assertTrue(os.path.exists(self.lock_path))
+        result = mr.decide(self.dir, NOW)
+        self.assertTrue(result["revive"])
+
+    def test_the_lock_name_is_the_supervisors(self):
+        import seneschald_supervise as ss
+        self.assertEqual(os.path.basename(ss.Paths(self.dir).lock), mr.SUPERVISOR_LOCK_NAME)
+
+
 class RecordHealthyUnit(unittest.TestCase):
     def test_returns_full_reset(self):
         result = mr.record_healthy()

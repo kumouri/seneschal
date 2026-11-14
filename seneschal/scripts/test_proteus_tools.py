@@ -930,10 +930,13 @@ class CompUnknownIsFlagged(unittest.TestCase):
     def test_only_warns_on_roles_that_reach_the_funnel(self):
         # Unconditional, this fires on most of the board — wallpaper, not a signal. A role that
         # would never be worked up has nothing for the warning to protect.
+        # Posted "yesterday", not a fixed date: recency decays with wall-clock age, and a hard-coded
+        # date aged the strong role below COMP_WARN_FLOOR (a time bomb, not a bug).
+        yesterday = time.strftime("%Y-%m-%d", time.localtime(time.time() - 86400))
         strong = {"title": "Senior Backend Engineer, AI Agents", "company": "x", "location": "Remote - US",
-                  "remote": True, "posted_at": "2026-07-16", "description": "java spring llm ai agent " * 30}
+                  "remote": True, "posted_at": yesterday, "description": "java spring llm ai agent " * 30}
         weak = {"title": "Warehouse Associate", "company": "x", "location": "Remote - US",
-                "remote": True, "posted_at": "2026-07-16", "description": "lifting boxes"}
+                "remote": True, "posted_at": yesterday, "description": "lifting boxes"}
         strong_scored = score_jobs.score_job(strong, PROFILE)
         weak_scored = score_jobs.score_job(weak, PROFILE)
         self.assertGreaterEqual(strong_scored["match_percent"], score_jobs.COMP_WARN_FLOOR)

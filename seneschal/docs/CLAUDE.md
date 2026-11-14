@@ -38,6 +38,9 @@ specs and carry no status.
   stream events, never a cap.
 - `seneschald-revive-spec.md` — **PARTIAL(watchdog side BUILT; the presence.py halves of §8/§9
   pending)** — revives a dead daemon; §9 catches it alive on the wrong account.
+- `service-supervision-spec.md` — **PARTIAL(built and CI-tested on all three OSes; the UAC-prompting
+  host run of the live probe is owed)** — what restarts the daemon on each OS: systemd / launchd unit
+  settings, a stdlib supervisor as the Windows task's process, the `seneschald` verbs.
 - `stacked-pr-branch-deletion-spec.md` — **BUILT** — deleting a branch used to close every PR stacked
   on it.
 - `mid-turn-interleave-spec.md` — **PARTIAL(gate module BUILT; daemon wiring pending)** — no true
